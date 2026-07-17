@@ -1,0 +1,587 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>9. Logs, Softmax &amp; Cross-Entropy — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped mobile safety: the two side-by-side demo panels and the
+   KaTeX-bearing ledgers are wider than a phone. Collapse the grids to one
+   column and let each ledger scroll inside its own box on narrow screens so
+   the page body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .d1-grid, .d2-grid { grid-template-columns: 1fr !important; }
+  /* Let ledgers (including those inside .box) scroll in their own box if a
+     KaTeX row is intrinsically wider than a phone — prose columns still wrap
+     (no white-space:nowrap), so this only bites the genuinely wide rows. */
+  table.ledger { display: block; overflow-x: auto; }
+}
+</style>
+</head>
+<body data-page="09-logs-softmax-cross-entropy.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine</span>
+    <h1>Logs, Softmax &amp; Cross-Entropy</h1>
+    <p class="subtitle">Turning "make the data likely" into a loss a computer can actually evaluate. We feel a real
+      underflow crash first, fix it with logs, meet softmax and its temperature knob, and land on the one loss the
+      whole LLM track runs on — plus the miracle cancellation that made it win.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:softmax-CE beat 1]</b> · <b>[THREAD:paper-vs-machine beat 0]</b>. This page installs the objective
+      the <b>LLM track's entire loss</b> is built from (page&nbsp;45 onward). It also opens a thread that outlives
+      Part I: <em>the math on paper and the math in the machine are not the same math</em>. You'll feel it here as a
+      product that underflows to exactly <code>0.0</code>; it reopens on page&nbsp;15 as a gradient that prints
+      <code>1.4e-08</code> where paper says zero. Watch for the tag.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in the "Underflow, felt" worked box + Demo 1 directly below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A 500-token sequence, each token predicted with probability $0.1$. To score the whole sequence you multiply the
+      500 probabilities together in <code>float32</code>, then take the log. What comes out?
+      <b>(a)</b> a tiny-but-fine number like <code>1e-40</code>; <b>(b)</b> exactly <code>0.0</code> — and then the
+      log is <code>-inf</code> and the run dies; <b>(c)</b> about <code>0.1</code>. Commit to one, then watch it
+      happen in Demo&nbsp;1.
+    </div>
+
+    <!-- ===================== LOGS ===================== -->
+    <h2>Logs — only the identities that earn their place</h2>
+    <p>Four identities carry everything on this page. You already know them; the point is <em>which</em> four, and
+      why the first one is the entire reason log-space exists in machine learning.</p>
+    <p>$$\log(ab)=\log a+\log b,\qquad \log(a^n)=n\log a,\qquad e^{\log x}=x,\qquad \log_b x=\frac{\ln x}{\ln b}.$$</p>
+    <p>The first turns a <em>product</em> of many probabilities into a <em>sum</em> of log-probabilities — and a sum
+      does not underflow. That is the whole trick, and we'll feel why in a moment.</p>
+
+    <div class="box rule"><span class="box-title">📐 Convention: $\log=\ln$, and loss is in nats</span>
+      In machine learning $\log$ means the natural log $\ln$, always — never base 10, never base 2. A loss measured
+      with $\ln$ is in <b>nats</b>. Want bits instead? Divide by $\ln 2 = 0.6931$. And <b>perplexity</b> is just the
+      loss exponentiated, $\mathrm{PPL}=e^{\mathcal L}$: a loss of $2.0$ nats is a perplexity of $e^{2.0}\approx7.39$
+      — "as confused as picking uniformly among $7.4$ words."
+    </div>
+
+    <p style="color:var(--text-dim);font-size:.92rem;border-left:2px solid var(--border);padding-left:12px">
+      <b>Translation (what papers call these).</b> We index the vocabulary with $v \in [0, V)$ and write the class
+      count $V$. Most ML texts write $K$ for the number of classes and <code>vocab_size</code> in code; in this
+      course $k$ is reserved for the optimizer step, so classes get $v$/$V$. The fact "$\ln V$ nats at
+      initialization" is the same fact those texts write "$\ln K$."
+    </p>
+
+    <!-- ===================== UNDERFLOW ===================== -->
+    <h2>Underflow, felt before it's fixed</h2>
+    <p>Here is the crash the PREDICT box asked about. Scoring a sequence means multiplying its per-token
+      probabilities. Do it naively and the machine does not give you a small number — it gives you <em>nothing</em>.</p>
+
+    <div class="box worked"><span class="box-title">✍️ The product that dies</span>
+      <p>Multiply $0.1$ by itself 500 times:</p>
+      <p>$$\prod_{i=1}^{500} 0.1 = 10^{-500}.$$</p>
+      <p>The smallest <em>normal</em> <code>float32</code> is about $1.18\times10^{-38}$; the smallest
+        <em>subnormal</em> is about $1.4\times10^{-45}$. So $10^{-500}$ is not "very small" — it is <b>exactly
+        <code>0.0</code></b> in <code>float32</code> (and in <code>bf16</code>, which shares the same exponent
+        range). Then <code>log(0.0) = -inf</code>, and <code>-inf * 0 = nan</code>, and your run is dead on step 1.</p>
+      <p>Now do it in log-space instead — turn the product into a sum with $\log(ab)=\log a+\log b$:</p>
+      <p>$$\sum_{i=1}^{500}\ln(0.1) = 500 \times (-2.302585) = \mathbf{-1151.29}.$$</p>
+      <p>A perfectly ordinary floating-point number. Nothing overflowed, nothing underflowed. The two lines compute
+        the <em>same</em> quantity, $\ln\big(\prod 0.1\big)=\sum\ln 0.1$ — one is a corpse, the other is fine.</p>
+    </div>
+
+    <div class="box predict"><span class="box-title">🔮 Predict resolved</span>
+      The answer was <b>(b)</b>: $\prod 0.1 = 10^{-500}$ rounds to exactly <code>0.0</code> in <code>float32</code>,
+      <code>log(0.0)</code> is <code>-inf</code>, and the run dies. Summing logs sidesteps it entirely. Drive it
+      yourself in Demo&nbsp;1 — the left panel is the corpse, the right panel is the fix.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Not an optimization — a prerequisite</span>
+      <b>[THREAD:paper-vs-machine beat 0]</b> Working in log-space is not a speed trick. It is the difference between
+      a training run that exists and one that returns <code>nan</code> on the first step. This is the trunk's first
+      encounter with a lesson that never leaves: <b>paper math and machine math are not the same math.</b> Page&nbsp;15
+      reopens it — there, a gradient that "should be zero" prints <code>1.4e-08</code>, and knowing why keeps you from
+      chasing a bug that isn't one.
+    </div>
+
+    <!-- ===================== DEMO 1 ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the sequence length and per-token probability. The <b>naive product</b> panel computes
+      $\prod q$ the way you'd first write it; watch it hit <code>0</code> and its log go to <code>-Infinity</code>.
+      The <b>sum-of-logs</b> panel computes $\sum\ln q$ and stays comfortable. The third strip feeds a big logit to a
+      naive softmax and to the stable one — same math, one returns <code>NaN</code>.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Underflow, felt <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="controls" id="d1-ctrls"></div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px" class="d1-grid">
+          <div class="readout" id="d1-naive" style="text-align:center"></div>
+          <div class="readout" id="d1-logs" style="text-align:center"></div>
+        </div>
+        <div class="readout" id="d1-soft" style="margin-top:12px"></div>
+      </div>
+    </div>
+
+    <!-- ===================== LOGSUMEXP ===================== -->
+    <h2>The log-sum-exp trick — exact, not a hack</h2>
+    <p>Softmax needs $\sum_j e^{z_j}$, and exponentials overflow just as eagerly as products underflow:
+      $e^{88.7}$ already exceeds the <code>float32</code> maximum of about $3.4\times10^{38}$. The fix you will see in
+      every framework's source is to subtract the largest logit before exponentiating:</p>
+    <p>$$\log\sum_{j} e^{z_j} \;=\; m + \log\sum_{j} e^{\,z_j - m},\qquad m=\max_j z_j.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$z_j$</td><td>the $j$-th logit (any real number, dimensionless)</td><td>scalar</td><td>the network's output</td></tr>
+        <tr><td>$m$</td><td>the largest logit, $\max_j z_j$</td><td>scalar</td><td>computed from $z$</td></tr>
+        <tr><td>$e^{\,z_j-m}$</td><td>shifted exponential — the biggest is $e^0=1$, the rest $\le 1$</td><td>scalar</td><td>after subtracting $m$</td></tr>
+        <tr><td>$V$</td><td>number of classes / vocab size (the sum runs $j=1..V$)</td><td>scalar</td><td>$151{,}936$ for Qwen3-8B</td></tr>
+      </tbody>
+    </table>
+
+    <p>After subtracting $m$, the largest exponent is $e^0=1$ and every other term is at most $1$ — they can only
+      <em>underflow</em> to $0$, which is harmless in a sum. Crucially, this identity is <b>exact</b>: it is algebra,
+      not an approximation. State that out loud, because it looks like a hack and is not one.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Why <code>F.cross_entropy</code> wants logits, not probabilities</span>
+      This is exactly why <code>F.cross_entropy(logits, targets)</code> takes raw <b>logits</b> and not a probability
+      vector: it fuses softmax + log + NLL into one numerically-stable kernel that does the max-subtraction for you.
+      Writing <code>log(softmax(x))</code> as two separate ops is a real bug — it works on friendly inputs and returns
+      <code>nan</code> on the large logits a mid-training network actually produces. <em>Never hand a loss function
+      probabilities when it will take logits.</em>
+    </div>
+
+    <!-- ===================== SOFTMAX ===================== -->
+    <h2>Softmax — turning logits into a distribution</h2>
+    <p>Softmax takes a vector of logits and squashes it into a probability distribution: everything positive, summing
+      to one.</p>
+    <p>$$p_i=\operatorname{softmax}(z)_i=\frac{e^{z_i}}{\sum_{j=1}^{V} e^{z_j}}.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$z$</td><td>logits — the raw network outputs (any real, dimensionless)</td><td>$(V,)$, batched $(B,S,V)$</td><td>the final linear layer</td></tr>
+        <tr><td>$p_i$</td><td>probability assigned to class $i$; $p_i>0$, $\sum_i p_i=1$</td><td>scalar in $(0,1)$</td><td>softmax of $z$</td></tr>
+        <tr><td>$\sum_j e^{z_j}$</td><td>the normalizer (partition function) — one stable sum via log-sum-exp</td><td>scalar</td><td>the denominator</td></tr>
+        <tr><td>$V$</td><td>vocab / class count</td><td>scalar</td><td>$151{,}936$ (Qwen3-8B)</td></tr>
+      </tbody>
+    </table>
+
+    <p>Two properties do real work later, and you'll turn both of them yourself in the demo:</p>
+    <ul>
+      <li><b>Shift invariance:</b> $\operatorname{softmax}(z+c)=\operatorname{softmax}(z)$ — adding the same constant
+        to every logit changes <em>nothing</em>. Only <em>differences</em> between logits matter. This is the very
+        same fact that licenses subtracting the max above.</li>
+      <li><b>Temperature:</b> $\operatorname{softmax}(z/T)$. As $T\to0$ the biggest logit wins outright (greedy,
+        one-hot); at $T=1$ you get the model's own distribution; as $T\to\infty$ everything flattens to uniform. You
+        have turned this exact slider in ComfyUI and every LLM UI — <b>[THREAD:paper-vs-machine]</b> it is page&nbsp;1's
+        "magnitude = confidence" fact wearing a sampling hat.</li>
+    </ul>
+
+    <!-- ===================== WORKED ===================== -->
+    <h2>Worked to a number — the canonical logits</h2>
+    <div class="box worked"><span class="box-title">✍️ $z=[2.0,\,1.0,\,0.1]$, true class $c=0$</span>
+      <table class="ledger">
+        <tbody>
+          <tr><td>Exponentiate</td><td>$e^z=[\,e^{2.0},\,e^{1.0},\,e^{0.1}\,]$</td><td>$=[7.389056,\ 2.718282,\ 1.105171]$</td></tr>
+          <tr><td>Sum</td><td>$\sum_j e^{z_j}$</td><td>$=11.212509$</td></tr>
+          <tr><td>Normalize</td><td>$\hat y = e^z / 11.212509$</td><td>$=[\mathbf{0.659001},\ 0.242433,\ 0.098566]$</td></tr>
+          <tr><td>Loss</td><td>$\mathcal L=-\ln p_{\text{correct}}=-\ln(0.659001)$</td><td>$=\mathbf{0.417030}$ nats</td></tr>
+        </tbody>
+      </table>
+      <p>The three probabilities sum to $1$ (check: $0.659001+0.242433+0.098566=1.000000$). The loss is simply the
+        negative log of the single probability you handed the right class.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ One canonical vector, everywhere</span>
+      Use $[2.0,\,1.0,\,0.1]$ for every softmax example in this course — temperature, top-$k$, top-$p$, the whole lot.
+      Two rivals are <b>retired</b>: the 4-way $[2.0,1.0,0.1,-1.0]\to\mathcal L=0.4491$ and the 3-way
+      $[2,1,0]$. If you see either in an old note, it predates the freeze (<code>constants.md</code> §9.2).
+    </div>
+
+    <!-- ===================== DEMO 2 ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      The top chart is the live probability distribution; the bottom chart is the <b>gradient</b> $p-y$ — the exact
+      signal that trains the network. Drag temperature to $0$ and watch it collapse to greedy. Press <b>+3 to all
+      logits</b> and watch <em>nothing</em> move: shift invariance, seen not asserted. At the defaults the loss
+      readout reads <b>0.417030</b>.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Softmax + temperature bench · $z=[2.0,1.0,0.1]$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="d2-grid">
+          <div>
+            <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">probabilities $p$ (sum to 1)</div>
+            <canvas id="d2-prob" height="200"></canvas>
+          </div>
+          <div>
+            <div style="font-size:.85rem;color:var(--text-dim);margin-bottom:4px">gradient $p-y$ (signed; sums to 0)</div>
+            <canvas id="d2-grad" height="200"></canvas>
+          </div>
+        </div>
+        <div class="controls" id="d2-ctrls"></div>
+        <p style="margin:10px 0 0">
+          True class:
+          <label class="opt-inline"><input type="radio" name="d2-cls" value="0" checked> class 0</label>
+          <label class="opt-inline"><input type="radio" name="d2-cls" value="1"> class 1</label>
+          <label class="opt-inline"><input type="radio" name="d2-cls" value="2"> class 2</label>
+          <button class="btn secondary" id="d2-shift" type="button">+3 to all logits</button>
+        </p>
+        <div class="readout" id="d2-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== CE = NLL ===================== -->
+    <h2>Cross-entropy is just "make the data likely"</h2>
+    <p>The general cross-entropy between a target distribution $y$ and a prediction $p$ is
+      $\mathcal L_{\text{CE}}=-\sum_{i=1}^{V} y_i\log p_i$. In classification the target is <em>one-hot</em> — a $1$
+      on the correct class, $0$ everywhere else — so every term but one is multiplied by zero and the whole sum
+      collapses:</p>
+    <p>$$\mathcal L_{\text{CE}}=-\sum_{i=1}^{V} y_i\log p_i \;\xrightarrow{\text{one-hot }y}\; \mathcal L=-\log p_{\text{correct}}.$$</p>
+
+    <div class="box key"><span class="box-title">🔑 The formula, demystified</span>
+      For a one-hot target, cross-entropy is nothing but the <b>negative log of the single probability you assigned to
+      the right token</b>. The other $V-1$ terms vanish. There is no cleverness to memorize — the intimidating sum is
+      one number in disguise.
+    </div>
+
+    <p>And it isn't a loss someone dreamed up. Start from the likelihood of your whole dataset,
+      $\prod_n p_\theta(y_n\mid x_n)$ — you want to make it large. But a product of many probabilities underflows
+      (you just watched it die). Take logs, flip the sign to make it a <em>minimization</em>, and you have exactly
+      $-\sum_n\log p_\theta(y_n\mid x_n)$ = negative log-likelihood = cross-entropy. <b>Cross-entropy isn't invented;
+      it's "make the data likely," rewritten so a computer can survive it.</b></p>
+
+    <div class="box rule"><span class="box-title">📐 Forward pointer, not a duplicate</span>
+      <b>[THREAD:loss-unification beat 1]</b> The full maximum-likelihood derivation — and the surprise that
+      <em>MSE is the same principle</em> under a Gaussian output assumption (seeded on page&nbsp;8) — is page&nbsp;12's
+      job. Here we plant the seed: an LLM's next-token loss and a diffusion model's MSE are both negative
+      log-likelihood under different assumed output distributions. Two losses, one idea.
+    </div>
+
+    <!-- ===================== MIRACLE ===================== -->
+    <h2>The miracle cancellation</h2>
+    <p>Differentiate cross-entropy-after-softmax with respect to the logits and something remarkable happens. The
+      softmax's messy derivative and the log's $1/x$ annihilate each other, and what survives is the simplest
+      gradient in the course:</p>
+    <p>$$\frac{\partial\mathcal L}{\partial z_i}=p_i-y_i\qquad(\text{"predicted minus actual"}).$$</p>
+    <p>For the canonical logits with true class $0$:</p>
+    <p>$$\frac{\partial\mathcal L}{\partial z}=\hat y - y=[\,0.659001-1,\ 0.242433,\ 0.098566\,]
+      =[\mathbf{-0.340999},\ +0.242433,\ +0.098566].$$</p>
+
+    <div class="box key"><span class="box-title">🔑 Why cross-entropy beat MSE for classification</span>
+      The gradient is <b>predicted minus actual</b>: push the right class's logit up, push the rest down, each in
+      proportion to how wrong you were. It <b>sums to zero, always</b> — a direct consequence of shift invariance, and
+      a free sanity check. And it does <em>not</em> vanish: a confidently-wrong output has $p_{\text{correct}}\to0$, so
+      the gradient magnitude $\to 1$ — <b>maximally wrong means maximally corrected</b>. Pair MSE with a sigmoid
+      instead and that same confidently-wrong output gets a <em>tiny</em> gradient and barely learns. That contrast is
+      the whole reason classification uses cross-entropy.
+    </div>
+
+    <p style="color:var(--text-dim)">We <em>state</em> $p-y$ here and use it; we don't yet prove it. It is earned
+      twice more: page&nbsp;12 derives it from maximum likelihood, and page&nbsp;14 rederives it as the very first
+      gradient of the backprop pass, where it is the network's "grace moment."</p>
+
+    <!-- ===================== ANCHOR ===================== -->
+    <h2>A number you can check on step 0</h2>
+    <div class="box rule"><span class="box-title">📐 Random-init loss $=\ln V$</span>
+      A freshly-initialized model has no idea which token comes next, so it spreads its probability uniformly across
+      all $V$ classes: $p_{\text{correct}}=1/V$, and $\mathcal L=-\ln(1/V)=\ln V$. For Qwen3-8B with
+      $V=151{,}936$:
+      $$\mathcal L_{\text{init}}=\ln(151{,}936)=\mathbf{11.93}\ \text{nats},\qquad \mathrm{PPL}=e^{11.93}=V\ \text{exactly}.$$
+      <b>If step 0 of a training run doesn't print about $11.9$, something is already wrong</b> — a genuinely useful
+      first check. (It is <b>not</b> $11.76$; that is Llama-3's $V=128{,}256$, retired here, <code>constants.md</code>
+      §9.1.) <b>[THREAD:Qwen3-8B]</b> — the same $V=151{,}936$ you'll count parameters against on page&nbsp;36 and
+      pay for as a $622$&nbsp;MB logits tensor on page&nbsp;46.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four traps worth naming</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Softmax outputs are calibrated confidences"</span>
+      They sum to $1$ by construction — that is arithmetic, not calibration. Modern networks are systematically
+      <em>over</em>confident, and whether large LLMs are well-calibrated in 2026 is genuinely contested (Guo et&nbsp;al.
+      2017 showed image classifiers are miscalibrated; RLHF appears to degrade calibration further, but it's
+      unsettled). Treat a $0.92$ softmax output as a ranking, not a promise.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Temperature changes what the model knows"</span>
+      It changes only the <em>sampling</em> decision. The logits are identical at every temperature; $T$ reshapes the
+      distribution you draw from, not the network. Verify it yourself: same prompt and seed, different $T$ — same
+      logits, and the +3 button in Demo&nbsp;2 makes the analogous point for shift.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Softmax is a soft <em>max</em>"</span>
+      It's a soft <b>arg</b>max — it returns a distribution over <em>which index</em> wins, not the winning value. The
+      name is a historical misnomer; reading it as "soft argmax" prevents a surprising amount of confusion.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Cross-entropy is a classification thing, irrelevant to diffusion"</span>
+      An LLM's next-token prediction <em>is</em> a $V$-way classification, and cross-entropy is its only loss.
+      Diffusion uses MSE — but MSE is itself the negative log-likelihood of a fixed-variance Gaussian, so both are the
+      same "make the data likely" principle under different output assumptions. Page&nbsp;12 collects the unification;
+      page&nbsp;8 planted it.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: bf16 vs fp16 — why range beats precision for training</summary><div>
+      <p>Both are 16-bit floats, but they split the bits differently. <b>bf16</b> keeps $8$ exponent bits — the same
+        dynamic range as <code>float32</code>, about $10^{\pm38}$ — and spends only $7$ bits on the mantissa.
+        <b>fp16</b> keeps $10$ mantissa bits (more precision) but only $5$ exponent bits, so its range is a cramped
+        $\sim6\times10^{-5}$ to $65{,}504$.</p>
+      <p>Training gradients span many orders of magnitude, and the small ones matter. fp16's narrow range makes them
+        underflow to zero, which is why fp16 training needs a <code>GradScaler</code> to shove values back into range
+        — and why <b>bf16 needs no such crutch</b>. bf16 trades precision it can spare for range it cannot. On your
+        Blackwell GB10, bf16 is the default for exactly this reason. (fp16's ceiling of $65{,}504$ is the same wall
+        the log-sum-exp trick keeps softmax away from: <code>constants.md</code> §9.3.)</p>
+    </div></details>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>The code that survives a big logit</h2>
+    <div class="box try"><span class="box-title">Try it · <code>code/softmax_stable.py</code></span>
+      Run it on CPU (&lt;1&nbsp;s). It computes softmax two ways on the canonical logits (they agree — $p_0=0.659001$,
+      $\mathcal L=0.417030$, gradient sums to $0$), then on $[800,1,1]$ where the naive version returns
+      <code>nan</code> and the stable one is fine. The last line shows <code>F.cross_entropy</code> reproducing the
+      loss straight from logits.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">softmax_naive</span>(z):</span>
+<span class="line">    e = torch.<span class="tok-fn">exp</span>(z)              <span class="tok-com"># exp(800) -> inf</span></span>
+<span class="line">    <span class="tok-kw">return</span> e / e.<span class="tok-fn">sum</span>()          <span class="tok-com"># inf/inf -> nan</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">softmax_stable</span>(z):</span>
+<span class="line">    z = z - z.<span class="tok-fn">max</span>()             <span class="tok-com"># exact shift; biggest exponent is e^0 = 1</span></span>
+<span class="line">    e = torch.<span class="tok-fn">exp</span>(z)</span>
+<span class="line">    <span class="tok-kw">return</span> e / e.<span class="tok-fn">sum</span>()</span>
+<span class="line"></span>
+<span class="line">z = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">2.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">0.1</span>])</span>
+<span class="line">p = <span class="tok-fn">softmax_stable</span>(z)</span>
+<span class="line"><span class="tok-fn">print</span>(p)                        <span class="tok-com"># [0.659001, 0.242433, 0.098566]</span></span>
+<span class="line"><span class="tok-fn">print</span>((-torch.<span class="tok-fn">log</span>(p[<span class="tok-num">0</span>])).<span class="tok-fn">item</span>())  <span class="tok-com"># 0.417030  (true class 0)</span></span>
+<span class="line"></span>
+<span class="line">y = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">1.</span>, <span class="tok-num">0.</span>, <span class="tok-num">0.</span>])</span>
+<span class="line"><span class="tok-fn">print</span>((p - y))                  <span class="tok-com"># gradient p - y, sums to 0.0</span></span>
+<span class="line"></span>
+<span class="line">big = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">800.</span>, <span class="tok-num">1.</span>, <span class="tok-num">1.</span>])</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-fn">softmax_naive</span>(big))     <span class="tok-com"># tensor([nan, nan, nan])</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-fn">softmax_stable</span>(big))    <span class="tok-com"># tensor([1., 0., 0.])</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># The right way: hand cross_entropy the LOGITS, never probabilities.</span></span>
+<span class="line">logits = z.<span class="tok-fn">unsqueeze</span>(<span class="tok-num">0</span>)          <span class="tok-com"># shape (1, 3)</span></span>
+<span class="line">target = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">0</span>])       <span class="tok-com"># true class index</span></span>
+<span class="line"><span class="tok-fn">print</span>(F.<span class="tok-fn">cross_entropy</span>(logits, target).<span class="tok-fn">item</span>())  <span class="tok-com"># 0.417030 — fused, stable</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-09"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const dim = () => vizUtils.cssVar("--text-dim", "#8391ab");
+  const txt = () => vizUtils.cssVar("--text", "#e4e0f2");
+  const good = () => vizUtils.cssVar("--good", "#4fd18b");
+  const bad = () => vizUtils.cssVar("--bad", "#ff6b6b");
+  const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+
+  /* ---- DEMO 1: underflow, felt (real fp32 product vs sum-of-logs) ---- */
+  (function () {
+    const ctrls = document.getElementById("d1-ctrls");
+    const naiveEl = document.getElementById("d1-naive");
+    const logsEl = document.getElementById("d1-logs");
+    const softEl = document.getElementById("d1-soft");
+
+    const nCtrl = makeCtrl(ctrls, { label: "sequence length N", min: 1, max: 1000, step: 1, value: 500, fmt: v => v.toFixed(0) });
+    const qCtrl = makeCtrl(ctrls, { label: "per-token probability q", min: 0.01, max: 0.99, step: 0.01, value: 0.10, fmt: v => v.toFixed(2) });
+    const lCtrl = makeCtrl(ctrls, { label: "one big logit (softmax strip)", min: -1000, max: 1000, step: 10, value: 800, fmt: v => v.toFixed(0) });
+
+    function draw() {
+      const N = Math.round(nCtrl.get()), q = qCtrl.get(), big = lCtrl.get();
+
+      // Naive product, forced through single precision each multiply (Math.fround).
+      let prod = 1;
+      for (let i = 0; i < N; i++) prod = Math.fround(prod * q);
+      const logOfProd = Math.log(prod); // -Infinity once prod underflows to 0
+      const dead = (prod === 0);
+      naiveEl.innerHTML =
+        `<div style="font-size:.82rem;color:${dim()};margin-bottom:6px">naive: multiply, then log</div>` +
+        `<div style="font-size:1.15rem">$\\prod q = $ <b style="color:${dead ? bad() : txt()}">${dead ? "0.0" : prod.toExponential(3)}</b></div>` +
+        `<div style="margin-top:4px">$\\log(\\prod q) = $ <b style="color:${dead ? bad() : txt()}">${isFinite(logOfProd) ? logOfProd.toFixed(2) : "-Infinity"}</b>` +
+        `${dead ? ` &nbsp;<span style="color:${bad()}">← run dies</span>` : ""}</div>`;
+
+      // Sum of logs — the same quantity, alive.
+      const sumLogs = N * Math.log(q);
+      logsEl.innerHTML =
+        `<div style="font-size:.82rem;color:${dim()};margin-bottom:6px">stable: sum the logs</div>` +
+        `<div style="font-size:1.15rem">$\\sum \\ln q = $ <b style="color:${good()}">${sumLogs.toFixed(2)}</b></div>` +
+        `<div style="margin-top:4px;color:${dim()}">an ordinary float — nothing underflowed</div>`;
+
+      // Softmax strip: [big, 1, 1] naive (stable:false) vs stable.
+      const vec = [big, 1, 1];
+      const pNaive = NN.softmax(vec, { stable: false }); // m=0 -> exp(big)=Inf -> NaN
+      const pStable = NN.softmax(vec);                    // max-subtracted
+      const naiveStr = pNaive.map(x => isFinite(x) ? x.toFixed(3) : "NaN").join(", ");
+      const stableStr = pStable.map(x => x.toFixed(3)).join(", ");
+      const naiveBroke = pNaive.some(x => !isFinite(x));
+      softEl.innerHTML =
+        `softmax of $[${big.toFixed(0)}, 1, 1]$ &nbsp; — &nbsp;` +
+        `naive: <b style="color:${naiveBroke ? bad() : txt()}">[${naiveStr}]</b>` +
+        `${naiveBroke ? ` (exp(${big.toFixed(0)}) overflowed)` : ""} &nbsp;·&nbsp; ` +
+        `stable: <b style="color:${good()}">[${stableStr}]</b>`;
+
+      if (window.renderMathInElement) {
+        [naiveEl, logsEl, softEl].forEach(el => renderMathInElement(el, { delimiters: [{ left: "$$", right: "$$", display: true }, { left: "$", right: "$", display: false }], throwOnError: false }));
+      }
+    }
+    nCtrl.onInput(draw); qCtrl.onInput(draw); lCtrl.onInput(draw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- DEMO 2: softmax + temperature bench (live probs + gradient p-y) ---- */
+  (function () {
+    const probCanvas = document.getElementById("d2-prob");
+    const gradCanvas = document.getElementById("d2-grad");
+    const ctrls = document.getElementById("d2-ctrls");
+    const out = document.getElementById("d2-out");
+    const shiftBtn = document.getElementById("d2-shift");
+
+    // Temperature slider on a log scale: slider s in [-2, 0.7] -> T = 10^s in [0.01, 5].
+    const tCtrl = makeCtrl(ctrls, { label: "temperature T", min: -2, max: 0.7, step: 0.02, value: 0, fmt: v => Math.pow(10, v).toFixed(2) });
+    const z = [2.0, 1.0, 0.1];      // the canonical logits (mutated only by +3 button)
+    const labels = ["class 0", "class 1", "class 2"];
+
+    function cls() { return +document.querySelector('input[name="d2-cls"]:checked').value; }
+
+    // Grouped bar chart. signed=true draws a zero baseline in the middle.
+    function bars(canvas, vals, opts) {
+      opts = opts || {};
+      const { g, W, H } = vizUtils.fitCanvas(canvas, +canvas.getAttribute("height"));
+      g.clearRect(0, 0, W, H);
+      const padB = 26, padT = 14, padL = 8, padR = 8;
+      const plotH = H - padB - padT, plotW = W - padL - padR;
+      const n = vals.length, gap = 14;
+      const bw = (plotW - gap * (n + 1)) / n;
+      const maxAbs = opts.maxAbs || Math.max(1e-9, ...vals.map(Math.abs));
+      const zeroY = opts.signed ? padT + plotH / 2 : padT + plotH;
+      // zero baseline
+      g.strokeStyle = vizUtils.cssVar("--plot-border", "#3b4a6b");
+      g.lineWidth = 1;
+      g.beginPath(); g.moveTo(padL, zeroY); g.lineTo(W - padR, zeroY); g.stroke();
+      for (let i = 0; i < n; i++) {
+        const v = vals[i];
+        const x = padL + gap + i * (bw + gap);
+        const scale = opts.signed ? (plotH / 2) : plotH;
+        const h = Math.abs(v) / maxAbs * scale;
+        const up = v >= 0;
+        const y = up ? zeroY - h : zeroY;
+        g.fillStyle = opts.colors ? opts.colors[i] : accent();
+        g.fillRect(x, y, bw, h);
+        // value text
+        g.fillStyle = txt(); g.font = "12px Consolas, monospace"; g.textAlign = "center";
+        g.textBaseline = up ? "bottom" : "top";
+        g.fillText(v.toFixed(3), x + bw / 2, up ? y - 3 : y + h + 3);
+        // label
+        g.fillStyle = dim(); g.font = "11px system-ui"; g.textBaseline = "top";
+        g.fillText(labels[i], x + bw / 2, H - padB + 6);
+      }
+    }
+
+    function draw() {
+      const T = Math.pow(10, tCtrl.get());
+      const c = cls();
+      // REAL softmax with temperature, computed live (stable, max-subtracted).
+      const m = Math.max.apply(null, z);
+      const e = z.map(v => Math.exp((v - m) / T));
+      const s = e.reduce((a, b) => a + b, 0);
+      const p = e.map(v => v / s);
+      const grad = p.map((pi, i) => pi - (i === c ? 1 : 0));
+      const loss = -Math.log(p[c]);
+
+      const probColors = p.map((_, i) => i === c ? good() : accent());
+      const gradColors = grad.map(v => v >= 0 ? bad() : good()); // pushed up (wrong) red, pulled down (right) green
+      bars(probCanvas, p, { maxAbs: 1, colors: probColors });
+      bars(gradCanvas, grad, { signed: true, maxAbs: 1, colors: gradColors });
+
+      const gradSum = grad.reduce((a, b) => a + b, 0);
+      out.innerHTML =
+        `$T=${T.toFixed(2)}$ &nbsp;·&nbsp; true class <b>${c}</b> &nbsp;·&nbsp; ` +
+        `$\\mathcal L=-\\ln p_{${c}}=$ <b>${loss.toFixed(6)}</b> nats &nbsp;·&nbsp; ` +
+        `gradient $p-y$ sums to <b>${gradSum.toFixed(6)}</b> (always 0)`;
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$$", right: "$$", display: true }, { left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    tCtrl.onInput(draw);
+    document.querySelectorAll('input[name="d2-cls"]').forEach(r => r.addEventListener("change", draw));
+    shiftBtn.addEventListener("click", () => { for (let i = 0; i < z.length; i++) z[i] += 3; draw(); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-09", [
+    {
+      q: "Softmax of $[2.0,\\,1.0,\\,0.1]$ — what is entry 0 (the probability of class 0)?",
+      num: 0.659001, tol: 0.001,
+      why: "$e^{2.0}/\\left(e^{2.0}+e^{1.0}+e^{0.1}\\right) = 7.389056/11.212509 = 0.659001$ (constants.md §9.2)."
+    },
+    {
+      q: "Cross-entropy loss for those logits with true class 0 (in nats)?",
+      num: 0.417030, tol: 0.002,
+      why: "$\\mathcal L = -\\ln(0.659001) = 0.417030$ nats — the negative log of the probability you gave the right class."
+    },
+    {
+      q: "Step-0 loss of a randomly-initialized Qwen3-8B ($V=151{,}936$), in nats?",
+      num: 11.93, tol: 0.1,
+      why: "A fresh model spreads probability uniformly: $\\mathcal L = \\ln V = \\ln(151{,}936) = 11.93$. Not 11.76 — that is Llama-3's $V=128{,}256$ (constants.md §9.1)."
+    },
+    {
+      q: "The gradient identity $\\partial\\mathcal L/\\partial z = p - y$ holds because:",
+      opts: [
+        "It's a lucky coincidence that happens to be close enough",
+        "Softmax's derivative and the log's $1/x$ cancel exactly",
+        "We approximate the true gradient to save compute"
+      ],
+      a: 1,
+      why: "It is exact: the softmax Jacobian and the $\\log$ derivative annihilate, leaving 'predicted minus actual'. A confidently-wrong output then has gradient magnitude $\\to 1$ — maximally wrong, maximally corrected — which is why CE beats MSE+sigmoid for classification. ('Coincidence' misreads an exact algebraic result; 'approximation' is the log-sum-exp-is-a-hack misconception.)"
+    },
+    {
+      q: "Your loss prints <code>nan</code> on step 1. You wrote it as <code>(-target * log(softmax(logits))).sum()</code>. The fix:",
+      opts: [
+        "Lower the learning rate",
+        "Use <code>F.cross_entropy(logits, target)</code> — fuse softmax+log+NLL, don't split them",
+        "Add more training data"
+      ],
+      a: 1,
+      why: "Splitting softmax and log lets a big logit overflow before the max-subtraction can save it. The fused kernel does log-sum-exp internally and takes logits. (LR and data don't touch a numerical overflow.)"
+    },
+    {
+      q: "Adding a constant $c$ to every logit:",
+      opts: [
+        "Changes the predicted distribution",
+        "Leaves softmax unchanged — only differences between logits matter",
+        "Doubles the loss"
+      ],
+      a: 1,
+      why: "Shift invariance: $\\operatorname{softmax}(z+c)=\\operatorname{softmax}(z)$. It's the same fact that licenses subtracting the max in log-sum-exp — the +3 button in the demo shows it moving nothing."
+    },
+    {
+      q: "The underflow you felt (a product hitting exactly <code>0.0</code>, then <code>log</code> $\\to$ <code>-inf</code>) is the trunk's first case of:",
+      opts: [
+        "A bug in the framework you should report",
+        "Paper math $\\neq$ machine math — which returns on page 15 as a gradient that prints <code>1.4e-08</code> where paper says zero",
+        "Simply writing slow code"
+      ],
+      a: 1,
+      why: "It's not a framework bug and not a speed issue — it's finite-precision arithmetic behaving as specified. The same lesson reopens on page 15 with autograd's nonzero 'zero'. ([THREAD:paper-vs-machine])"
+    }
+  ], "Logs, softmax & cross-entropy — self-check");
+
+});
+</script>
+</body>
+</html>

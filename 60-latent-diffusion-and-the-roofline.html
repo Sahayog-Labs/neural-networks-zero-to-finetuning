@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>60. Latent Diffusion &amp; the Roofline — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tags, data tables, shape ribbons, flags, radio rows.
+     PREDICT / Symbol-Ledger come from the shared .box.predict / table.ledger. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  table.data .good { color: var(--good); font-weight: 700; }
+  table.data .bad  { color: var(--bad);  font-weight: 700; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .big-ratio { font-size: 1.5rem; font-weight: 800; color: var(--accent); font-family: var(--mono); }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+</style>
+</head>
+<body data-page="60-latent-diffusion-and-the-roofline.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · The Roofline</span>
+    <h1>Latent Diffusion &amp; the Roofline: Why It Runs on <em>Your</em> Desk</h1>
+    <p class="subtitle">The VAE of page 53 was not a convenience — it moved diffusion off a
+      cliff. We compute the exact size of that cliff (65,536×), then place diffusion on the
+      one formula that decides whether your Spark is strong or weak. Same machine, same
+      ridge, opposite verdicts from the LLM track — and one number you will only ever
+      get by measuring.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution rule: answered in the "So the predict answer is…" line
+         right under the pixel-space worked box. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Pixel-space self-attention at $1024^2$, <em>one</em> head, <em>one</em> layer,
+      fp16: how many bytes is the attention matrix on its own? Order of magnitude only —
+      and remember you have a 128&nbsp;GB box. Commit to a power of ten before you scroll.
+    </div>
+
+    <!-- ============================ PIXEL ARITHMETIC ============================ -->
+    <h2>Do the pixel-space arithmetic first</h2>
+
+    <p>Attention builds an $S\times S$ score matrix, where $S$ is the number of tokens it
+      attends over. That $S^2$ is the whole story: it is the <strong>dot product atom</strong>
+      of Part III, one entry per query–key pair, and it is quadratic in the token count. So
+      the only question that matters for cost is: <em>how many tokens?</em></p>
+
+    <div class="ribbon">Q, K            (S, d_head)          # one head's queries and keys
+QKᵀ  scores     (S, S)               # every query · every key  →  S² entries
+bytes fp16      S² × 2               # the matrix that must live in memory</div>
+
+    <table class="ledger">
+      <tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr>
+      <tr><td>$S$</td><td>token count the attention runs over</td><td>scalar</td><td>pixels, or latent patches</td></tr>
+      <tr><td>$S^2$</td><td>entries in one head's score matrix</td><td>scalar</td><td>every query · every key</td></tr>
+      <tr><td>$f$</td><td>VAE spatial downsample factor</td><td>scalar (1 = pixel, 8 = FLUX)</td><td>p.53, <code>constants.md</code> §9.6</td></tr>
+      <tr><td>$H_{px}$</td><td>image side in pixels</td><td>scalar</td><td>your render resolution</td></tr>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ Pixel vs latent, at $1024^2$ — <span style="font-weight:400">[DER, <code>constants.md</code> §9.6]</span></span>
+      <strong>Pixel space</strong> ($f=1$, no patchify): $S_{px} = 1024^2 = 1{,}048{,}576$ tokens.
+      $$S_{px}^2 = (1024^2)^2 = 1.10\times10^{12}\ \text{entries}\ \times\ 2\,\text{B} = \mathbf{2.2\ TB}$$
+      Per head. Per layer. Per step. Before you multiply by 24 heads, 57 blocks, and 28
+      steps. <strong>That is the answer to the predict: $\sim10^{12}$ bytes — 2.2&nbsp;TB —
+      which overflows your 128&nbsp;GB box by 17× on a single head.</strong><br><br>
+      <strong>Latent space</strong> (FLUX, $f=8$, then $2\times2$ patchify):
+      $\tfrac{1024}{8} = 128$, then $\tfrac{128}{2} = 64$ per side, so
+      $S_{lat} = 64^2 = 4096$ tokens.
+      $$S_{lat}^2 = 4096^2 = 1.68\times10^7\ \times\ 2\,\text{B} = \mathbf{33.5\ MB}$$
+      Fits in cache. The ratio is the whole reason the field exists:
+      $$\frac{S_{px}^2}{S_{lat}^2} = \frac{1.10\times10^{12}}{1.68\times10^7} = \boxed{\ \mathbf{65{,}536\times} = 16^4\ }$$
+      <span class="big-ratio">65,536×</span> reduction in the expensive operation, bought with a
+      12× lossy compression (p.53). <strong>That trade is why Stable Diffusion exists, and why
+      your Spark runs FLUX at all.</strong>
+    </div>
+
+    <p>The $16^4$ is not a coincidence: $f=8$ downsamples each side by 8, and $2\times2$
+      patchify by a further 2, so the side shrinks by 16, area by $16^2$, and the
+      <em>attention matrix</em> — quadratic in area — by $16^4$. Historically, Imagen and
+      DALL·E&nbsp;2 diffused directly in pixel space and had to stack <strong>three-model
+      cascades</strong> (64² → 256² → 1024²) to dodge exactly this quadratic wall. The
+      cascade was the workaround for not having a VAE.</p>
+
+    <p class="thread"><b>[THREAD: The dot product · beat]</b> Same atom, new bill. Attention's
+      $S^2$ is $S^2$ dot products; latent diffusion is the trick of making $S$ small
+      <em>before</em> you pay for them. The atom never changed — only how many of them you
+      can afford.</p>
+
+    <!-- ============================ MEMORY TABLE ============================ -->
+    <h2>The model <em>is</em> the mass</h2>
+
+    <p>Latent diffusion fixed the <em>compute</em> wall. It did almost nothing for the
+      <em>memory</em> wall, because in diffusion the memory is the weights, not the state
+      you are generating. Read the inference footprints of the models on your disk:</p>
+
+    <div class="box worked"><span class="box-title">✍️ Inference memory — weights dominate, latent is a rounding error</span>
+      Component sums from published sizes; the activation share is <span style="color:var(--text-dim)">[EST]</span>.
+      <table class="data">
+        <thead><tr><th>Model (bf16 inference)</th><th>Total footprint</th><th>What fills it</th></tr></thead>
+        <tbody>
+          <tr><td>SDXL</td><td>≈ 8 GB</td><td>2.6B UNet + text encoders + VAE</td></tr>
+          <tr><td>Z-Image-Turbo</td><td>≈ 14 GB</td><td>6B DiT + encoder</td></tr>
+          <tr><td>FLUX.1-dev</td><td>≈ 34–38 GB</td><td>12B DiT (24) + T5-XXL 4.7B (9.4) + CLIP + VAE</td></tr>
+          <tr><td><b>FLUX.2-dev</b></td><td><b>≈ 112–120 GB</b></td><td>32B DiT (64) + <b>Mistral-3 24B VLM (48)</b> + VAE</td></tr>
+          <tr><td class="good">the latent you generate</td><td class="good">0.5–1.0 MB</td><td>$[1,32,128,128]$ bf16 (p.53)</td></tr>
+        </tbody>
+      </table>
+      The thing you are generating is <strong>half a megabyte</strong>; on FLUX.2 the weights
+      are ~114&nbsp;GB — roughly <strong>200,000× larger</strong>. Diffusion inference is
+      streaming ~114&nbsp;GB of weights past a half-megabyte of state, once per step, 28
+      times. <strong>The state is free; the weights are the machine.</strong>
+    </div>
+
+    <p>Four mitigations you should know cold, because they are the difference between
+      FLUX.2 fitting and not:</p>
+    <ul>
+      <li><strong>Precompute text embeddings</strong> — run the Mistral-3 24B encoder once,
+        cache its output, then never load it during the diffusion loop. <strong>−48&nbsp;GB
+        on FLUX.2</strong>, the single biggest lever.</li>
+      <li><strong><code>enable_model_cpu_offload()</code></strong> — stream weights from CPU
+        RAM. On a normal GPU this pays a PCIe copy tax; on the Spark the memory is
+        <strong>unified and coherent</strong>, so the "copy" is near-free. This is a genuine
+        Spark advantage, not a consolation.</li>
+      <li><strong>FP8</strong> — roughly halves the weight bytes (−50%).</li>
+      <li><strong>NVFP4</strong> — native 4-bit tensor cores; this is what the marketing
+        "1000 TOPS" number is measured in (p.41).</li>
+    </ul>
+
+    <p class="thread"><b>[THREAD: The memory ledger · beat]</b> Same ledger, diffusion column.
+      On the LLM track the KV cache grew with sequence length; here the state barely exists
+      and the weights are everything. Reopen p.18's 16&nbsp;B/param — it is about to decide
+      whether you can <em>train</em> these, against your measured <b>121.6875&nbsp;GiB</b>.</p>
+
+    <!-- ============================ THE ROOFLINE ============================ -->
+    <h2>★ The roofline — one formula, opposite verdicts</h2>
+
+    <p>You now have the two facts the roofline needs: diffusion does a lot of arithmetic
+      (compute) on a small state that streams a lot of weights (bandwidth). Which one is the
+      bottleneck on your box? The <strong>roofline model</strong> answers it with a single
+      ratio, <em>arithmetic intensity</em> — FLOPs done per byte moved. The trunk derived it
+      (p.43); we only plug in. For a dense transformer at bf16, one forward pass moves its
+      $2N$ weight-bytes and does $2N$ FLOPs <em>per token</em>, so over $S_{\text{fwd}}$
+      tokens:</p>
+
+    <div class="box key"><span class="box-title">🔑 Arithmetic intensity = tokens per forward</span>
+      $$I \;=\; \frac{\text{FLOPs}}{\text{bytes}} \;=\; \frac{2N\cdot S_{\text{fwd}}}{2N} \;=\; \boxed{\,S_{\text{fwd}}\ \text{FLOP/byte}\,}$$
+      The bytes are the weights (read once); the FLOPs scale with how many tokens you push
+      through that one read. <strong>So intensity is just tokens per forward pass.</strong> A
+      workload is compute-bound when $I$ is above the machine's <em>ridge</em>
+      $I^\star = P_{\text{peak}}/BW$, bandwidth-bound when below.
+      <table class="ledger">
+        <tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr>
+        <tr><td>$I$</td><td>arithmetic intensity</td><td>FLOP/byte</td><td>this equation</td></tr>
+        <tr><td>$N$</td><td>non-embedding parameters</td><td>scalar</td><td>the model; cancels out</td></tr>
+        <tr><td>$S_{\text{fwd}}$</td><td>tokens processed per forward pass</td><td>scalar</td><td>4096 for FLUX latent; 1 for LLM decode</td></tr>
+        <tr><td>$I^\star$</td><td>ridge point — where the roofline bends</td><td>FLOP/byte</td><td>$P_{\text{peak}}/BW$</td></tr>
+        <tr><td>$P_{\text{peak}}$</td><td>peak compute</td><td>FLOP/s</td><td>Spark BF16 ceiling (below)</td></tr>
+        <tr><td>$BW$</td><td>memory bandwidth</td><td>273 GB/s</td><td><code>constants.md</code> §6.1 [VP]</td></tr>
+      </table>
+    </div>
+
+    <p>The ridge needs the Spark's peak BF16 compute — and here honesty costs us a clean
+      number. <strong>NVIDIA publishes no dense BF16 figure for GB10.</strong> The value is
+      <em>inferred, not published</em> <span class="xref">[INF, <code>constants.md</code> §6.3]</span>,
+      and it is <strong>genuinely unresolved</strong> between two candidates:</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The ridge is [INF] and the ceiling is unsettled — 62 vs 125 TF</span>
+      Inferring down from the "1000 TOPS" FP4-sparse marketing peak by halving for sparsity,
+      then FP4→FP8→BF16, lands at <strong>~125 TF</strong> (FP16-accumulate) or, with the
+      consumer-Blackwell FP32-accumulate penalty, <strong>~62 TF</strong> — which is what a
+      plain PyTorch training matmul actually uses. Community GEMM reports (~60 TF) lean 62;
+      an SDXL BF16 benchmark (≈70 TF/s sustained if CFG was on) leans 125. So the ridge is:
+      $$I^\star = \frac{62\times10^{12}}{273\times10^{9}} = \mathbf{227}\quad\text{(working)}\qquad\text{or}\qquad \frac{125\times10^{12}}{273\times10^{9}} = \mathbf{458}\quad\text{(if the ceiling is }{\sim}125\text{ TF).}$$
+      <strong>We print 227 as the working value with its inference label, name 458 as the
+      live alternative, and print neither as fact.</strong> Your <code>bench_spark.py</code>
+      GEMM (below) settles it by measurement — that is exactly why the course measures the
+      ridge rather than asserting it.
+    </div>
+
+    <p>Here is the payoff, and it is the deliberate contrast this whole course was built
+      toward. The verdict is robust to <em>which</em> ceiling is right, because the two
+      tracks sit on <strong>opposite sides of the ridge under both</strong>:</p>
+
+    <table class="data">
+      <thead><tr><th>Workload</th><th>$S_{\text{fwd}}$</th><th>$I$</th><th>vs ridge (227 / 458)</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>LLM decode, batch 1</td><td>1</td><td>1</td><td class="bad">227× / 458× below</td><td>bandwidth-bound · <b>Spark weak</b></td></tr>
+        <tr><td>LLM decode, batch 32</td><td>32</td><td>32</td><td class="bad">7× / 14× below</td><td>still bandwidth-bound</td></tr>
+        <tr><td>LLM prefill, S=2048</td><td>2048</td><td>2048</td><td class="good">9× / 4.5× above</td><td>compute-bound</td></tr>
+        <tr><td><b>Diffusion, 4096 latent tokens</b></td><td>4096</td><td>4096</td><td class="good">18× / 9× above</td><td>compute-bound · <b>Spark strong</b></td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>Same machine, same ridge, opposite verdicts</strong> — because the two tracks
+      sit on opposite sides of $I^\star$. Diffusion generates 4096 tokens per forward and is
+      deep in compute-bound territory <em>under both ceilings</em>; LLM decode generates one
+      token per forward and is hundreds-fold bandwidth-starved. The Spark — memory-rich,
+      bandwidth-poor — is exactly the machine that is strong for diffusion and weak for
+      single-stream LLM decode. That is not two stories; it is one formula read at two values
+      of $S_{\text{fwd}}$.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Correcting a common claim: bf16 FLUX is compute-bound, not bandwidth-bound</span>
+      A tempting-but-wrong reading says diffusion is limited by an 88&nbsp;ms/step bandwidth
+      floor. Check it. FLUX.1-dev is $N\approx12\text{e}9$; one step over 4096 tokens needs
+      $$2\times12\text{e}9\times4096 \;=\; 9.83\text{e}13\ \text{FLOP}\ \div\ 62\text{e}12\ \text{FLOP/s} \;=\; \mathbf{1585\ ms/step}\ \text{(compute)}$$
+      — an order of magnitude above the ~88&nbsp;ms it would take to merely stream the weights.
+      <strong>Compute is the wall nobody is near on the bandwidth side.</strong> The step time
+      is set by arithmetic, which is why the Spark's weak bandwidth does not hurt here.
+    </div>
+
+    <!-- ============================ SCHNELL/4 ============================ -->
+    <h2>The honest FLOP count — and a deleted showpiece</h2>
+
+    <p>There is a famous number: <em>"FLUX at FP4 does a 1K image in 2.6&nbsp;seconds."</em>
+      An earlier draft of this course built a showpiece around it — "we predicted a published
+      benchmark from first principles." <strong>That showpiece is deleted, because the number
+      it used was mislabeled.</strong></p>
+
+    <div class="box worked"><span class="box-title">✍️ The 2.6 s number is Schnell/4, not dev/28 — <span style="font-weight:400">[VP + DER, <code>constants.md</code> §9.6]</span></span>
+      The correct label: <strong>"FLUX.1-<u>Schnell</u>, 4 steps, $1024^2$, batch 1,
+      FP4 = 23 img/min = 2.6 s/img"</strong> [VP]. Read it as FLUX.1-dev at 28 steps and the
+      arithmetic becomes impossible:
+      $$28\times2\times12\text{e}9\times4096 \;=\; 2.75\text{e}15\ \text{FLOP}\ \div\ 2.6\ \text{s} \;=\; \mathbf{1.06\ PFLOP/s}$$
+      That is <strong>106% of the sparse-FP4 marketing peak</strong>, on a workload that uses
+      neither FP4 sparsity nor the full model — physically impossible. The numerator (dev/28)
+      and the measurement (Schnell/4) are unrelated quantities whose "agreement" was
+      coincidence.<br><br>
+      The <strong>honest</strong> Schnell/4 count, per step at $1024^2$ (4096 image + 512
+      text = 4608 tokens): linear/matmul $2NS = 1.097\text{e}14$; attention
+      $4S^2 d\cdot57 = 1.487\text{e}13$ (11.9%); total $1.245\text{e}14$/step. Over 4 steps:
+      $$4.98\times10^{14}\ \text{FLOP}\ \div\ 2.609\ \text{s} \;=\; \mathbf{191\ TF/s}$$
+      Against the inferred ~500 TF dense-FP4 ceiling that is <strong>30–38% MFU — physically
+      plausible</strong>. The lesson survives; the false precision does not. <strong>You
+      cannot honestly predict a 2.6&nbsp;s wall-clock when the FP4 dense ceiling is itself an
+      unpublished ±2× inference. So you will measure your own.</strong>
+    </div>
+
+    <!-- ============================ HIS CAPACITY ============================ -->
+    <h2>Can you train these? The ledger, against your measured box</h2>
+
+    <p>Full fine-tuning costs <strong>16&nbsp;B/param</strong> (weights + grads + fp32 master
+      + Adam $m,v$ — the trunk's ledger, p.18). Run it for the models on your disk:</p>
+
+    <div class="box worked"><span class="box-title">✍️ Diffusion training footprints vs your box — <span style="font-weight:400">[DER; budget MEA-DEV]</span></span>
+      <table class="data">
+        <thead><tr><th>Job</th><th>State (16 B/param or LoRA)</th><th>+ act</th><th>Fits 121.69 GiB?</th></tr></thead>
+        <tbody>
+          <tr><td>FLUX.1-dev, full FT</td><td>$12\text{e}9\times16 = 192$ GB</td><td>≈ 196 GB</td><td class="bad">❌ no</td></tr>
+          <tr><td>FLUX.2-dev, full FT</td><td>$32\text{e}9\times16 = 512$ GB</td><td>≈ 520 GB</td><td class="bad">❌ no (nor on any single GPU)</td></tr>
+          <tr><td><b>FLUX.2-dev LoRA</b>, bf16 base + precomputed embeds</td><td>64 GB base + adapter/state</td><td>≈ 70 GB</td><td class="good">✅ yes</td></tr>
+          <tr><td><b>FLUX.2-dev LoRA</b>, FP8 base</td><td>32 GB base + adapter/state</td><td>≈ 38 GB</td><td class="good">✅ comfortably</td></tr>
+        </tbody>
+      </table>
+      The punchline: <strong>the 32B FLUX.2 is trainable on your desk and on no consumer
+      GPU.</strong> A 5090 has 32&nbsp;GB; FLUX.2's base weights alone are 64&nbsp;GB — it
+      cannot even <em>load</em> the model, let alone train it. Your unified 128&nbsp;GiB can.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The budget is <code>[MEA]</code> — you measure it, the course never asserts it</span>
+      The comparison above uses your box's <strong>measured</strong> <code>MemTotal</code> =
+      <strong>121.6875&nbsp;GiB</strong> [MEA-DEV] — not the 128 on the spec sheet. A firmware
+      carveout eats <strong>6.3125&nbsp;GiB (4.9%)</strong> before you allocate a byte, and with
+      ComfyUI already resident, <code>torch.cuda.mem_get_info()</code> reported only
+      <strong>19.41&nbsp;GiB free</strong> at measurement time. Published capacity is never
+      usable capacity. Do not trust this paragraph — run the one-liner in
+      <code>bench_spark.py</code> and read <em>your</em> number.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Capacity, not speed</span>
+      The Spark's 273&nbsp;GB/s is about <strong>1/7th</strong> a 5090's ~1.8&nbsp;TB/s, but it
+      has ~4× the memory, unified. So for a job that <em>fits in 32&nbsp;GB</em> — an SDXL or
+      FLUX.1 LoRA — <strong>the 5090 is simply faster</strong>. The Spark wins only on the jobs
+      the 5090 cannot start: the ones that need more than 32&nbsp;GB to hold weights + state.
+      You own the box; it is a capacity machine, not a speed machine. Buy it for what it does.
+    </div>
+
+    <!-- ============================ DEMO 1 ============================ -->
+    <h2>Demo — the pixel-vs-latent attention calculator</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Set space to <b>pixel ($f=1$)</b> and drag resolution to $1024^2$: the attention matrix
+      is <b>2.2&nbsp;TB</b> and the "your box" line is a red floor far below the curve. Switch
+      to <b>latent ($f=8$)</b> with $2\times2$ patchify and watch it collapse to
+      <b>33.5&nbsp;MB</b> — the ratio locks to exactly <b>65,536</b>. Then drag resolution
+      $1024\to2048$ and watch the <em>quadratic</em> bite: 4× the pixels, 16× the attention.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Attention-matrix bytes vs resolution <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d1-plot" height="300"></canvas>
+        <div class="controls" id="d1-ctrls"></div>
+        <div class="radio-row" id="d1-space" style="margin-top:6px">
+          <span class="grp-label">space:</span>
+          <label><input type="radio" name="d1sp" value="1"> pixel ($f=1$)</label>
+          <label><input type="radio" name="d1sp" value="8" checked> latent ($f=8$)</label>
+          <span class="grp-label" style="margin-left:14px">patchify:</span>
+          <label><input type="radio" name="d1p" value="1"> 1×1</label>
+          <label><input type="radio" name="d1p" value="2" checked> 2×2</label>
+        </div>
+        <div class="readout" id="d1-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 2 ============================ -->
+    <h2>Demo — the roofline, and where your workload lands</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      The diagonal is the bandwidth roof (273&nbsp;GB/s); the shaded band is the
+      <em>unresolved</em> BF16 compute ceiling (62–125&nbsp;TF); the vertical band is the ridge
+      (227–458). Drag your workload's $S_{\text{fwd}}$: at $I=1$ (LLM decode) the dot sits deep
+      on the bandwidth slope — <b>weak</b>; slide up to $I=4096$ (diffusion) and it climbs onto
+      the compute ceiling — <b>strong</b>. One machine, both verdicts, live.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Roofline · achievable FLOP/s vs arithmetic intensity <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d2-plot" height="320"></canvas>
+        <div class="controls" id="d2-ctrls"></div>
+        <div class="readout" id="d2-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 3 ============================ -->
+    <h2>Demo — the honesty exhibit: what 2.6 s can and cannot mean</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Implied throughput of two readings of "2.6 s / 1K image" <span class="demo-tag">Static</span></div>
+      <div class="demo-body">
+        <canvas id="d3-bars" height="260"></canvas>
+        <div class="readout" id="d3-out"></div>
+      </div>
+    </div>
+
+    <p>The red bar reads the 2.6&nbsp;s as FLUX.1-dev/28 and demands 1.06&nbsp;PFLOP/s — above
+      the marketing peak, impossible. The green bar reads it correctly as Schnell/4 and lands
+      at 191&nbsp;TF/s, a believable 30–38% of the FP4 ceiling. The two bars are the same
+      wall-clock; only the label differs. This is why the showpiece was deleted, not relabeled.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/bench_spark.py</code> — it measures <em>your</em> machine: achieved memory
+      bandwidth, ms/step forward and forward+backward at bf16/fp8/fp4, and s/image on
+      <b>FLUX.2-dev</b> and <b>FLUX.2-dev-Turbo</b>, checked against every prediction on this
+      page. It also runs the big bf16 GEMM against <em>both</em> the 62&nbsp;TF and 125&nbsp;TF
+      ceilings in both accumulate modes, so you <strong>settle the ridge yourself</strong> — the
+      course's best lab. <em>(~5 min. ⚠️ ComfyUI is live on your box; the script frees VRAM
+      first and warns before it starts.)</em>
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-60"></div>
+
+    <p class="xref" style="margin-top:2em">The roofline formula is owned by the trunk (p.43);
+      ← p.53 gave the latent shapes, p.59 the FLUX DiT config these tokens flow through. →
+      p.62 spends this ledger on the real LoRA/QLoRA training run, and the LLM hardware page
+      (p.46) sits on the <em>other</em> side of this same ridge — the D-15 contrast, closed.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const BOX_GIB = 121.6875;                 // his measured MemTotal [MEA-DEV]
+  const BOX_BYTES = BOX_GIB * (1 << 30);    // ≈ 1.3066e11 bytes
+
+  /* ---- token count for a square image at side H_px, VAE factor f, patchify p ---- */
+  function tokens(Hpx, f, p) {
+    const side = Math.floor(Hpx / f / p);   // latent grid side after patchify
+    return side * side;
+  }
+
+  /* =================== DEMO 1: pixel-vs-latent attention calculator =================== */
+  (function () {
+    const canvas = document.getElementById("d1-plot");
+    const out = document.getElementById("d1-out");
+    const resC = makeCtrl(document.getElementById("d1-ctrls"),
+      { label: "resolution H_px", min: 512, max: 2048, step: 128, value: 1024, unit: "px", fmt: v => v.toFixed(0) });
+
+    function f()  { return parseInt(document.querySelector('input[name="d1sp"]:checked').value, 10); }
+    function pp() { return parseInt(document.querySelector('input[name="d1p"]:checked').value, 10); }
+
+    const cLat = () => cssVar("--accent", "#b48cff");
+    const cPix = () => cssVar("--track-diffusion", "#ff9466");
+    const cBox = () => cssVar("--bad", "#ff6b6b");
+
+    // bytes of one head's fp16 attention matrix S² × 2
+    const bytesFor = (Hpx, fv, pv) => { const S = tokens(Hpx, fv, pv); return S * S * 2; };
+
+    function draw() {
+      const Hpx = resC.get(), fv = f(), pv = pp();
+      const xs = [];
+      for (let r = 512; r <= 2048; r += 64) xs.push(r);
+      const yPix = xs.map(r => bytesFor(r, 1, 1));        // pure pixel space, no patchify
+      const yLat = xs.map(r => bytesFor(r, fv, pv));      // current selection
+
+      const allY = yPix.concat(yLat).concat([BOX_BYTES]);
+      const ymin = Math.pow(10, Math.floor(Math.log10(Math.min(...yLat)) - 0.3));
+      const ymax = Math.pow(10, Math.ceil(Math.log10(Math.max(...yPix)) + 0.3));
+
+      const plt = new Plot(canvas, { xmin: 512, xmax: 2048, ymin, ymax, ylog: true,
+        xlabel: "resolution H_px", ylabel: "attention bytes (fp16, 1 head)" });
+      plt.clear(); plt.grid();
+      plt.trace(xs, yPix, cPix(), 2.5);
+      plt.trace(xs, yLat, cLat(), 2.5);
+      plt.hline(BOX_BYTES, cBox(), [5, 4]);
+      plt.label(560, ymax / 2.5, "pixel (f=1)", cPix());
+      plt.label(560, ymin * 3, "latent", cLat());
+      plt.label(1250, BOX_BYTES * 1.5, "your box · 121.69 GiB", cBox());
+      plt.vline(Hpx, cssVar("--plot-tick", "#8391ab"), [2, 3]);
+
+      const Sp = tokens(Hpx, 1, 1), Sl = tokens(Hpx, fv, pv);
+      const bp = Sp * Sp * 2, bl = Sl * Sl * 2;
+      const ratio = bp / bl;
+      const overBox = bp > BOX_BYTES ? `<span class="flag-bad">⚑ overflows your box by ${(bp / BOX_BYTES).toFixed(0)}×</span>`
+                                     : `<span class="flag-ok">fits your box</span>`;
+      out.innerHTML =
+        `at <b>${Hpx}²</b> — pixel: S = <b>${Sp.toLocaleString()}</b> tokens → S² × 2B = <b>${eng(bp, "B")}</b> ${overBox}<br>` +
+        `latent (f=${fv}, ${pv}×${pv} patchify): S = <b>${Sl.toLocaleString()}</b> → <b>${(fv === 8 && pv === 2 && Hpx === 1024) ? "33.5 MB" : eng(bl, "B")}</b> · ` +
+        `ratio pixel/latent = <span class="big-ratio" style="font-size:1rem">${ratio.toLocaleString(undefined,{maximumFractionDigits:0})}×</span>` +
+        (fv === 8 && pv === 2 && Hpx === 1024 ? ` &nbsp;= 16⁴ = 65,536× ✓` : ``);
+    }
+    resC.onInput(draw);
+    document.querySelectorAll('input[name="d1sp"],input[name="d1p"]').forEach(r => r.addEventListener("change", draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* =================== DEMO 2: the roofline =================== */
+  (function () {
+    const canvas = document.getElementById("d2-plot");
+    const out = document.getElementById("d2-out");
+    const BW = 273e9;                 // GB/s → bytes/s (constants §6.1 [VP])
+    const CEIL_LO = 62e12, CEIL_HI = 125e12;   // unresolved BF16 band [INF]
+    const RIDGE_LO = CEIL_LO / BW, RIDGE_HI = CEIL_HI / BW;   // 227 / 458
+
+    // slider over log10(I) so 1 … ~5000 is explorable
+    const iC = makeCtrl(document.getElementById("d2-ctrls"),
+      { label: "your workload I = S_fwd (tokens/forward)", min: 0, max: 3.72, step: 0.01, value: 3.612,
+        fmt: v => Math.round(Math.pow(10, v)).toLocaleString() });
+
+    const XMIN = 0.5, XMAX = 6000, YMIN = 1e11, YMAX = 3e14;
+
+    // fixed reference points
+    const PTS = [
+      { I: 1,    label: "LLM decode b1" },
+      { I: 32,   label: "decode b32" },
+      { I: 2048, label: "prefill" },
+      { I: 4096, label: "diffusion" },
+    ];
+
+    function draw() {
+      const plt = new Plot(canvas, { xmin: XMIN, xmax: XMAX, ymin: YMIN, ymax: YMAX, xlog: true, ylog: true,
+        xlabel: "arithmetic intensity I = S_fwd (FLOP/byte)", ylabel: "achievable FLOP/s" });
+      plt.clear(); plt.grid();
+      const g = plt.g;
+
+      // shaded compute-ceiling band 62–125 TF
+      g.save();
+      g.fillStyle = cssVar("--accent2", "#54d6c4") + "22";
+      const yL = plt._ty(CEIL_LO), yH = plt._ty(CEIL_HI), xa = plt._tx(XMIN), xb = plt._tx(XMAX);
+      g.fillRect(xa, yH, xb - xa, yL - yH);
+      g.restore();
+      plt.hline(CEIL_LO, cssVar("--accent2", "#54d6c4"), [6, 4]);
+      plt.hline(CEIL_HI, cssVar("--accent2", "#54d6c4"), [6, 4]);
+      plt.label(0.62, CEIL_LO * 1.15, "62 TF", cssVar("--accent2", "#54d6c4"));
+      plt.label(0.62, CEIL_HI * 1.15, "125 TF (unresolved)", cssVar("--accent2", "#54d6c4"));
+
+      // ridge band
+      g.save();
+      g.fillStyle = cssVar("--plot-tick", "#8391ab") + "22";
+      const xr1 = plt._tx(RIDGE_LO), xr2 = plt._tx(RIDGE_HI), yt = plt._ty(YMAX), yb = plt._ty(YMIN);
+      g.fillRect(xr1, yt, xr2 - xr1, yb - yt);
+      g.restore();
+      plt.label(RIDGE_LO * 0.60, YMAX / 6, "ridge 227–458", cssVar("--text-dim", "#8391ab"));
+
+      // bandwidth roof: y = BW * I, clipped at the mid ceiling
+      const MIDCEIL = Math.sqrt(CEIL_LO * CEIL_HI);   // geometric mean, for drawing the roofline
+      const xs = [], ys = [];
+      for (let e = Math.log10(XMIN); e <= Math.log10(XMAX); e += 0.02) {
+        const I = Math.pow(10, e); xs.push(I); ys.push(Math.min(BW * I, MIDCEIL));
+      }
+      plt.trace(xs, ys, cssVar("--track-diffusion", "#ff9466"), 2.5);
+
+      // helper to plot a dot at (I, achievable)
+      function dot(I, color, r, lab) {
+        const ach = Math.min(BW * I, MIDCEIL);
+        const px = plt._tx(I), py = plt._ty(ach);
+        g.save();
+        g.fillStyle = color; g.beginPath(); g.arc(px, py, r, 0, 2 * Math.PI); g.fill();
+        if (lab) { g.fillStyle = cssVar("--text", "#dce3f0"); g.font = "11px system-ui"; g.textAlign = "center";
+                   g.fillText(lab, px, py - r - 4); }
+        g.restore();
+      }
+      PTS.forEach(pt => dot(pt.I, cssVar("--plot-label", "#a8b4cc"), 4, pt.label));
+
+      // the movable workload dot
+      const I = Math.pow(10, iC.get());
+      dot(I, cssVar("--accent", "#b48cff"), 6, null);
+
+      // verdict
+      const side = I >= RIDGE_HI ? "compute-bound under BOTH ceilings — <b>Spark strong</b>"
+                 : I >= RIDGE_LO ? "in the ridge band — verdict depends on the true ceiling (measure it)"
+                 : `bandwidth-bound (${(RIDGE_LO / I).toFixed(0)}×–${(RIDGE_HI / I).toFixed(0)}× below ridge) — <b>Spark weak</b>`;
+      const ach = Math.min(BW * I, MIDCEIL);
+      out.innerHTML =
+        `I = <b>${Math.round(I).toLocaleString()}</b> FLOP/byte · achievable ≈ <b>${eng(ach, "FLOP/s")}</b> · ${side}. ` +
+        `<br>Ridge is <b>227</b> (working, ~62 TF) or <b>458</b> (if ~125 TF) — <span class="xref">[INF, constants §6.4]</span>.`;
+    }
+    iC.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* =================== DEMO 3: the 2.6 s honesty bar chart =================== */
+  (function () {
+    const canvas = document.getElementById("d3-bars");
+    const out = document.getElementById("d3-out");
+
+    // the two readings (TF/s) + reference ceilings
+    const bars = [
+      { name: "read as dev/28", tf: 1058, note: "1.06 PFLOP/s = 106% of peak — impossible",
+        color: () => cssVar("--bad", "#ff6b6b") },
+      { name: "read as Schnell/4", tf: 191, note: "191 TF/s = 30–38% MFU — plausible",
+        color: () => cssVar("--good", "#4ec9a5") },
+    ];
+    const CEIL_FP4 = 500, PEAK_MKT = 1000;   // TF/s
+
+    function draw() {
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth || 600, H = +canvas.dataset.baseH || (canvas.dataset.baseH = 260, 260);
+      canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+      canvas.style.height = H + "px";
+      const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+
+      const padL = 60, padR = 16, padT = 20, padB = 40;
+      const plotW = W - padL - padR, plotH = H - padT - padB;
+      const YMAX = 1150;                         // TF/s
+      const y = tf => padT + plotH - (tf / YMAX) * plotH;
+
+      // axes
+      g.strokeStyle = cssVar("--plot-border", "#3b4a6b"); g.lineWidth = 1;
+      g.strokeRect(padL, padT, plotW, plotH);
+      g.fillStyle = cssVar("--plot-tick", "#8391ab"); g.font = "11px Consolas, monospace";
+      g.textAlign = "right"; g.textBaseline = "middle";
+      [0, 250, 500, 750, 1000].forEach(v => {
+        const yy = y(v); g.fillText(v, padL - 8, yy);
+        g.strokeStyle = cssVar("--plot-grid", "#243049"); g.beginPath(); g.moveTo(padL, yy); g.lineTo(padL + plotW, yy); g.stroke();
+      });
+      g.save(); g.translate(15, padT + plotH / 2); g.rotate(-Math.PI / 2);
+      g.textAlign = "center"; g.fillStyle = cssVar("--plot-label", "#a8b4cc"); g.font = "12px system-ui";
+      g.fillText("implied sustained TF/s", 0, 0); g.restore();
+
+      // reference lines
+      function refLine(tf, label, color) {
+        const yy = y(tf); g.strokeStyle = color; g.setLineDash([6, 4]); g.beginPath();
+        g.moveTo(padL, yy); g.lineTo(padL + plotW, yy); g.stroke(); g.setLineDash([]);
+        g.fillStyle = color; g.font = "11px system-ui"; g.textAlign = "right"; g.textBaseline = "bottom";
+        g.fillText(label, padL + plotW - 4, yy - 2);
+      }
+      refLine(PEAK_MKT, "1000 TF — FP4 sparse marketing peak", cssVar("--bad", "#ff6b6b"));
+      refLine(CEIL_FP4, "~500 TF — inferred dense-FP4 ceiling", cssVar("--accent2", "#54d6c4"));
+
+      // bars
+      const n = bars.length, bw = plotW / (n * 2), gap = bw;
+      bars.forEach((b, i) => {
+        const x = padL + gap + i * (bw + gap);
+        const yy = y(b.tf), h = padT + plotH - yy;
+        g.fillStyle = b.color(); g.fillRect(x, yy, bw, h);
+        g.fillStyle = cssVar("--text", "#dce3f0"); g.font = "bold 13px system-ui"; g.textAlign = "center"; g.textBaseline = "bottom";
+        g.fillText(b.tf >= 1000 ? (b.tf / 1000).toFixed(2) + " PF/s" : b.tf + " TF/s", x + bw / 2, yy - 4);
+        g.fillStyle = cssVar("--text-dim", "#8391ab"); g.font = "12px system-ui"; g.textBaseline = "top";
+        g.fillText(b.name, x + bw / 2, padT + plotH + 6);
+      });
+    }
+    draw();
+    out.innerHTML = `Same 2.6&nbsp;s wall-clock, two labels: reading it as FLUX.1-dev/28 demands ` +
+      `<span class="flag-bad">1.06 PFLOP/s</span> (above the marketing peak — impossible); reading it correctly as ` +
+      `FLUX.1-Schnell/4 gives <span class="flag-ok">191 TF/s</span> (30–38% MFU — plausible). The label is the whole bug.`;
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    window.addEventListener("resize", () => setTimeout(draw, 60));
+  })();
+
+  /* =================== QUIZ =================== */
+  renderQuiz("quiz-60", [
+    {
+      q: "At $1024^2$, the ratio of pixel-space to latent-space (FLUX, $f=8$, $2\\times2$ patchify) attention-matrix size is:",
+      num: 65536, tol: 0,
+      why: "Side shrinks by $f\\cdot p = 16$, area by $16^2$, and the attention matrix — quadratic in area — by $16^4 = 65{,}536$. $1.10\\text{e}12$ entries vs $1.68\\text{e}7$. [DER, constants §9.6]"
+    },
+    {
+      q: "Latent diffusion is <em>primarily</em> what kind of optimization?",
+      opts: [
+        "A memory optimization — it shrinks the weights",
+        "A compute optimization — 65,536× on the quadratic attention matrix",
+        "A bandwidth optimization — it reduces weight streaming",
+        "A precision optimization — it enables FP4"
+      ],
+      a: 1,
+      why: "The VAE barely touches weight memory (the weights are the mass). Its win is the $16^4$ collapse of the $S^2$ attention cost — a compute win. Calling it a memory optimization is the named misconception."
+    },
+    {
+      q: "Full fine-tuning FLUX.1-dev (12B) at the 16 B/param ledger needs how much <em>state</em> memory?",
+      num: 192, tol: 5, unit: "GB",
+      why: "$12\\text{e}9 \\times 16\\,\\text{B} = 192$ GB (weights + grads + fp32 master + Adam $m,v$), before ~4 GB activations. Does not fit your 121.69 GiB — LoRA does. [DER]"
+    },
+    {
+      q: "At bf16, is FLUX diffusion (4096 latent tokens/forward) compute-bound or bandwidth-bound on the Spark?",
+      opts: [
+        "Bandwidth-bound — limited by an ~88 ms/step weight-streaming floor",
+        "Compute-bound — $I = 4096$ sits 9–18× above the ridge, and one step needs ~1585 ms of arithmetic",
+        "Neither — it is latency-bound on the VAE decode",
+        "It depends entirely on CFG scale"
+      ],
+      a: 1,
+      why: "$I = S_{\\text{fwd}} = 4096$ is far above the 227–458 ridge under both ceilings. Compute needs $2\\times12\\text{e}9\\times4096/62\\text{e}12 \\approx 1585$ ms/step, an order of magnitude above the 88 ms bandwidth floor. The '88 ms bandwidth-bound' reading is the corrected §8.4 claim."
+    },
+    {
+      q: "The NVIDIA \"2.6 s / 1K image at FP4\" figure is measured on:",
+      opts: [
+        "FLUX.1-dev, 28 steps",
+        "FLUX.1-Schnell, 4 steps",
+        "FLUX.2-dev, 50 steps",
+        "SDXL, 20 steps"
+      ],
+      a: 1,
+      why: "It is FLUX.1-<b>Schnell</b>, 4 steps, $1024^2$, batch 1, FP4 [VP]. Read as dev/28 it implies 1.06 PFLOP/s = 106% of the sparse-FP4 marketing peak — impossible. The dev/28 reading is the deleted showpiece."
+    },
+    {
+      q: "Your box's usable <code>MemTotal</code>, measured, is (GiB):",
+      num: 121.69, tol: 0.1, unit: "GiB",
+      why: "$/proc/meminfo$ MemTotal $= 121.6875$ GiB [MEA-DEV] — not the 128 on the spec sheet. A firmware carveout eats 6.3125 GiB (4.9%) before you allocate a byte."
+    },
+    {
+      q: "For an SDXL LoRA that fits comfortably in 32 GB, a 5090 vs your Spark:",
+      opts: [
+        "The Spark is faster — it has more memory",
+        "The 5090 is faster — ~7× the bandwidth, and the job fits its 32 GB",
+        "They are identical — same architecture family",
+        "Neither can run it — SDXL needs 48 GB"
+      ],
+      a: 1,
+      why: "The Spark is a capacity machine, not a speed machine: 273 GB/s vs the 5090's ~1.8 TB/s. For jobs that <em>fit</em> in 32 GB the 5090 wins outright; the Spark only wins on jobs the 5090 cannot start (e.g. FLUX.2's 64 GB base weights)."
+    }
+  ], "Latent diffusion & the roofline — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>nn.js — test suite</title>
+<style>
+  body { background:#0e1420; color:#dce3f0; font:14px/1.55 system-ui, sans-serif; margin:0; padding:24px 28px; }
+  h1 { font-size:1.4rem; margin:0 0 4px; }
+  .sub { color:#8391ab; margin:0 0 18px; font-size:.85rem; }
+  #summary { padding:10px 14px; border-radius:8px; font-weight:600; margin:14px 0 20px; font-size:1rem; }
+  #summary.pass { background:#0f3a24; color:#7ee2a8; border:1px solid #1c6b43; }
+  #summary.fail { background:#3d1720; color:#ff9aa8; border:1px solid #7a2436; }
+  .grp { margin:20px 0 8px; font-weight:700; color:#4fc3f7; border-bottom:1px solid #243049; padding-bottom:4px; font-size:.95rem; }
+  .t { padding:3px 0 3px 10px; border-left:2px solid transparent; font-family:Consolas, monospace; font-size:12.5px; white-space:pre-wrap; }
+  .t.pass { border-left-color:#2e9e63; }
+  .t.fail { border-left-color:#e0455e; background:#2a1119; }
+  .tag { display:inline-block; width:46px; font-weight:700; }
+  .pass .tag { color:#7ee2a8; }
+  .fail .tag { color:#ff7b8f; }
+  .det { color:#8391ab; }
+  .note { color:#e8c46a; }
+</style>
+</head>
+<body>
+<h1>nn.js — test suite</h1>
+<p class="sub">Every op gradient-checked against central finite differences. The brief-training.md §5.4 worked example reproduced digit for digit.</p>
+<div id="summary">running…</div>
+<div id="out"></div>
+
+<script src="nn.js"></script>
+<script>
+"use strict";
+/* The whole suite runs inside an IIFE — same reason nn.js does. Also lets a
+   thrown error be caught and REPORTED rather than silently killing the page. */
+(function () {
+/* --------------------------------------------------------------------------
+   Tiny test harness. Prints actual numbers on every line — a test that only
+   says PASS is a test you cannot debug.
+   -------------------------------------------------------------------------- */
+const out = document.getElementById("out");
+let nPass = 0, nFail = 0;
+
+function group(name) {
+  const d = document.createElement("div");
+  d.className = "grp"; d.textContent = name;
+  out.appendChild(d);
+}
+function report(ok, name, detail) {
+  const d = document.createElement("div");
+  d.className = "t " + (ok ? "pass" : "fail");
+  d.innerHTML = '<span class="tag">' + (ok ? "PASS" : "FAIL") + "</span>" +
+    name + (detail ? '  <span class="det">' + detail + "</span>" : "");
+  out.appendChild(d);
+  ok ? nPass++ : nFail++;
+  return ok;
+}
+function note(txt) {
+  const d = document.createElement("div");
+  d.className = "t note"; d.innerHTML = '<span class="tag">note</span>' + txt;
+  out.appendChild(d);
+}
+/* near(actual, expected, tol) */
+function near(name, a, e, tol) {
+  tol = tol === undefined ? 1e-6 : tol;
+  const err = Math.abs(a - e);
+  return report(err <= tol, name, "got " + fmt(a) + "  expected " + fmt(e) + "  |Δ|=" + err.toExponential(2) + "  tol=" + tol.toExponential(1));
+}
+function fmt(v) {
+  if (!isFinite(v)) return String(v);
+  return (Math.abs(v) >= 1e-4 || v === 0) ? v.toFixed(8) : v.toExponential(4);
+}
+
+const N = window.NN;
+const { Value, V, RNG, MLP, Mat, gradCheck, worked221 } = N;
+
+/* ==========================================================================
+   TEST 1 — gradient check EVERY op against central finite differences
+   ========================================================================== */
+group("1. Gradient check — every op vs. central finite differences (ε=1e-6, tol=1e-6)");
+
+/* Each entry: build a loss from the given params using ONLY the op under test
+   (plus whatever is unavoidable), then compare autograd to (L(θ+ε)−L(θ−ε))/2ε.
+   Test points are chosen away from kinks and away from saturation, where FD is
+   meaningful. */
+const opTests = [
+  ["add        a+b",        [1.7, -0.9],       p => p[0].add(p[1])],
+  ["add const  a+3",        [1.7],             p => p[0].add(3)],
+  ["mul        a*b",        [1.7, -0.9],       p => p[0].mul(p[1])],
+  ["mul const  a*2.5",      [1.7],             p => p[0].mul(2.5)],
+  ["sub        a-b",        [1.7, -0.9],       p => p[0].sub(p[1])],
+  ["neg        -a",         [1.7],             p => p[0].neg()],
+  ["div        a/b",        [1.7, -0.9],       p => p[0].div(p[1])],
+  ["div const  a/4",        [1.7],             p => p[0].div(4)],
+  ["pow        a**3",       [1.3],             p => p[0].pow(3)],
+  ["pow        a**-2",      [1.3],             p => p[0].pow(-2)],
+  ["pow        a**0.5",     [2.7],             p => p[0].pow(0.5)],
+  ["tanh       tanh(a)",    [0.46],            p => p[0].tanh()],
+  ["tanh sat   tanh(3.0)",  [3.0],             p => p[0].tanh()],
+  ["sigmoid    σ(a)",       [0.5567],          p => p[0].sigmoid()],
+  ["sigmoid neg σ(-4.2)",   [-4.2],            p => p[0].sigmoid()],
+  ["relu       relu(+a)",   [1.9],             p => p[0].relu()],
+  ["relu       relu(-a)",   [-1.9],            p => p[0].relu()],
+  ["exp        exp(a)",     [0.8],             p => p[0].exp()],
+  ["log        log(a)",     [2.4],             p => p[0].log()],
+  ["chain      σ(tanh(a*b)+c)", [0.7, -1.3, 0.4],
+    p => p[0].mul(p[1]).tanh().add(p[2]).sigmoid()],
+  ["reuse      a*a + a  (same node twice)", [1.4],
+    p => p[0].mul(p[0]).add(p[0])],
+  ["deep reuse (a*b + a)*(b - a)", [0.9, -1.7],
+    p => p[0].mul(p[1]).add(p[0]).mul(p[1].sub(p[0]))],
+  ["mseLoss",               [0.3, -0.8],       p => N.mseLoss(p, [1.0, 0.0])],
+  ["bceLoss (prob in)",     [0.3, 0.75],       p => N.bceLoss([p[0].sigmoid(), p[1].sigmoid()], [1, 0])],
+  ["bceWithLogits z>0",     [1.4],             p => N.bceWithLogits(p, [1])],
+  ["bceWithLogits z<0",     [-2.1],            p => N.bceWithLogits(p, [1])],
+  ["bceWithLogits y=0",     [0.8],             p => N.bceWithLogits(p, [0])],
+  ["logSumExp",             [1.1, -0.4, 2.2],  p => N.logSumExp(p)],
+  ["crossEntropy t=0",      [1.1, -0.4, 2.2],  p => N.crossEntropyLoss(p, 0)],
+  ["crossEntropy t=2",      [1.1, -0.4, 2.2],  p => N.crossEntropyLoss(p, 2)],
+  ["softmaxValues[1]",      [1.1, -0.4, 2.2],  p => N.softmaxValues(p)[1]],
+];
+
+for (const [name, init, build] of opTests) {
+  const params = init.map((x, i) => V(x, "p" + i));
+  const gc = gradCheck(() => build(params), params, { eps: 1e-6, tol: 1e-6 });
+  const worst = gc.results.reduce((a, b) => (b.relErr > a.relErr ? b : a));
+  report(gc.ok, name,
+    "maxRelErr=" + gc.maxRelErr.toExponential(2) +
+    "  worst " + worst.label + ": analytic=" + fmt(worst.analytic) + " numeric=" + fmt(worst.numeric));
+}
+
+/* relu's subgradient at exactly 0 is a CONVENTION, not a limit. Finite
+   differences give 0.5 there; PyTorch chooses 0. Assert the convention. */
+(function () {
+  const a = V(0);
+  a.relu().backward();
+  report(a.grad === 0, "relu       subgradient at exactly x=0 is 0 (PyTorch convention; FD would say 0.5)",
+    "grad=" + a.grad);
+})();
+
+/* Whole-MLP gradient check — the real integration test. If autograd is wrong
+   anywhere in the composition, this catches it. */
+(function () {
+  const rng = new RNG(11);
+  const net = new MLP([3, 4, 4, 2], { act: "tanh", outAct: "identity", rng });
+  const X = [[0.5, -0.2, 0.9], [-1.1, 0.3, 0.4], [0.2, 0.8, -0.6]];
+  const Y = [0, 1, 1];
+  const build = () => {
+    const terms = X.map((x, i) => N.crossEntropyLoss(net.forward(x), Y[i]));
+    return N.vsum(terms).div(X.length);
+  };
+  const gc = gradCheck(build, net.parameters(), { eps: 1e-6, tol: 1e-6 });
+  report(gc.ok, "MLP[3,4,4,2] tanh + crossEntropy — all " + net.numParameters() + " params",
+    "maxRelErr=" + gc.maxRelErr.toExponential(2) + "  maxAbsErr=" + gc.maxAbsErr.toExponential(2));
+})();
+
+(function () {
+  const rng = new RNG(12);
+  const net = new MLP([2, 5, 1], { act: "relu", outAct: "identity", rng });
+  const X = [[0.5, -0.2], [-1.1, 0.3], [0.2, 0.8], [0.9, 0.4]];
+  const Y = [0, 1, 1, 0];
+  const build = () => N.vsum(X.map((x, i) => N.bceWithLogits(net.forward(x), [Y[i]]))).div(X.length);
+  const gc = gradCheck(build, net.parameters(), { eps: 1e-6, tol: 1e-5 });
+  report(gc.ok, "MLP[2,5,1] relu + bceWithLogits — all " + net.numParameters() + " params",
+    "maxRelErr=" + gc.maxRelErr.toExponential(2));
+})();
+
+/* ==========================================================================
+   TEST 2 — the 2-2-1 worked example, brief-training.md §5.4
+   ========================================================================== */
+group("2. The 2-2-1 worked example (brief-training.md §5.4) — reproduced verbatim");
+
+const w = worked221();
+
+near("forward   z₁₁ = 0.46",              w.forward.z1[0], 0.46,      1e-9);
+near("forward   z₁₂ = −0.14",             w.forward.z1[1], -0.14,     1e-9);
+near("forward   a₁₁ = tanh(0.46)",        w.forward.a1[0], 0.430084,  5e-7);
+near("forward   a₁₂ = tanh(−0.14)",       w.forward.a1[1], -0.139092, 5e-7);
+near("forward   z₂  = 0.556696",          w.forward.z2,    0.556696,  5e-7);
+near("forward   ŷ   = σ(z₂) = 0.635688",  w.forward.yhat,  0.635688,  5e-7);
+near("forward   L   = 0.453048",          w.loss,          0.453048,  5e-7);
+
+/* δ⁽²⁾ = ŷ − y is the sigmoid+BCE cancellation. Check the engine found it
+   without being told — b2's gradient IS δ⁽²⁾. */
+near("backward  δ⁽²⁾ = ŷ − y = −0.364312", w.grads.b2, -0.364312, 5e-7);
+
+const expectedGrads = {
+  W1_11: -0.124708, W1_12: +0.041569,
+  W1_21: +0.085743, W1_22: -0.028581,
+  b1_1:  -0.207847, b1_2:  +0.142906,
+  W2_1:  -0.156685, W2_2:  +0.050673,
+  b2:    -0.364312
+};
+for (const k of w.order) {
+  near("grad      ∂L/∂" + k.padEnd(6) + " = " + expectedGrads[k].toFixed(6), w.grads[k], expectedGrads[k], 5e-7);
+}
+
+/* Cross-check the same nine gradients against finite differences — this is the
+   §5.4 gradient-checking box, executed. */
+(function () {
+  const gc = gradCheck(w.rebuild, w.params, { eps: 1e-6, tol: 1e-6 });
+  report(gc.ok, "gradcheck all 9 params vs. central differences",
+    "maxRelErr=" + gc.maxRelErr.toExponential(2) + "  maxAbsErr=" + gc.maxAbsErr.toExponential(2));
+  const r11 = gc.results[0], r22 = gc.results[3];
+  near("  §5.4 table: W1_11 FD = −0.12470832", r11.numeric, -0.12470832, 1e-7);
+  near("  §5.4 table: W1_22 FD = −0.02858112", r22.numeric, -0.02858112, 1e-7);
+})();
+
+/* One SGD step, η = 0.5 — the emotional payoff of the whole trunk. */
+(function () {
+  const before = w.loss;
+  const newLoss = w.sgdStep(0.5);
+  const expectedNew = {
+    W1_11: 0.562354, W1_12: -0.320785, W1_21: 0.157128, W1_22: 0.814291,
+    b1_1: 0.203924, b1_2: -0.171453, W2_1: 0.778342, W2_2: -0.425337, b2: 0.382156
+  };
+  for (const k of w.order) {
+    near("post-step " + k.padEnd(6) + " = " + expectedNew[k].toFixed(6), w.P[k].data, expectedNew[k], 5e-7);
+  }
+  near("post-step ŷ: 0.635688 → 0.711643", w.forward.yhat, 0.711643, 5e-7);
+  near("post-step L: 0.453048 → 0.340179", newLoss, 0.340179, 5e-7);
+  near("post-step ΔL = −0.112869", newLoss - before, -0.112869, 5e-7);
+  report(newLoss < before, "the loss went DOWN after one hand-computable step",
+    fmt(before) + " → " + fmt(newLoss));
+})();
+
+/* The same nine numbers must also come out of the general MLP class, not just
+   the bespoke worked221 builder. If these disagree, the demos and the page
+   disagree, which is the failure mode this whole file exists to prevent. */
+(function () {
+  const net = new MLP([2, 2, 1], { act: "tanh", outAct: "sigmoid", rng: new RNG(1) });
+  // parameters() order: neuron by neuron, [w..., b] each.
+  net.setParameters([
+    0.5, -0.3, 0.1,    // hidden neuron 1: w11, w12, b1
+    0.2, 0.8, -0.1,    // hidden neuron 2: w21, w22, b2
+    0.7, -0.4, 0.2     // output neuron:   W2_1, W2_2, b2
+  ]);
+  net.zeroGrad();
+  const yhat = net.forward1([0.6, -0.2]);
+  const L = N.bceLoss(yhat, 1);
+  L.backward();
+  near("MLP class  L = 0.453048 (same net, general code path)", L.data, 0.453048, 5e-7);
+  near("MLP class  ŷ = 0.635688", yhat.data, 0.635688, 5e-7);
+  const g = net.getParameters().map((_, i) => net.parameters()[i].grad);
+  near("MLP class  ∂L/∂W1_11 = −0.124708", g[0], -0.124708, 5e-7);
+  near("MLP class  ∂L/∂b1_1  = −0.207847", g[2], -0.207847, 5e-7);
+  near("MLP class  ∂L/∂W2_1  = −0.156685", g[6], -0.156685, 5e-7);
+  near("MLP class  ∂L/∂b2    = −0.364312", g[8], -0.364312, 5e-7);
+})();
+
+/* ==========================================================================
+   TEST 3 — gradient ACCUMULATION semantics (PyTorch-identical)
+   ========================================================================== */
+group("3. Gradient accumulation — matching PyTorch, including the zero_grad() trap");
+
+(function () {
+  const a = V(2), b = V(3);
+  const build = () => a.mul(b).add(a); // L = a*b + a; dL/da = b+1 = 4, dL/db = a = 2
+  build().backward();
+  near("first backward:  dL/da = 4", a.grad, 4, 1e-12);
+  near("first backward:  dL/db = 2", b.grad, 2, 1e-12);
+  build().backward(); // NO zero_grad — leaves must accumulate
+  near("second backward WITHOUT zero_grad: dL/da = 8 (accumulated 2×)", a.grad, 8, 1e-12);
+  near("second backward WITHOUT zero_grad: dL/db = 4 (accumulated 2×)", b.grad, 4, 1e-12);
+  a.grad = 0; b.grad = 0;
+  build().backward();
+  near("after manual zero_grad: dL/da back to 4", a.grad, 4, 1e-12);
+  note("leaves accumulate — that is what makes micro-batch gradient accumulation work,");
+  note("and what blows a model up when you forget zero_grad(). See the two runs below.");
+})();
+
+(function () {
+  // Non-leaf grads must NOT accumulate, or a second backward() would push 2× through
+  // the interior and leaves would land on 3×, not 2× — a number PyTorch never prints.
+  const a = V(2);
+  const h = a.mul(3);       // non-leaf
+  const build = () => h.add(1);
+  build().backward();
+  const h1 = h.grad;
+  build().backward();
+  near("non-leaf grad does NOT accumulate (stays 1)", h.grad, h1, 1e-12);
+  near("...while the leaf below it DID accumulate (3 → 6)", a.grad, 6, 1e-12);
+})();
+
+/* The trap, run for real. Read this before building the zero_grad demo — the
+   obvious way to build it does not work, and these two tests say why. */
+
+(function () {
+  // MINI-BATCH: this is where forgetting zero_grad() actually bites. The
+  // accumulated gradient is a stale sum over ~t DIFFERENT mini-batches, so it
+  // grows ~linearly in t and the effective learning rate grows with it.
+  const mk = skip => {
+    const net = new MLP([2, 16, 16, 1], { act: "relu", rng: new RNG(99) });
+    const ds = N.makeDataset("moons", 200, { rng: new RNG(5), noise: 0.15 });
+    const opt = new N.SGD(net.parameters(), { lr: 0.1 });
+    const tr = new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt,
+      batchSize: 16, rng: new RNG(1), skipZeroGrad: skip });
+    tr.net = net;
+    return tr;
+  };
+  const good = mk(false), bad = mk(true);
+  let goodBlew = -1, badBlew = -1;
+  for (let i = 0; i < 200; i++) {
+    const g = good.step(), b = bad.step();
+    if (goodBlew < 0 && (!isFinite(g) || g > 2)) goodBlew = i;
+    if (badBlew < 0 && (!isFinite(b) || b > 2)) badBlew = i;
+  }
+  const gmax = t => Math.max.apply(null, t.net.parameters().map(p => Math.abs(p.grad)));
+  report(goodBlew < 0 && good.history[199] < 0.3, "mini-batch WITH zero_grad(): trains cleanly, never spikes",
+    fmt(good.history[0]) + " → " + fmt(good.history[199]) + ", max|g| = " + gmax(good).toExponential(2));
+  report(badBlew >= 0 && badBlew < 100, "mini-batch WITHOUT zero_grad(): loss blows past 2.0 inside 100 steps",
+    "first spike at step " + badBlew + ", loss " + fmt(bad.history[0]) + " → " + fmt(bad.history[199]));
+  report(gmax(bad) > 100 * gmax(good), "  ...and the gradient is orders of magnitude too large (the ~t× sum)",
+    "max|g|: " + gmax(good).toExponential(2) + " (correct) vs " + gmax(bad).toExponential(2) + " (accumulated)");
+
+  // HONEST NOTE, and it matters for how the demo is built:
+  // brief-training.md §6.5 says the symptom is "loss rises, then NaN". The
+  // "loss rises" half reproduces exactly. The NaN half does NOT — because
+  // bceWithLogits is the STABLE formulation, and softplus(z) grows only
+  // LINEARLY in |z|. A huge loss, never an infinite one. The NaN in the classic
+  // story comes from a NAIVE bce (log of a probability that saturated to 0/1).
+  // So: a zero_grad demo built on a stable loss shows a rising loss, not NaN.
+  report(isFinite(bad.history[199]), "  note: loss rises but stays FINITE — bceWithLogits cannot overflow",
+    "final = " + fmt(bad.history[199]) + " (the classic 'then NaN' needs a naive log-of-probability loss)");
+})();
+
+(function () {
+  // FULL BATCH: the surprise, and the reason to write this test down.
+  // With no mini-batch staleness, every accumulated gradient points the SAME
+  // way, so the sum acts like a growing learning rate along a consistent
+  // descent direction — it CONVERGES, and converges FASTER than the correct
+  // loop. A "forgot zero_grad()" demo built on full-batch XOR would show the
+  // bug HELPING. Build that demo mini-batch or it teaches the opposite lesson.
+  const mk = skip => {
+    const net = new MLP([2, 4, 1], { act: "tanh", rng: new RNG(99) });
+    const ds = N.xorData();
+    return new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce",
+      opt: new N.SGD(net.parameters(), { lr: 0.1 }), skipZeroGrad: skip });
+  };
+  const good = mk(false), bad = mk(true);
+  for (let i = 0; i < 200; i++) { good.step(); bad.step(); }
+  const gL = good.history[199], bL = bad.history[199];
+  report(isFinite(bL) && bL < gL, "full-batch XOR WITHOUT zero_grad(): converges FASTER, does not break",
+    "with zero_grad " + fmt(gL) + "  vs without " + fmt(bL) + " — no staleness to accumulate");
+  note("↑ therefore: the zero_grad() demo MUST use mini-batches. Full-batch hides the bug.");
+})();
+
+/* ==========================================================================
+   TEST 4 — softmax numerical stability
+   ========================================================================== */
+group("4. Softmax numerical stability — with and without max-subtraction");
+
+(function () {
+  // brief-training.md §: naive softmax on [1000,1001,1002] overflows float64.
+  const z = [1000, 1001, 1002];
+  const naive = N.softmax(z, { stable: false });
+  const stable = N.softmax(z, { stable: true });
+  report(naive.every(v => !isFinite(v) || isNaN(v)), "naive softmax([1000,1001,1002]) → NaN (e^1000 overflows float64)",
+    "[" + naive.join(", ") + "]");
+  report(stable.every(isFinite), "stable softmax([1000,1001,1002]) → finite",
+    "[" + stable.map(v => v.toFixed(6)).join(", ") + "]");
+  // The identity is EXACT: softmax(z) == softmax(z - max). Check against the
+  // small-input answer, which naive can compute.
+  const small = N.softmax([0, 1, 2], { stable: false });
+  let maxd = 0;
+  for (let i = 0; i < 3; i++) maxd = Math.max(maxd, Math.abs(stable[i] - small[i]));
+  report(maxd < 1e-12, "shift-invariance is EXACT: softmax([1000,1001,1002]) == softmax([0,1,2])",
+    "max|Δ| = " + maxd.toExponential(2));
+  near("  and it equals the analytic value e²/(1+e+e²)", stable[2], Math.exp(2) / (1 + Math.E + Math.exp(2)), 1e-12);
+})();
+
+(function () {
+  // Large NEGATIVE logits: naive underflows every term to 0 → 0/0 → NaN.
+  const z = [-1000, -1001, -1002];
+  const naive = N.softmax(z, { stable: false });
+  const stable = N.softmax(z, { stable: true });
+  report(naive.some(v => isNaN(v)), "naive softmax([−1000,−1001,−1002]) → NaN (all terms underflow, 0/0)",
+    "[" + naive.join(", ") + "]");
+  report(stable.every(isFinite) && Math.abs(stable.reduce((a, b) => a + b) - 1) < 1e-12,
+    "stable version still sums to exactly 1", "Σ = " + stable.reduce((a, b) => a + b));
+})();
+
+(function () {
+  const M = Mat.from([[1000, 1001, 1002], [0, 0, 0]]);
+  const A = N.softmaxRows(M);
+  const sums = A.rowSums();
+  report(sums.every(s => Math.abs(s - 1) < 1e-6), "softmaxRows: every row sums to 1 even with overflowing logits",
+    "row sums = [" + sums.map(s => s.toFixed(6)).join(", ") + "]");
+  const uni = A.row(1);
+  report(uni.every(v => Math.abs(v - 1 / 3) < 1e-6), "softmaxRows: equal logits → uniform 1/3",
+    "[" + uni.map(v => v.toFixed(6)).join(", ") + "]");
+})();
+
+(function () {
+  // logSumExp / crossEntropy must survive logits that would overflow. This is
+  // why the course says CrossEntropyLoss takes LOGITS, not probabilities.
+  const logits = [1000, 1001, 1002].map(V);
+  const L = N.crossEntropyLoss(logits, 2);
+  const ref = N.crossEntropyLoss([0, 1, 2].map(V), 2);
+  report(isFinite(L.data), "crossEntropyLoss on logits [1000,1001,1002] → finite", "L = " + fmt(L.data));
+  near("  and identical to the same loss on [0,1,2] (shift invariance)", L.data, ref.data, 1e-9);
+  L.backward();
+  const g = logits.map(v => v.grad);
+  report(g.every(isFinite), "  gradients finite too", "[" + g.map(fmt).join(", ") + "]");
+  // dL/dz = softmax(z) - onehot(t); must sum to 0.
+  near("  Σ dL/dz = 0 (softmax − one-hot)", g[0] + g[1] + g[2], 0, 1e-9);
+})();
+
+/* ==========================================================================
+   TEST 5 — XOR trains to convergence, deterministically, from a seeded init
+   ========================================================================== */
+group("5. XOR trains to convergence from a seeded init");
+
+(function () {
+  const rng = new RNG(1234);
+  const net = new MLP([2, 4, 1], { act: "tanh", outAct: "identity", rng });
+  const ds = N.xorData();
+  const opt = new N.Adam(net.parameters(), { lr: 0.08 });
+  const tr = new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt });
+  const L0 = tr.evalLoss();
+  for (let i = 0; i < 800; i++) tr.step();
+  const L1 = tr.evalLoss();
+  const acc = tr.accuracy();
+  report(L1 < 0.02, "XOR loss converges below 0.02 in 800 Adam steps", fmt(L0) + " → " + fmt(L1));
+  report(acc === 1, "XOR accuracy = 4/4", "acc = " + acc);
+  // All four corners must be right, individually — the whole point of XOR is
+  // that a linear model gets exactly 3 of 4.
+  const preds = ds.X.map(x => net.forward1(x).data);
+  const ok = preds.map((z, i) => (z > 0 ? 1 : 0) === ds.y[i]);
+  report(ok.every(Boolean), "  each corner: [0,0]→0 [0,1]→1 [1,0]→1 [1,1]→0",
+    preds.map((z, i) => "(" + ds.X[i] + ")→" + (z > 0 ? 1 : 0)).join("  "));
+
+  // A LINEAR model must fail — otherwise the dataset isn't testing what we think.
+  const lin = new MLP([2, 1], { outAct: "identity", rng: new RNG(1234) });
+  const lopt = new N.Adam(lin.parameters(), { lr: 0.08 });
+  const ltr = new N.Trainer({ model: lin, X: ds.X, y: ds.y, loss: "bce", opt: lopt });
+  for (let i = 0; i < 800; i++) ltr.step();
+  report(ltr.accuracy() <= 0.75, "  control: a LINEAR model cannot exceed 75% on XOR",
+    "acc = " + ltr.accuracy() + ", loss = " + fmt(ltr.evalLoss()) + " (stuck near ln2=0.693)");
+})();
+
+(function () {
+  const rng = new RNG(7);
+  const ds = N.makeDataset("moons", 120, { rng: new RNG(3), noise: 0.12 });
+  const net = new MLP([2, 8, 8, 1], { act: "tanh", outAct: "identity", rng });
+  const opt = new N.Adam(net.parameters(), { lr: 0.05 });
+  const tr = new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt });
+  const L0 = tr.evalLoss();
+  for (let i = 0; i < 400; i++) tr.step();
+  const acc = tr.accuracy();
+  report(acc >= 0.97, "two-moons (120 pts, 2-8-8-1) reaches ≥97% in 400 steps",
+    "loss " + fmt(L0) + " → " + fmt(tr.evalLoss()) + ", acc = " + (acc * 100).toFixed(1) + "%");
+})();
+
+/* ==========================================================================
+   TEST 6 — Adam vs SGD on a convex problem
+   ========================================================================== */
+group("6. Adam and SGD both converge on a convex problem");
+
+(function () {
+  // Logistic regression on linearly-separable blobs: convex, so both optimizers
+  // must find the same basin. This tests correctness, not a speed race.
+  const ds = N.makeDataset("blobs", 80, { rng: new RNG(21), noise: 0.18 });
+  const run = (mkOpt, name, steps) => {
+    const net = new MLP([2, 1], { outAct: "identity", rng: new RNG(5) });
+    const tr = new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt: mkOpt(net.parameters()) });
+    const L0 = tr.evalLoss();
+    for (let i = 0; i < steps; i++) tr.step();
+    return { L0, L1: tr.evalLoss(), acc: tr.accuracy(), name };
+  };
+  const sgd = run(p => new N.SGD(p, { lr: 0.5 }), "SGD(lr=0.5)", 600);
+  const adam = run(p => new N.Adam(p, { lr: 0.1 }), "Adam(lr=0.1)", 600);
+  report(sgd.L1 < 0.1 && sgd.acc === 1, "SGD converges  (convex logistic regression)",
+    fmt(sgd.L0) + " → " + fmt(sgd.L1) + ", acc = " + sgd.acc);
+  report(adam.L1 < 0.1 && adam.acc === 1, "Adam converges (same problem, same init)",
+    fmt(adam.L0) + " → " + fmt(adam.L1) + ", acc = " + adam.acc);
+
+  // Convex quadratic with a known minimum — check both land ON it, not just near.
+  // f(a,b) = (a-3)² + 5(b+2)²  → argmin (3, -2), min 0. Ill-conditioned (κ=5).
+  const quad = (mkOpt, steps) => {
+    const a = V(0), b = V(0);
+    const opt = mkOpt([a, b]);
+    for (let i = 0; i < steps; i++) {
+      opt.zeroGrad();
+      a.sub(3).pow(2).add(b.add(2).pow(2).mul(5)).backward();
+      opt.step();
+    }
+    return [a.data, b.data];
+  };
+  const qs = quad(p => new N.SGD(p, { lr: 0.05 }), 500);
+  const qa = quad(p => new N.Adam(p, { lr: 0.05 }), 3000);
+  report(Math.abs(qs[0] - 3) < 1e-4 && Math.abs(qs[1] + 2) < 1e-4,
+    "SGD finds argmin of (a−3)²+5(b+2)² = (3, −2)", "got (" + fmt(qs[0]) + ", " + fmt(qs[1]) + ")");
+  report(Math.abs(qa[0] - 3) < 1e-3 && Math.abs(qa[1] + 2) < 1e-3,
+    "Adam finds the same argmin", "got (" + fmt(qa[0]) + ", " + fmt(qa[1]) + ")");
+})();
+
+(function () {
+  // Adam's bias correction, checked arithmetically. Step 1 of Adam with any
+  // gradient must move exactly lr (sign-flipped), because m̂/√v̂ = g/|g| = ±1
+  // once both moments are bias-corrected. THAT is what bias correction buys, and
+  // it is the cleanest possible test of it.
+  const p = V(5);
+  const opt = new N.Adam([p], { lr: 0.1, eps: 0 });
+  p.grad = 42;      // magnitude is irrelevant — that is the whole point
+  opt.step();
+  near("Adam step 1 moves exactly −lr regardless of |g| (bias correction works)",
+    p.data, 5 - 0.1, 1e-12);
+  const q = V(5);
+  const opt2 = new N.Adam([q], { lr: 0.1, eps: 0 });
+  q.grad = 0.0001;
+  opt2.step();
+  near("  ...same step for a 420000× smaller gradient", q.data, 5 - 0.1, 1e-12);
+})();
+
+(function () {
+  // SGD with momentum must match the closed form for a constant gradient:
+  // buf_t = sum_{k<t} mu^k * g  →  after 3 steps at mu=0.9, g=1, lr=0.1:
+  // bufs = 1, 1.9, 2.71 ; total displacement = 0.1*(1+1.9+2.71) = 0.561
+  const p = V(0);
+  const opt = new N.SGD([p], { lr: 0.1, momentum: 0.9 });
+  for (let i = 0; i < 3; i++) { p.grad = 1; opt.step(); }
+  near("SGD+momentum matches the closed form after 3 steps", p.data, -0.561, 1e-12);
+})();
+
+/* ==========================================================================
+   TEST 7 — determinism
+   ========================================================================== */
+group("7. Determinism — same seed → bit-identical results");
+
+(function () {
+  const r1 = new RNG(2024), r2 = new RNG(2024), r3 = new RNG(2025);
+  const a = [], b = [], c = [];
+  for (let i = 0; i < 200; i++) { a.push(r1.random()); b.push(r2.random()); c.push(r3.random()); }
+  report(a.every((v, i) => v === b[i]), "RNG(2024) === RNG(2024), 200 draws, bit-identical",
+    "first = " + a[0]);
+  report(a.some((v, i) => v !== c[i]), "RNG(2024) !== RNG(2025) (the seed actually does something)");
+
+  const g1 = new RNG(9), g2 = new RNG(9);
+  const n1 = [], n2 = [];
+  for (let i = 0; i < 200; i++) { n1.push(g1.normal(0, 1)); n2.push(g2.normal(0, 1)); }
+  report(n1.every((v, i) => v === n2[i]), "Box-Muller normals bit-identical for the same seed",
+    "first = " + n1[0]);
+  // Sanity: are they actually Gaussian? 20k samples, mean ≈ 0, std ≈ 1.
+  const g = new RNG(31), s = [];
+  for (let i = 0; i < 20000; i++) s.push(g.normal(0, 1));
+  report(Math.abs(N.mean(s)) < 0.03 && Math.abs(N.std(s) - 1) < 0.03,
+    "  and they are actually N(0,1) over 20k samples",
+    "mean = " + N.mean(s).toFixed(5) + ", std = " + N.std(s).toFixed(5));
+
+  const rr = new RNG(4); const first = [rr.random(), rr.random()];
+  rr.reset(); const again = [rr.random(), rr.random()];
+  report(first[0] === again[0] && first[1] === again[1], "RNG.reset() restores the exact stream (a demo's Reset button)");
+})();
+
+(function () {
+  // The one that matters: a whole training run must be reproducible.
+  const runOnce = () => {
+    const net = new MLP([2, 6, 1], { act: "tanh", rng: new RNG(777) });
+    const ds = N.makeDataset("moons", 60, { rng: new RNG(778), noise: 0.15 });
+    const opt = new N.Adam(net.parameters(), { lr: 0.05 });
+    const tr = new N.Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt, batchSize: 16, rng: new RNG(779) });
+    for (let i = 0; i < 200; i++) tr.step();
+    return { losses: tr.history, params: net.getParameters() };
+  };
+  const A = runOnce(), B = runOnce();
+  const lossSame = A.losses.every((v, i) => v === B.losses[i]);
+  const parSame = A.params.every((v, i) => v === B.params[i]);
+  report(lossSame, "200-step mini-batch training run: loss history bit-identical across runs",
+    "final loss = " + fmt(A.losses[199]));
+  report(parSame, "  ...and every one of the " + A.params.length + " final parameters is bit-identical",
+    "p[0] = " + A.params[0]);
+
+  const ds1 = N.makeDataset("spiral", 50, { rng: new RNG(3) });
+  const ds2 = N.makeDataset("spiral", 50, { rng: new RNG(3) });
+  report(ds1.X.every((p, i) => p[0] === ds2.X[i][0] && p[1] === ds2.X[i][1]),
+    "makeDataset is deterministic given a seed");
+})();
+
+/* ==========================================================================
+   TEST 8 — Mat: shapes, ops, and readable errors
+   ========================================================================== */
+group("8. Mat — matmul, transpose, layernorm, and learner-readable shape errors");
+
+(function () {
+  const A = Mat.from([[1, 2, 3], [4, 5, 6]]);        // (2,3)
+  const B = Mat.from([[7, 8], [9, 10], [11, 12]]);   // (3,2)
+  const C = A.matmul(B);
+  report(C.rows === 2 && C.cols === 2, "matmul (2,3)@(3,2) → (2,2)", "got " + C.shapeStr);
+  const exp = [[58, 64], [139, 154]];
+  let ok = true;
+  for (let i = 0; i < 2; i++) for (let j = 0; j < 2; j++) if (Math.abs(C.get(i, j) - exp[i][j]) > 1e-4) ok = false;
+  report(ok, "  values correct", JSON.stringify(C.toArray()));
+
+  const T = A.T();
+  report(T.rows === 3 && T.cols === 2 && T.get(2, 1) === 6, "transpose (2,3) → (3,2)", "got " + T.shapeStr);
+  report(A.T().T().toArray().flat().every((v, i) => v === A.data[i]), "  transpose is an involution: A.T().T() == A");
+
+  const I = Mat.eye(3);
+  report(A.matmul(I).toArray().flat().every((v, i) => Math.abs(v - A.data[i]) < 1e-5), "A @ I == A");
+})();
+
+(function () {
+  // Shape errors are teaching surface: they must name BOTH shapes.
+  let msg = "";
+  try { Mat.from([[1, 2, 3], [4, 5, 6]]).matmul(Mat.from([[1, 2], [3, 4]])); }
+  catch (e) { msg = e.message; }
+  const good = msg.includes("(2,3)") && msg.includes("(2,2)") && /columns/.test(msg) && /rows/.test(msg);
+  report(good, "matmul shape error names BOTH shapes and explains the rule", "\n         " + msg);
+
+  let msg2 = "";
+  try { Mat.from([[1, 2], [3, 4]]).add(Mat.from([[1, 2, 3], [4, 5, 6]])); }
+  catch (e) { msg2 = e.message; }
+  report(msg2.includes("(2,2)") && msg2.includes("(2,3)"), "elementwise shape error names both shapes",
+    "\n         " + msg2);
+
+  let msg3 = "";
+  try { Mat.from([[1, 2, 3], [4, 5, 6]]).reshape(4, 4); }
+  catch (e) { msg3 = e.message; }
+  report(/6/.test(msg3) && /16/.test(msg3), "reshape error states both element counts", "\n         " + msg3);
+
+  let msg4 = "";
+  try { Mat.from([[1, 2, 3], [4, 5]]); } catch (e) { msg4 = e.message; }
+  report(/ragged/i.test(msg4), "Mat.from catches ragged input", "\n         " + msg4);
+})();
+
+(function () {
+  const A = Mat.from([[1, 2], [3, 4]]);
+  const r = Mat.from([[10, 20]]);            // (1,2) row vector
+  const c = new Mat(2, 1, [100, 200]);       // (2,1) column vector
+  report(JSON.stringify(A.add(r).toArray()) === JSON.stringify([[11, 22], [13, 24]]),
+    "broadcast add of a (1,2) row vector", JSON.stringify(A.add(r).toArray()));
+  report(JSON.stringify(A.add(c).toArray()) === JSON.stringify([[101, 102], [203, 204]]),
+    "broadcast add of a (2,1) column vector", JSON.stringify(A.add(c).toArray()));
+  report(JSON.stringify(A.add(5).toArray()) === JSON.stringify([[6, 7], [8, 9]]), "broadcast add of a scalar");
+  report(JSON.stringify(A.mul(A).toArray()) === JSON.stringify([[1, 4], [9, 16]]),
+    "mul() is Hadamard (elementwise), NOT matmul", JSON.stringify(A.mul(A).toArray()));
+})();
+
+(function () {
+  const M = Mat.from([[1, 2, 3, 4], [10, 10, 10, 10]]);
+  const L = N.layerNorm(M, { eps: 0 });
+  const r0 = L.row(0);
+  const mu = N.mean(r0), sd = N.std(r0);
+  report(Math.abs(mu) < 1e-5 && Math.abs(sd - 1) < 1e-4, "layerNorm: each row → mean 0, std 1",
+    "row0 mean = " + mu.toExponential(2) + ", std = " + sd.toFixed(6));
+  // A constant row has variance 0. With the DEFAULT eps it normalizes to zeros;
+  // with eps=0 it is genuinely 0/0 and must give NaN, not a silently clamped
+  // lie. Both behaviours are asserted — honest degradation is the house rule.
+  const Ldef = N.layerNorm(M);                 // default eps = 1e-5
+  const r1 = Ldef.row(1);
+  report(r1.every(v => Math.abs(v) < 1e-3), "  a constant row → all zeros (default eps guards the 0/0)",
+    "[" + r1.map(v => v.toFixed(6)).join(", ") + "]");
+  report(L.row(1).every(isNaN), "  ...but with eps=0 it is honestly NaN, not clamped to a plausible lie",
+    "[" + L.row(1).join(", ") + "]");
+  // Statistics are PER ROW (per token), never across the batch. Prove it: change
+  // row 1 and row 0 must not move.
+  const M2 = Mat.from([[1, 2, 3, 4], [999, -999, 0, 7]]);
+  const L2 = N.layerNorm(M2, { eps: 0 });
+  report(L2.row(0).every((v, i) => Math.abs(v - r0[i]) < 1e-5),
+    "  row 0 is unaffected by row 1 (LayerNorm is per-token, not per-batch)");
+  const G = N.layerNorm(M, { eps: 0, gamma: [2, 2, 2, 2], beta: [1, 1, 1, 1] });
+  report(G.row(0).every((v, i) => Math.abs(v - (r0[i] * 2 + 1)) < 1e-4), "  gamma/beta applied as γ·x̂ + β");
+
+  const R = N.rmsNorm(Mat.from([[3, 4]]), { eps: 0 });
+  // rms([3,4]) = sqrt((9+16)/2) = 3.5355 → [0.8485, 1.1314]
+  near("rmsNorm([3,4])[0] = 3/√12.5", R.get(0, 0), 3 / Math.sqrt(12.5), 1e-5);
+})();
+
+/* ==========================================================================
+   TEST 9 — attention
+   ========================================================================== */
+group("9. Attention — softmax(QKᵀ/√dₖ)V, with the weights exposed");
+
+(function () {
+  const rng = new RNG(17);
+  const Q = Mat.randn(4, 8, rng), K = Mat.randn(5, 8, rng), V = Mat.randn(5, 3, rng);
+  const a = N.attention(Q, K, V);
+  report(a.A.rows === 4 && a.A.cols === 5, "A is (n,m) = (4,5)", "got " + a.A.shapeStr);
+  report(a.O.rows === 4 && a.O.cols === 3, "O is (n,dv) = (4,3)", "got " + a.O.shapeStr);
+  report(a.A.rowSums().every(s => Math.abs(s - 1) < 1e-5), "every attention row sums to 1",
+    "[" + a.A.rowSums().map(s => s.toFixed(6)).join(", ") + "]");
+  near("default scale is 1/√dₖ = 1/√8", a.tau, Math.sqrt(8), 1e-9);
+
+  // O[i] must equal the A-weighted average of V's rows — the definition.
+  let maxErr = 0;
+  for (let i = 0; i < 4; i++)
+    for (let d = 0; d < 3; d++) {
+      let s = 0;
+      for (let j = 0; j < 5; j++) s += a.A.get(i, j) * V.get(j, d);
+      maxErr = Math.max(maxErr, Math.abs(s - a.O.get(i, d)));
+    }
+  report(maxErr < 1e-4, "O = A@V is literally a weighted average of the value rows",
+    "max|Δ| = " + maxErr.toExponential(2));
+})();
+
+(function () {
+  const rng = new RNG(23);
+  const Q = Mat.randn(4, 4, rng), K = Mat.randn(4, 4, rng), V = Mat.randn(4, 2, rng);
+  const a = N.attention(Q, K, V, { causal: true });
+  let leak = false;
+  for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) if (j > i && a.A.get(i, j) !== 0) leak = true;
+  report(!leak, "causal mask: A[i][j] == 0 for every j > i (no leak from the future)");
+  report(a.A.rowSums().every(s => Math.abs(s - 1) < 1e-5), "  masked rows still sum to 1 (masked BEFORE softmax)",
+    "[" + a.A.rowSums().map(s => s.toFixed(6)).join(", ") + "]");
+  report(Math.abs(a.A.get(0, 0) - 1) < 1e-6, "  row 0 attends only to itself, weight exactly 1",
+    "A[0][0] = " + a.A.get(0, 0));
+})();
+
+(function () {
+  // The τ demo: low temperature → hard argmax, entropy→0, gradient health→0.
+  const Q = Mat.from([[1, 0]]), K = Mat.from([[1, 0], [0.7, 0], [0, 1]]), V = Mat.eye(3).reshape(3, 3);
+  const hot = N.attention(Q, K, V, { temperature: 0.01 });
+  const cold = N.attention(Q, K, V, { temperature: 100 });
+  report(hot.entropy[0] < 1e-6, "τ → 0: entropy → 0 (hard argmax)", "H = " + hot.entropy[0].toExponential(2) +
+    ", effective keys = " + hot.effKeys[0].toFixed(4));
+  report(hot.gradHealth < 1e-4, "  gradient health collapses — 'I broke it by making it too confident'",
+    "max A(1−A) = " + hot.gradHealth.toExponential(2));
+  report(Math.abs(cold.entropy[0] - Math.log(3)) < 1e-3, "τ → ∞: entropy → log(m) = log 3 (uniform)",
+    "H = " + cold.entropy[0].toFixed(6) + " vs log3 = " + Math.log(3).toFixed(6));
+  report(Math.abs(cold.effKeys[0] - 3) < 0.01, "  effective keys → 3 (attending to everything equally)",
+    "effKeys = " + cold.effKeys[0].toFixed(4));
+})();
+
+(function () {
+  // Hand-checkable case: Q=K=one-hot, so scores are 0/1 and the softmax is
+  // computable with a calculator. dk=2 → τ=√2.
+  const Q = Mat.from([[1, 0]]), K = Mat.from([[1, 0], [0, 1]]), V = Mat.from([[10, 0], [0, 20]]);
+  const a = N.attention(Q, K, V);
+  const s = 1 / Math.sqrt(2);
+  const p0 = Math.exp(s) / (Math.exp(s) + 1), p1 = 1 - p0;
+  near("hand-check: A[0][0] = e^(1/√2)/(e^(1/√2)+1)", a.A.get(0, 0), p0, 1e-5);
+  near("hand-check: O[0][0] = 10·A[0][0]", a.O.get(0, 0), 10 * p0, 1e-4);
+  near("hand-check: O[0][1] = 20·A[0][1]", a.O.get(0, 1), 20 * p1, 1e-4);
+})();
+
+(function () {
+  let msg = "";
+  try { N.attention(Mat.randn(3, 8, new RNG(1)), Mat.randn(3, 4, new RNG(1)), Mat.randn(3, 4, new RNG(1))); }
+  catch (e) { msg = e.message; }
+  report(msg.includes("(3,8)") && msg.includes("(3,4)") && /d_k/.test(msg),
+    "attention shape error names both shapes and says why", "\n         " + msg);
+  let msg2 = "";
+  try { N.attention(Mat.randn(3, 4, new RNG(1)), Mat.randn(5, 4, new RNG(1)), Mat.randn(6, 4, new RNG(1))); }
+  catch (e) { msg2 = e.message; }
+  report(/K and V/.test(msg2) && msg2.includes("(5,4)") && msg2.includes("(6,4)"),
+    "  K/V row mismatch caught with both shapes", "\n         " + msg2);
+})();
+
+/* ==========================================================================
+   TEST 10 — datasets
+   ========================================================================== */
+group("10. Datasets");
+
+(function () {
+  for (const kind of ["moons", "circles", "xor", "spiral", "blobs"]) {
+    const ds = N.makeDataset(kind, 100, { rng: new RNG(8) });
+    const bal = ds.y.filter(v => v === 1).length / ds.n;
+    const inRange = ds.X.every(p => Math.abs(p[0]) < 4 && Math.abs(p[1]) < 4);
+    report(ds.n === 100 && bal > 0.3 && bal < 0.7 && inRange,
+      kind.padEnd(8) + " — 100 pts, roughly balanced, inside the plot window",
+      "class1 = " + (bal * 100).toFixed(0) + "%");
+  }
+  const noisy = N.makeDataset("moons", 200, { rng: new RNG(8), labelNoise: 0.2 });
+  const clean = N.makeDataset("moons", 200, { rng: new RNG(8) });
+  const flipped = noisy.y.filter((v, i) => v !== clean.y[i]).length;
+  report(flipped > 20 && flipped < 60, "labelNoise: 0.2 flips ~20% of labels (needed for the overfitting demo)",
+    flipped + "/200 flipped = " + (flipped / 2).toFixed(0) + "%");
+  const sp = N.trainTestSplit(N.makeDataset("moons", 100, { rng: new RNG(8) }), 0.7, new RNG(2));
+  report(sp.train.X.length === 70 && sp.test.X.length === 30, "trainTestSplit(0.7) → 70/30",
+    sp.train.X.length + "/" + sp.test.X.length);
+  let m = ""; try { N.makeDataset("banana", 10); } catch (e) { m = e.message; }
+  report(/banana/.test(m) && /Known/.test(m), "unknown dataset kind lists the valid ones", "\n         " + m);
+})();
+
+/* ==========================================================================
+   TEST 11 — misc guards
+   ========================================================================== */
+group("11. Guards and error messages");
+
+(function () {
+  let m = ""; try { V(0.5).pow(V(2)); } catch (e) { m = e.message; }
+  report(/plain number constant/.test(m), "pow() with a Value exponent throws a useful message", "\n         " + m);
+  m = ""; try { V(-1).log(); } catch (e) { m = e.message; }
+  report(/undefined/.test(m) && /logits/.test(m), "log() of a negative points at the logits-based loss", "\n         " + m);
+  m = ""; try { N.crossEntropyLoss([V(1), V(2)], 5); } catch (e) { m = e.message; }
+  report(/out of range/.test(m) && /0\.\.1/.test(m), "crossEntropy target out of range names the valid range", "\n         " + m);
+  m = ""; try { new MLP([2, 3, 1], { act: "swish" }); } catch (e) { m = e.message; }
+  report(/swish/.test(m) && /Known/.test(m), "unknown activation lists the known ones", "\n         " + m);
+  m = ""; try { new MLP([2, 2, 1]).setParameters([1, 2, 3]); } catch (e) { m = e.message; }
+  report(/9/.test(m) && /3/.test(m), "setParameters length mismatch names both counts", "\n         " + m);
+  m = ""; try { new MLP([2, 3, 1]).forward([1, 2, 3]); } catch (e) { m = e.message; }
+  report(/expected 2 inputs, got 3/.test(m), "forward() with the wrong input width says so", "\n         " + m);
+})();
+
+(function () {
+  // A deep graph must not blow the JS stack — the topo sort is iterative for
+  // exactly this reason. 50k chained ops is far past any recursive DFS.
+  let v = V(0.001);
+  for (let i = 0; i < 50000; i++) v = v.add(0.00001);
+  let ok = true, err = "";
+  try { v.backward(); } catch (e) { ok = false; err = e.message; }
+  report(ok, "50,000-deep graph backprops without a stack overflow (iterative topo sort)",
+    ok ? "leaf grad = 1" : err);
+})();
+
+/* ==========================================================================
+   SUMMARY
+   ========================================================================== */
+const sum = document.getElementById("summary");
+sum.className = nFail === 0 ? "pass" : "fail";
+sum.textContent = nFail === 0
+  ? "ALL " + nPass + " TESTS PASSED"
+  : nFail + " FAILED, " + nPass + " passed  (of " + (nPass + nFail) + ")";
+// Machine-readable line for the headless runner to grep.
+const marker = document.createElement("div");
+marker.id = "result";
+marker.textContent = (nFail === 0 ? "RESULT_OK" : "RESULT_FAIL") + " pass=" + nPass + " fail=" + nFail;
+marker.style.cssText = "margin-top:18px;color:#8391ab;font-family:monospace;font-size:11px";
+document.body.appendChild(marker);
+})();
+</script>
+</body>
+</html>

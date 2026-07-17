@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>30. Attention II: The √d_head Thermostat and Many Heads — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The flagship demo is a driveable attention heatmap: a real
+   softmax(QKᵀ/τ + M)V computed live over a fixed 10-token sentence, with a
+   temperature slider that has a detent at τ = √d_head = 11.31. Wide artifacts
+   scroll inside their own box so the page body never scrolls sideways. */
+.att-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 860px) { .att-grid { grid-template-columns: 1fr; } }
+.ribbon { font-family: var(--mono, monospace); font-size: .82rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); }
+.att-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 6px 0; }
+.att-row select { background: var(--bg-code); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; padding: 3px 6px; font-family: var(--mono, monospace); }
+.att-row label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; cursor: pointer; }
+.att-btn { background: var(--bg-code); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: .85rem; }
+.att-btn:hover { background: var(--accent); color: #fff; }
+.stat { font-family: var(--mono, monospace); }
+.stat.bad { color: var(--bad, #e06c75); font-weight: 700; }
+.stat.good { color: var(--good, #6cc57a); font-weight: 700; }
+@media (max-width: 780px) { .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="30-attention-scale-and-heads.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Attention II: The √d<sub>head</sub> Thermostat and Many Heads</h1>
+    <p class="subtitle">Page 29 built the soft lookup and never justified the little $\sqrt{d_{\text{head}}}$
+      under the scores — the most hand-waved symbol in every explainer. Here we <em>derive</em> it, and find it is
+      not numerical hygiene but a thermostat on the softmax's temperature: too cold and attention freezes into a
+      gradient-free argmax; too hot and it melts into a uniform blur. Then we split one head into many and discover
+      the heads are a <em>reshape</em>, not eight matrices. You set <code>temperature</code> in samplers already;
+      this is the same knob, one layer down.</p>
+
+    <!-- ===================== THREADS ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD: the dot product — beat 5]</b>. <em>Same atom as page 27's similarity meter and page 29's
+      $QK^\top$ table.</em> <em>What is new:</em> a <b>head</b> is a <em>choice of directions</em> to measure
+      similarity along — its $W_Q,W_K$ pick which axes count. Many heads = many simultaneous opinions about
+      "similar," run in parallel. <em>Reopen later:</em> page 33 (RoPE rotates the very vectors we dot here).
+    </div>
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD: the chain rule — beat 6]</b>. <em>Same verb as page 28's BPTT product of Jacobians.</em>
+      <em>What is new:</em> the villain here is the <b>softmax Jacobian</b> $A_i(1-A_i)$. When the scores get too
+      big, every $A_i$ saturates to 0 or 1, the Jacobian collapses toward zero, and $W_Q,W_K$ stop receiving
+      gradient. <em>Reopen later:</em> page 34 (the residual $I$-term is the fix for a different collapse).
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in prose immediately after the derivation,
+         landed to the decimal in the worked box (0.2247 vs ~1.2e-5), and made
+         physical at the detent in the flagship demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You feed a softmax logits that are <b>10× bigger</b> than usual. Does it become
+      <b>(a)</b> sharper / more one-hot, <b>(b)</b> flatter, or <b>(c)</b> unchanged — and what happens to the
+      gradient flowing <em>back</em> through it? Commit before you scroll; you have set
+      <code>temperature</code> in a sampler and felt half of this already.
+    </div>
+    <p>The forward answer is <b>(a)</b>: bigger logits make the softmax sharper, tending to a one-hot argmax. The
+      half you may not have felt is the backward answer — as the softmax sharpens, its <em>gradient dies</em>. A
+      one-hot vector is a step function in disguise, and step functions have no useful derivative. We will pin both
+      halves to the decimal below, then let you drive a real attention layer off its detent and watch it happen.</p>
+
+    <!-- ===================== TRANSLATION NOTE ===================== -->
+    <div class="box rule"><span class="box-title">🗺️ Translation note</span>
+      We write <b>$d_{\text{head}}$</b> for the per-head width (Qwen3-8B: <b>128</b>). Papers and configs write
+      $d_k$, $d_v$, $d_h$, or <code>head_dim</code>. We write <b>$i,j$</b> for query / key positions; papers write
+      $t$, $m$, or $n$. The scale $\sqrt{d_{\text{head}}}$ is a fixed <em>temperature</em> $\tau$ — the same knob
+      you turn in a sampler, here baked into the layer.
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 1 — deriving the sqrt(d_head) -->
+    <!-- ============================================================= -->
+    <h2>Where the $\sqrt{d_{\text{head}}}$ comes from</h2>
+    <p>A score is a dot product of two $d_{\text{head}}$-dimensional vectors, $s = \mathbf{q}\cdot\mathbf{k}
+      = \sum_{c=1}^{d_{\text{head}}} q_c k_c$. Add more dimensions and you are summing more terms — the score grows.
+      Feed a softmax numbers that grow without bound and it stops being <em>soft</em>: it becomes a hard argmax,
+      and a hard argmax has no gradient. The $\sqrt{d_{\text{head}}}$ is a thermostat that cancels that growth
+      before it starts. Here is the exact constant, not a fudge.</p>
+
+    <p>Model $q_c, k_c$ as independent, mean-0, variance-1 (true at initialization, which is where training has to
+      <em>start</em> learning). Then:</p>
+    <p>$$\mathbb{E}[s] = 0, \qquad
+        \operatorname{Var}(s) = \sum_{c=1}^{d_{\text{head}}} \mathbb{E}[q_c^2]\,\mathbb{E}[k_c^2]
+        = \sum_{c=1}^{d_{\text{head}}} 1\cdot 1 = d_{\text{head}}
+        \;\;\Longrightarrow\;\; \operatorname{std}(s) = \sqrt{d_{\text{head}}}.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$s$</td><td>one raw attention score, $\mathbf{q}\cdot\mathbf{k}$</td><td>scalar</td><td>page 29's $QK^\top$, one entry</td></tr>
+        <tr><td>$q_c, k_c$</td><td>the $c$-th component of a query / key vector</td><td>scalar</td><td>the learned projections $XW_Q^\top, XW_K^\top$</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head dimension — the length of the sum</td><td>128 (Qwen3-8B)</td><td>config <code>head_dim</code></td></tr>
+        <tr><td>$\operatorname{Var}(s)$</td><td>spread of scores; variances add for independent terms</td><td>scalar</td><td>the derivation above</td></tr>
+        <tr><td>$\tau$</td><td>softmax temperature; here $\tau=\sqrt{d_{\text{head}}}$</td><td>scalar</td><td>the scale we divide scores by</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Dividing by $\sqrt{d_{\text{head}}}$ rescales the scores back to unit variance — the <em>exact</em>
+      normalizing constant, because $\operatorname{std}(s)=\sqrt{d_{\text{head}}}$ precisely. Not "roughly," not
+      "for stability." A specific standard deviation, cancelled exactly.
+      <b>[THREAD: Qwen3-8B]</b> With $d_{\text{head}}=128$: $\operatorname{std}(s)=\sqrt{128}=\mathbf{11.3137}$,
+      so raw logits routinely land in $[-34,+34]$ (about $\pm 3\sigma$) <em>before</em> scaling.
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 2 — what that does to the softmax + its gradient -->
+    <!-- ============================================================= -->
+    <h2>What that does to the softmax — and to its gradient</h2>
+    <p>Take the course's frozen three-logit example, $z=[2.0,\,1.0,\,0.1]$ (the same vector the cross-entropy,
+      top-k, and temperature demos all use). Its softmax is a real blend:</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — the blend, then the cliff</span>
+      $e^z = [7.389056,\,2.718282,\,1.105171]$, sum $=11.212509$, so
+      $$\hat y = [\mathbf{0.659001},\ 0.242433,\ 0.098566].$$
+      A genuine mixture — every component gets weight, so gradient reaches all three. Now imagine these were raw
+      attention scores at $d_{\text{head}}=128$ scale: multiply by $\sqrt{128}=11.3137$ to get
+      $[22.63,\,11.31,\,1.13]$. Factor out the max and the softmax collapses:
+      $$A \approx [\mathbf{0.99999},\ \sim 1.2\times10^{-5},\ \sim 10^{-10}]$$
+      — a one-hot vector in a trenchcoat. Same <em>relative</em> preference, catastrophically different softmax.
+    </div>
+
+    <p>The forward pass survives either way — a one-hot output is still a perfectly good number. The damage is in
+      the <b>backward</b> pass <b>[THREAD: the chain rule]</b>. The softmax's diagonal Jacobian is
+      $\partial A_i/\partial s_i = A_i(1-A_i)$. Evaluate it for the winning key in each case:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Case</th><th>$A_0$</th><th>Jacobian $A_0(1-A_0)$</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>unscaled $z=[2.0,1.0,0.1]$</td><td>$0.659001$</td><td>$0.659001\times0.340999=\mathbf{0.2247}$</td><td>healthy — gradient flows</td></tr>
+        <tr><td>scaled ×11.31 (no $\sqrt{d_{\text{head}}}$ divide)</td><td>$0.99999$</td><td>$\approx\mathbf{1.2\times10^{-5}}$</td><td>~18,000× smaller — dead</td></tr>
+      </tbody>
+    </table>
+
+    <p>In <code>bfloat16</code> — 8 mantissa bits, relative resolution $2^{-8}\approx 0.004$ — a gradient of order
+      $10^{-5}$ sitting against activations of order 1 simply <em>rounds to zero</em>. The update never happens.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Without the $\sqrt{d_{\text{head}}}$, attention does not get <em>worse</em> — it gets <b>stuck</b>. The
+      softmax saturates, the Jacobian collapses, and $W_Q,W_K$ stop receiving gradient. The model can't learn what
+      to look for, because looking has become a hard decision and hard decisions have no derivative.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why $\sqrt{d_{\text{head}}}$ is not quite enough after training — QK-Norm, and the temperature connection</summary><div>
+      <p>The derivation assumed $q_c,k_c$ are mean-0, variance-1. That holds at <em>initialization</em>. After
+        training, $Q$ and $K$ have whatever statistics the optimizer gave them — often with variance drift and
+        large outlier channels — so a fixed $\sqrt{d_{\text{head}}}$ is no longer the exact normalizer. 2026 models
+        patch this with <b>QK-Norm</b>: an RMSNorm applied to $\mathbf{q}$ and $\mathbf{k}$ <em>before</em> the dot
+        product, re-imposing the unit-scale assumption every single step. <b>Qwen3-8B ships <code>q_norm</code> and
+        <code>k_norm</code>, each of size $d_{\text{head}}=128$</b> — you will see them in the state dict (256
+        parameters per block, a rounding error in the budget, load-bearing in the dynamics). It is a real design
+        choice, not settled dogma: Cohere's Tiny Aya <em>dropped</em> QK-Norm and did fine.</p>
+      <p>And the scale is literally a <b>temperature</b>: $\tau=\sqrt{d_{\text{head}}}$. Dividing scores by a
+        larger $\tau$ is exactly what turning down <code>temperature</code> in a sampler does to logits before the
+        final softmax — flatten the distribution. The demo below lets you turn this knob directly.</p>
+    </div></details>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 3 — multi-head -->
+    <!-- ============================================================= -->
+    <h2>Many heads — which is a reshape, not eight matrices</h2>
+    <p>One head has one $W_Q,W_K$, so one notion of "relevant." Multi-head attention runs several relevance
+      detectors on different learned subspaces at once — one head may track subject–verb agreement, another may
+      just copy the previous token. <b>[THREAD: the dot product]</b> Each head <em>is</em> a choice of projection,
+      exactly the page-27 point: which directions you measure similarity along changes what counts as similar. Many
+      heads are many simultaneous choices.</p>
+
+    <p>$$\text{head}_h = \text{Attention}\!\big(XW_Q^{(h)\top},\, XW_K^{(h)\top},\, XW_V^{(h)\top}\big), \qquad
+        \text{MHA}(X) = \text{Concat}(\text{head}_1,\dots,\text{head}_H)\,W_O^\top.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape (out, in)</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$X$</td><td>input token stream (residual stream)</td><td>$(S, d)$</td><td>the block's input</td></tr>
+        <tr><td>$W_Q^{(h)}, W_K^{(h)}, W_V^{(h)}$</td><td>head $h$'s query / key / value projections</td><td>$(d_{\text{head}}, d)$</td><td>learned; sliced from the fused $W_Q$</td></tr>
+        <tr><td>$\text{head}_h$</td><td>one head's attention output</td><td>$(S, d_{\text{head}})$</td><td>page 29's formula, per head</td></tr>
+        <tr><td>$H$</td><td>number of query heads</td><td>32 (Qwen3-8B)</td><td>config <code>num_attention_heads</code></td></tr>
+        <tr><td>$W_O$</td><td>output projection — mixes the concatenated heads</td><td>$(d, d)$</td><td>the head's write port onto the residual stream</td></tr>
+      </tbody>
+    </table>
+
+    <p>The shape ribbon for Qwen3-8B ($d=4096$, $H=32$, $d_{\text{head}}=128$; note $32\times128=4096$ is a
+      <em>convention</em>, not a law):</p>
+    <div class="ribbon">X            (S, d=4096)
+W_q          (4096, 4096)                # (out, in) — ALWAYS; the fused q_proj
+q = X @ W_q.T                            (S, 4096)
+reshape      (S, H=32, d_head=128)       # split the 4096 into 32 heads of 128
+transpose    (32, S, 128)                # (H, S, d_head) — heads now independent
+scores/√128  (32, S, S)                  # 32 independent SxS attention maps
+@ V          (32, S, 128)                # per-head outputs
+concat       (S, 4096)                   # stack the 32 heads back to width 4096
+@ W_o.T      (S, 4096)                    # W_o (4096,4096) mixes them</div>
+
+    <div class="box key"><span class="box-title">🔑 Key idea — the heads are a reshape</span>
+      You do <b>not</b> have $H$ separate matrices. There is <em>one</em> $(4096,4096)$ <code>q_proj</code>, and
+      the "heads" appear when you call <code>.view(B, S, 32, 128).transpose(1, 2)</code>. The <em>math</em> is 32
+      independent attentions; the <em>code</em> is one matmul and a view. When you first read
+      <code>modeling_qwen3.py</code> and go looking for eight query matrices, this is why you won't find them.
+    </div>
+
+    <p>Why does $W_O$ exist? Concatenation just stacks $H$ subspace-outputs that never interacted. $W_O$ mixes them
+      back into one shared representation — and it is the head's <em>write port</em> onto the residual stream, a
+      thread we pick up on page 34.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: what heads actually learn — interpretable heads, polysemanticity, and attention sinks</summary><div>
+      <p>Some heads are cleanly interpretable and reproduce across models: <em>previous-token</em> heads,
+        <em>positional</em> heads, <em>duplicate-token</em> heads, and <em>induction heads</em> (the mechanistic
+        substrate of in-context learning, a well-replicated result). But most heads are <b>polysemantic</b> — they
+        do several unrelated things — and many can be pruned with little loss. The clean one-head-one-function
+        pictures in papers are cherry-picked.</p>
+      <p><b>Attention sinks are real</b>: many heads dump most of their weight onto token 0 / BOS regardless of
+        content — a learned "no-op," because a softmax row <em>must</em> sum to 1 and sometimes a head has nothing
+        it wants to attend to, so it parks the mass somewhere harmless. This is an emergent property of
+        <em>trained</em> weights. The demo below uses <em>seeded random</em> projections, so its head-to-head
+        differences are structural, not linguistic, and it will not show a sink — do not read grammar into it. What
+        it will show, exactly and live, is the physics of the $\sqrt{d_{\text{head}}}$ thermostat.</p>
+    </div></details>
+
+    <!-- ============================================================= -->
+    <!-- MISCONCEPTIONS -->
+    <!-- ============================================================= -->
+    <h2>Six traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ Watch out</span>
+      <p><b>(a) "$\sqrt{d_{\text{head}}}$ stops numerical overflow."</b> No — overflow is handled by the softmax's
+        max-subtraction trick (page 9). The issue is <b>gradient death via saturation</b>: the forward pass is fine
+        without the scale, the <em>backward</em> pass is dead. Fix by the Jacobian: $0.2247$ vs $1.2\times10^{-5}$.</p>
+      <p><b>(b) "Why $\sqrt{d_{\text{head}}}$ and not $d_{\text{head}}$?"</b> Because we normalize a
+        <em>standard deviation</em>, not a variance. Dividing by 128 would over-shrink by $11.31\times$, giving
+        logits of std $0.088$ — a near-uniform softmax, the <em>opposite</em> failure. Both cliffs are on the demo.</p>
+      <p><b>(c) "$d_{\text{head}}$ is the model dimension."</b> It is <em>per head</em>: $d=4096$ but
+        $d_{\text{head}}=128$, so the scale is $\sqrt{128}=11.31$, not $\sqrt{4096}=64$. Using $d$ here is a common
+        from-scratch bug.</p>
+      <p><b>(d) "More heads = more capacity."</b> With $H\,d_{\text{head}}=d$, total attention params are
+        <em>identical</em> regardless of $H$: $32\times128$ and $8\times512$ have the same count. It is a
+        partition, not an addition. (The demo's code artifact computes both and asserts equality.)</p>
+      <p><b>(e) "Each head learns one linguistic function."</b> Polysemanticity and prunability say otherwise; the
+        clean pictures are cherry-picked (deep dive above).</p>
+      <p><b>(f) "Heads talk to each other inside the layer."</b> They are completely independent until $W_O$
+        concatenates and mixes them. Inside the layer, head 3 has no idea head 7 exists.</p>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- FLAGSHIP DEMO -->
+    <!-- ============================================================= -->
+    <h2>The attention heatmap you drive</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      This is a <em>real</em> $\text{softmax}(QK^\top/\tau + M)V$ over a fixed 10-token sentence — eight heads of
+      genuinely different seeded projections, computed live every time you move the slider. Find the detent
+      ($\tau=\sqrt{d_{\text{head}}}=11.31$), then drive off it in both directions and watch the layer break two
+      different ways. This is the single most important minute in the unit.
+    </div>
+    <div class="demo">
+      <div class="demo-head">softmax(QKᵀ/τ + M)V · d_head = 128 · 8 heads <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="att-grid">
+          <div>
+            <canvas id="d-heat" height="330"></canvas>
+          </div>
+          <div>
+            <p style="margin:0 0 6px"><b>Row you're inspecting</b> — its weights over the 10 keys:</p>
+            <canvas id="d-row" height="150"></canvas>
+          </div>
+        </div>
+        <div class="att-row">
+          <label class="chk">Head:
+            <select id="d-head"></select>
+          </label>
+          <label class="chk"><input type="checkbox" id="d-causal"> causal mask
+            <span style="color:var(--text-dim)">(paid off on page 32)</span></label>
+          <button class="att-btn" id="d-detent">↦ detent (τ = √d_head = 11.31)</button>
+        </div>
+        <div class="controls" id="d-heat-ctrls"></div>
+        <div class="att-row">
+          <label class="chk">Inspect row (query):
+            <select id="d-row-sel"></select>
+          </label>
+        </div>
+        <div class="readout" id="d-heat-out"></div>
+      </div>
+    </div>
+
+    <p>Three things to make happen, in order:</p>
+    <ol>
+      <li>Drag $\tau$ <em>far below</em> the detent. The heatmap snaps to a hard diagonal stripe, per-row entropy
+        $\to 0$, effective keys $\to 1$, and the <b>gradient to the top key goes red</b> (down past $10^{-4}$) —
+        the winner has saturated to 1, so $A_i(1-A_i)\to 0$ and no gradient reaches $W_Q,W_K$. <em>You broke it by
+        making it too confident.</em></li>
+      <li>Drag $\tau$ <em>far above</em>. The map goes uniformly grey, entropy $\to\ln 10\approx 2.30$, effective
+        keys $\to 10$, every row identical — the layer became a constant function. The gradient survives but points
+        nowhere useful. <em>You broke it by making it too humble; attention that attends to everything attends to
+        nothing.</em></li>
+      <li>Hit the detent. Structured, mid-entropy, healthy gradient. You have physically located the valley
+        between two cliffs, and $\sqrt{d_{\text{head}}}$ is the thing that puts you in it. That resolves the
+        prediction: bigger logits (smaller $\tau$) $\Rightarrow$ sharper forward, dead backward.</li>
+    </ol>
+    <p>Switch heads at the detent: same sentence, genuinely different patterns, because each head measures
+      similarity along different directions. Flip the causal mask and the upper triangle blacks out — that is
+      page 32's whole story; here just note that the surviving weights <em>regrow</em> to keep each row summing
+      to 1.</p>
+
+    <!-- ============================================================= -->
+    <!-- CODE ARTIFACT -->
+    <!-- ============================================================= -->
+    <h2>The code that proves the heads are a reshape</h2>
+    <div class="box try"><span class="box-title">Try it — <code>code/heads_are_a_reshape.py</code></span>
+      Takes a real Qwen3 <code>q_proj</code> shape, shows that <code>.view(B,S,H,d_head).transpose(1,2)</code>
+      yields $H$ independent heads from one matrix; computes $P_{\text{attn}}$ for $(H{=}32, d_{\text{head}}{=}128)$
+      and $(H{=}8, d_{\text{head}}{=}512)$ and asserts they are equal; and prints the softmax Jacobian for scaled
+      vs unscaled logits so you watch $0.2247$ become $\sim10^{-5}$.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line">B, S, d, H, d_head = <span class="tok-num">1</span>, <span class="tok-num">10</span>, <span class="tok-num">4096</span>, <span class="tok-num">32</span>, <span class="tok-num">128</span></span>
+<span class="line">q_proj = torch.nn.<span class="tok-fn">Linear</span>(d, H * d_head, bias=<span class="tok-kw">False</span>)  <span class="tok-com"># one matrix: (4096, 4096)</span></span>
+<span class="line"><span class="tok-kw">assert</span> q_proj.weight.shape == (H * d_head, d)         <span class="tok-com"># (out, in) — ALWAYS</span></span>
+<span class="line"></span>
+<span class="line">x = torch.<span class="tok-fn">randn</span>(B, S, d)</span>
+<span class="line">q = <span class="tok-fn">q_proj</span>(x)                                       <span class="tok-com"># (1, 10, 4096)</span></span>
+<span class="line">q_heads = q.<span class="tok-fn">view</span>(B, S, H, d_head).<span class="tok-fn">transpose</span>(<span class="tok-num">1</span>, <span class="tok-num">2</span>)      <span class="tok-com"># (1, 32, 10, 128) — 32 heads, no new params</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># concatenating the heads is the INVERSE reshape — bit-for-bit, so they were a view:</span></span>
+<span class="line">q_concat = q_heads.<span class="tok-fn">transpose</span>(<span class="tok-num">1</span>, <span class="tok-num">2</span>).<span class="tok-fn">reshape</span>(B, S, H * d_head)</span>
+<span class="line"><span class="tok-kw">assert</span> torch.<span class="tok-fn">equal</span>(q_concat, q)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># the scale's setpoint: std(q·k) at d_head=128 is exactly sqrt(128):</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(d_head ** <span class="tok-num">0.5</span> - <span class="tok-num">11.3137</span>) < <span class="tok-num">1e-4</span>             <span class="tok-com"># = 11.3137 (constants §5)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># (d) attention params depend on the projection WIDTHS, not the head count — 32×128 == 8×512:</span></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">attn_params</span>(d, H, d_head, H_kv):</span>
+<span class="line">    <span class="tok-kw">return</span> <span class="tok-num">2</span> * d * d_head * (H + H_kv)         <span class="tok-com"># q,o full width; k,v use H_kv heads</span></span>
+<span class="line">split_32 = <span class="tok-fn">attn_params</span>(<span class="tok-num">4096</span>, <span class="tok-num">32</span>, <span class="tok-num">128</span>, <span class="tok-num">8</span>)              <span class="tok-com"># Qwen3-8B: 32 heads of 128, GQA H_kv=8</span></span>
+<span class="line">split_8  = <span class="tok-fn">attn_params</span>(<span class="tok-num">4096</span>,  <span class="tok-num">8</span>, <span class="tok-num">512</span>, <span class="tok-num">2</span>)              <span class="tok-com"># same widths, sliced coarser</span></span>
+<span class="line"><span class="tok-kw">assert</span> split_32 == split_8 == <span class="tok-num">41_943_040</span>             <span class="tok-com"># a partition, not an addition</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># the sqrt(d_head) thermostat, as a Jacobian:</span></span>
+<span class="line">z = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">2.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">0.1</span>])</span>
+<span class="line"><span class="tok-kw">for</span> scale <span class="tok-kw">in</span> (<span class="tok-num">1.0</span>, <span class="tok-num">128</span> ** <span class="tok-num">0.5</span>):</span>
+<span class="line">    a = torch.<span class="tok-fn">softmax</span>(z * scale, dim=-<span class="tok-num">1</span>)</span>
+<span class="line">    <span class="tok-fn">print</span>(scale, a[<span class="tok-num">0</span>].<span class="tok-fn">item</span>(), (a[<span class="tok-num">0</span>] * (<span class="tok-num">1</span> - a[<span class="tok-num">0</span>])).<span class="tok-fn">item</span>())  <span class="tok-com"># 0.659, 0.2247  ->  ~1.0, ~1.2e-5</span></span></code></pre>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- QUIZ -->
+    <!-- ============================================================= -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-30"></div>
+
+    <!-- ===================== CROSS-REFS ===================== -->
+    <div class="box key"><span class="box-title">↪ Where this goes</span>
+      <b>[THREAD: Qwen3-8B]</b> The $\sqrt{128}$ thermostat and <code>q_norm</code>/<code>k_norm</code> recur on
+      every attention page; the per-block attention subtotal $P_{\text{attn}}=41{,}943{,}040$ lands on
+      <b>page 36</b>. Next: <b>page 31</b> keeps the mechanism and changes only where $K,V$ come from (self vs
+      cross — the diffusion hinge); <b>page 32</b> pays off the causal toggle you just flipped; <b>page 34</b>
+      reopens $W_O$ as the residual-stream write port.
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- FLAGSHIP: driveable attention heatmap over a fixed sentence ---- */
+  (function () {
+    const { Mat, attention, RNG } = NN;
+
+    // Fixed 10-token sentence. Real, seeded projections so every head differs
+    // and the whole thing is reproducible across reloads. d_head = 128 so the
+    // raw scores have std sqrt(128) = 11.31 exactly, which is the detent.
+    const TOKENS = ["The", "tired", "animal", "did", "not", "cross", "the", "street", "because", "it"];
+    const S = TOKENS.length, D_MODEL = 64, D_HEAD = 128, NHEADS = 8, SQ = Math.sqrt(D_HEAD);
+    const rng = new RNG(30);
+
+    // One shared embedding stream X (S x D_MODEL), entries ~ N(0,1).
+    const X = Mat.randn(S, D_MODEL, rng, 1);
+    // Per head: W_Q,W_K,W_V each (D_HEAD x D_MODEL) with std 1/sqrt(D_MODEL) so
+    // that Q,K entries land at ~ unit variance -> scores at std sqrt(D_HEAD).
+    const wScale = 1 / Math.sqrt(D_MODEL);
+    const heads = [];
+    for (let h = 0; h < NHEADS; h++) {
+      const Wq = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      const Wk = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      const Wv = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      heads.push({ Q: X.matmul(Wq.T()), K: X.matmul(Wk.T()), V: X.matmul(Wv.T()) });
+    }
+
+    const canvas = document.getElementById("d-heat");
+    const rowCanvas = document.getElementById("d-row");
+    const out = document.getElementById("d-heat-out");
+    const headSel = document.getElementById("d-head");
+    const rowSel = document.getElementById("d-row-sel");
+    const causal = document.getElementById("d-causal");
+    const detentBtn = document.getElementById("d-detent");
+
+    for (let h = 0; h < NHEADS; h++) {
+      const o = document.createElement("option"); o.value = h; o.textContent = "head " + h; headSel.appendChild(o);
+    }
+    TOKENS.forEach((t, i) => {
+      const o = document.createElement("option"); o.value = i; o.textContent = i + " · " + t; rowSel.appendChild(o);
+    });
+    rowSel.value = "9"; // "it" — the most interesting query row
+
+    const hm = new Heatmap(canvas, {
+      data: [[0]], rowLabels: TOKENS, colLabels: TOKENS,
+      colormap: "sequential", cellText: true, colorbar: true, hover: true,
+      cellText: (v) => v >= 0.005 ? v.toFixed(2) : "",
+      onHover: (i) => { if (i != null) { rowSel.value = String(i); draw(); } },
+    });
+
+    // Temperature slider in log space: e in [-1, 1], tau = sqrt(d_head) * 10^e.
+    // Detent (e = 0) sits at tau = 11.31. fmt shows the actual tau.
+    const tauCtrl = makeCtrl(document.getElementById("d-heat-ctrls"), {
+      label: "temperature τ  (log scale, detent at √d_head)",
+      min: -1.5, max: 1.5, step: 0.02, value: 0,
+      fmt: e => (SQ * Math.pow(10, e)).toFixed(2)
+    });
+
+    // Simple live bar chart of the inspected row's attention weights.
+    function drawRow(A, i) {
+      const g = rowCanvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = rowCanvas.clientWidth || 320, h = +rowCanvas.getAttribute("height");
+      if (rowCanvas.width !== Math.round(w * dpr)) { rowCanvas.width = Math.round(w * dpr); rowCanvas.height = Math.round(h * dpr); }
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      const row = A.row(i);
+      const accent = vizUtils.cssVar("--accent", "#b48cff");
+      const dim = vizUtils.cssVar("--text-dim", "#8391ab");
+      const pad = 22, bw = (w - pad * 2) / row.length, base = h - 20;
+      g.fillStyle = dim; g.font = "10px system-ui"; g.textAlign = "center";
+      const mx = Math.max(...row, 0.01);
+      for (let j = 0; j < row.length; j++) {
+        const bh = (row[j] / mx) * (base - 8);
+        g.fillStyle = accent;
+        g.fillRect(pad + j * bw + 1, base - bh, bw - 2, bh);
+        g.fillStyle = dim;
+        g.fillText(TOKENS[j].slice(0, 4), pad + j * bw + bw / 2, base + 12);
+      }
+      g.strokeStyle = dim; g.beginPath(); g.moveTo(pad, base); g.lineTo(w - pad, base); g.stroke();
+    }
+
+    function draw() {
+      const h = +headSel.value, i = +rowSel.value;
+      const tau = SQ * Math.pow(10, tauCtrl.get());
+      const H = heads[h];
+      const res = attention(H.Q, H.K, H.V, { temperature: tau, causal: causal.checked }); // REAL softmax(QKᵀ/τ+M)V
+      hm.setData(res.A.toArray());
+      drawRow(res.A, i);
+
+      const ent = res.entropy[i], eff = res.effKeys[i], maxEnt = res.maxEntropy;
+      // Gradient health of the inspected row's WINNING key: A_top*(1-A_top).
+      // As the row saturates to one-hot (low τ) the winner's gradient dies; this
+      // is the quantity that "looking has become a hard decision" kills. It moves
+      // monotonically with sharpness, unlike the matrix-wide max Jacobian.
+      const rowA = res.A.row(i);
+      const topA = Math.max.apply(null, rowA);
+      const gh = topA * (1 - topA);
+      const ghClass = gh < 1e-3 ? "bad" : (gh > 0.05 ? "good" : "");
+      const atDetent = Math.abs(tauCtrl.get()) < 0.011;
+      out.innerHTML =
+        `τ = <span class="stat">${tau.toFixed(2)}</span>` +
+        (atDetent ? ` <span class="stat good">(= √d_head, the detent)</span>` : ``) +
+        ` · row <b>${i} "${TOKENS[i]}"</b>: entropy <span class="stat">${ent.toFixed(3)}</span> nats ` +
+        `(max ${maxEnt.toFixed(3)}) · effective keys <span class="stat">${eff.toFixed(2)}</span> of ${S}` +
+        ` · gradient to top key <span class="stat ${ghClass}">${gh.toExponential(2)}</span>` +
+        `<br><span style="color:var(--text-dim)">softmax(QKᵀ/τ${causal.checked ? " + M" : ""})V — ` +
+        `low τ ⇒ sharp argmax, dead gradient; high τ ⇒ uniform blur; detent ⇒ the healthy valley between.</span>`;
+    }
+
+    headSel.addEventListener("change", draw);
+    rowSel.addEventListener("change", draw);
+    causal.addEventListener("change", draw);
+    tauCtrl.onInput(draw);
+    detentBtn.addEventListener("click", () => { tauCtrl.input.value = "0"; tauCtrl.input.dispatchEvent(new Event("input")); });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-30", [
+    {
+      q: "The standard deviation of a raw attention score $\\mathbf{q}\\cdot\\mathbf{k}$ at $d_{\\text{head}}=128$ (independent, unit-variance components) is:",
+      num: 11.3137, tol: 0.01, unit: "",
+      why: "$\\operatorname{Var}(s)=\\sum_{c=1}^{128}\\mathbb{E}[q_c^2]\\mathbb{E}[k_c^2]=128$, so $\\operatorname{std}=\\sqrt{128}=11.3137$ — the exact number we divide by."
+    },
+    {
+      q: "Softmax of the frozen logits $[2.0,\\,1.0,\\,0.1]$ — its first component $\\hat y_0$:",
+      num: 0.659001, tol: 0.001, unit: "",
+      why: "$e^{2.0}/(e^{2.0}+e^{1.0}+e^{0.1}) = 7.389056/11.212509 = 0.659001$. A real blend — gradient reaches all three."
+    },
+    {
+      q: "The softmax diagonal Jacobian $A_0(1-A_0)$ for the <em>unscaled</em> frozen logits $[2.0,1.0,0.1]$:",
+      num: 0.2247, tol: 0.005, unit: "",
+      why: "$0.659001\\times(1-0.659001)=0.659001\\times0.340999=0.2247$. Multiply the logits by $\\sqrt{128}$ and this collapses to $\\sim1.2\\times10^{-5}$."
+    },
+    {
+      q: "Removing the $\\sqrt{d_{\\text{head}}}$ divide mainly hurts:",
+      opts: [
+        "The forward pass — it overflows to NaN",
+        "The backward pass — the softmax saturates and its Jacobian collapses, so $W_Q,W_K$ stop learning",
+        "Nothing measurable; it is cosmetic",
+        "Memory — the scores need more bits"
+      ],
+      a: 1,
+      why: "Overflow is handled by max-subtraction (misconception a). The forward pass is fine; the saturated softmax kills the gradient — attention gets stuck, not worse."
+    },
+    {
+      q: "Total attention parameters with $H=32, d_{\\text{head}}=128$ versus $H=8, d_{\\text{head}}=512$ (same $d=4096$):",
+      opts: [
+        "32 heads has 4× more parameters",
+        "8 heads has 4× more parameters",
+        "Identical — heads are a partition of $d$, not an addition",
+        "Depends on the sequence length"
+      ],
+      a: 2,
+      why: "With $H\\,d_{\\text{head}}=d$ fixed, $2\\,d\\,d_{\\text{head}}(H+H_{kv})$-style counts are the same; more heads just slices the same width finer (misconception d)."
+    },
+    {
+      q: "A head that dumps most of its attention weight onto token 0 regardless of the input is:",
+      opts: [
+        "A bug in the projection matrices",
+        "An attention sink — a learned no-op, because a softmax row must sum to 1",
+        "Proof the head is dead and should be pruned",
+        "The $\\sqrt{d_{\\text{head}}}$ scale being too small"
+      ],
+      a: 1,
+      why: "Attention sinks are a real, emergent feature of trained models: when a head has nothing to attend to, it parks the mandatory unit of mass somewhere harmless (often BOS)."
+    },
+    {
+      q: "2026 models add QK-Norm (Qwen3's <code>q_norm</code>/<code>k_norm</code>) because:",
+      opts: [
+        "It reduces the parameter count",
+        "It replaces the softmax entirely",
+        "Training breaks the mean-0/variance-1 assumption that $\\sqrt{d_{\\text{head}}}$ relied on, so it is re-imposed every step",
+        "It lets the model use a larger vocabulary"
+      ],
+      a: 2,
+      why: "The $\\sqrt{d_{\\text{head}}}$ derivation assumes unit-variance $q,k$ — true only at init. QK-Norm re-normalizes $\\mathbf{q},\\mathbf{k}$ before the dot product so the assumption keeps holding after training."
+    }
+  ], "Attention II self-check");
+
+});
+</script>
+</body>
+</html>

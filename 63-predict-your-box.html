@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>63. The Whole Machine: Predicting Your Own Box — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: the predict-your-box console — ledger table, verdict chip,
+     segmented ceiling toggle, box-measure input. All theme-aware via vars. */
+  .tag { font-family: var(--mono); font-size: .72rem; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+         background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent2); white-space: nowrap; }
+  /* Light theme: --accent2 teal on a violet-tinted near-white ground is only ~2.7:1.
+     Swap to a deep violet (same accent hue) that clears WCAG AA on every panel/body
+     ground the tag lands on. Dark theme keeps --accent2, which already reads clean. */
+  :root[data-theme="light"] .tag { color: #4a1fb0; }
+  .seg-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 2px; }
+  .seg-row button {
+    padding: 6px 13px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .84rem; font-family: var(--font);
+  }
+  .seg-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .seg-label { display: block; font-size: .8rem; color: var(--text-dim); margin: 10px 0 2px; }
+  .box-sel { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; margin: 6px 0; }
+  .box-sel select, .box-sel input[type="number"] {
+    font-family: var(--font); font-size: .86rem; padding: 6px 9px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg-panel); color: var(--text);
+  }
+  .box-sel input[type="number"] { width: 9em; }
+  .ledger-tbl { width: 100%; border-collapse: collapse; margin: 4px 0 2px; font-size: .88rem; }
+  .ledger-tbl td { padding: 3px 8px; border-bottom: 1px solid var(--border); }
+  .ledger-tbl td:last-child { text-align: right; font-family: var(--mono); }
+  .ledger-tbl tr.total td { font-weight: 700; border-top: 2px solid var(--plot-border); }
+  .verdict { font-weight: 800; padding: 2px 9px; border-radius: 6px; font-family: var(--mono); }
+  /* Theme-aware: text uses course.css's var(--good)/var(--bad), which darken for
+     light theme (dark #5ce6a0/#ff6b6b → light #2e8b57/#c62828). Light theme needs a
+     still-darker text over the pale composited tint to clear WCAG AA 4.5:1. */
+  .verdict.fit { background: color-mix(in srgb, var(--good) 20%, transparent); color: var(--good); }
+  .verdict.oom { background: color-mix(in srgb, var(--bad) 20%, transparent); color: var(--bad); }
+  :root[data-theme="light"] .verdict.fit { background: color-mix(in srgb, var(--good) 18%, #ffffff); color: #185c37; }
+  :root[data-theme="light"] .verdict.oom { background: color-mix(in srgb, var(--bad) 16%, #ffffff); color: #8f1515; }
+  .roof-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 2px; font-size: .82rem; color: var(--text-dim); }
+  .roof-legend .swatch { display: inline-block; width: 22px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .roof-legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  @media (max-width: 620px) { .box-sel { flex-direction: column; align-items: stretch; } }
+</style>
+</head>
+<body data-page="63-predict-your-box.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VII — Capstone</span>
+    <h1>The Whole Machine: Predicting Your Own Box</h1>
+    <p class="subtitle">You have done this piecemeal for sixty pages — the ledger, the roofline, the
+      escape ladder. This page snaps them into a single model of your DGX Spark that tells you, cold,
+      whether a workload fits and whether it will be fast, <em>before</em> you run it. Then it names,
+      honestly, the two numbers the course still refuses to hand you.</p>
+
+    <!-- PREDICT — opens the page; resolved by the demo landing on it + the stated verdicts below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first — three yes/no answers, cold</span>
+      Before you touch the console below, on <em>your</em> Spark:
+      <b>(a)</b> does a full fine-tune of Qwen3-8B fit in memory?
+      <b>(b)</b> will LLM decode at batch 1 be fast or slow?
+      <b>(c)</b> will FLUX sampling be fast or slow?
+      Write down three answers and one sentence of <em>why</em> for each. The rest of the page checks
+      all three — and the console at the bottom grades them.
+    </div>
+
+    <p>The course's real destination was never "operate the tools." It was <em>this</em>: you can now
+      predict what your hardware will do before you run it. This page collects the receipts — every
+      number you built, in one console — and it closes all four threads that ran under every page.</p>
+
+    <h2>The ledger, as one closed form (not a re-teach)</h2>
+    <p>You built this on <a href="18-memory-ledger.html">p.18</a> and never has it changed. Training
+      memory is a sum of a few per-parameter costs — you do not re-derive it here, you <em>state</em> it
+      and let the console do the arithmetic:</p>
+
+    <div class="box key"><span class="box-title">🔑 The whole training-memory ledger, in one line</span>
+      $$\text{state} \;=\; \underbrace{b_W\,P}_{\text{weights}} \;+\; \underbrace{2P}_{\text{grads}}
+        \;+\; \underbrace{k_O\,N_t}_{\text{optimizer}} \;+\; \underbrace{\text{activations}}_{[\text{EST}]}$$
+      For a full fine-tune $N_t = P$ and the whole thing collapses to the <b>16 B/param</b> you memorized
+      on p.18. Activations are <em>always</em> a separate <span class="tag">EST</span> line, on both sides
+      of every comparison — LoRA does not shrink them (you still backprop through the full network).
+    </div>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$P$</td><td>total parameter count</td><td>scalar = 8,190,735,360</td><td>the Qwen3-8B anchor, p.36 <span class="tag">VP</span></td></tr>
+        <tr><td>$b_W$</td><td>bytes per stored weight</td><td>2 / 1 / 0.5 (bf16 / fp8 / NF4)</td><td>p.41 number formats</td></tr>
+        <tr><td>$k_O$</td><td>optimizer bytes per <em>trainable</em> param</td><td>0 / 8 / 12 / ~2</td><td>p.18 ledger; AdamW-mixed = 12</td></tr>
+        <tr><td>$N_t$</td><td><em>trainable</em> parameter count</td><td>$P$ (full) or 43,646,976 (LoRA r=16)</td><td>p.40 LoRA arithmetic</td></tr>
+        <tr><td>activations</td><td>cached forward tensors the backward pass needs</td><td>2–6 GB <span class="tag">EST</span> at B=1, S=2048, checkpointing on</td><td><em>the VRAM the chain rule eats</em> — p.5, p.14</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>[THREAD:chain-rule beat FINAL]</b> — reopen the backprop pass of
+      <a href="14-backprop-by-pencil.html">p.14</a>: the reason there is an activations line at all is
+      that the chain rule caches every forward tensor to reuse on the way back
+      (<a href="05-the-chain-rule.html">p.5</a>). <em>That</em> is the one verb that ran under every page,
+      and here it shows up as the <span class="tag">EST</span> band in the console — the memory backprop
+      eats, priced.</p>
+
+    <p>The full-fine-tune anchor, the number the whole part turns on:</p>
+    <div class="box worked"><span class="box-title">✍️ The full-FT anchor — recomputed, to the byte</span>
+      $$8{,}190{,}735{,}360 \times 16\ \text{B} = 131{,}051{,}765{,}760\ \text{B}
+        = \mathbf{131.05\ GB} = \mathbf{122.05\ GiB}.$$
+      <span class="tag">DER</span> (constants §2.2). The escape ladder off it, all state-to-state, all
+      excluding the identical activations line:
+      <div style="overflow-x:auto;">
+      <table class="ledger" style="min-width:480px;">
+        <thead><tr><th>Method</th><th>$b_W,\,k_O,\,N_t$</th><th>State (GB / GiB)</th></tr></thead>
+        <tbody>
+          <tr><td>Full, AdamW mixed</td><td>16 B/param</td><td>131.05 / <b>122.05</b></td></tr>
+          <tr><td>Full, 8-bit Adam</td><td>10 B/param</td><td>81.91 / 76.28</td></tr>
+          <tr><td>LoRA r=16, all-linear</td><td>$2P + 16N_t$</td><td><b>17.08 / 15.91</b></td></tr>
+          <tr><td>QLoRA r=16 (NF4, DQ on)</td><td>$0.516P + 16N_t$</td><td>~4.93 / 4.59 &nbsp;<span style="color:var(--text-dim)">(base 4.225 / 3.935)</span></td></tr>
+        </tbody>
+      </table>
+      </div>
+      And the sentence worth keeping: <strong>the trainable state shrank by 187×, which is exactly
+      $8{,}190{,}735{,}360 \div 43{,}646{,}976$, because optimizer state is linear in trainable
+      parameters</strong> (114.67 GB → 0.61 GB; constants §2.3, D-05). Not because LoRA shrank the model
+      — it froze it. <b>[THREAD:memory-ledger beat FINAL]</b> — the ledger you opened on p.18 pays out here.
+    </div>
+
+    <h2>The wall — measured, on the box you own</h2>
+    <div class="box worked"><span class="box-title">✍️ 122.05 needed vs 121.6875 measured — it misses by a hair</span>
+      Your box says "128 GB" on the label. It is not what you get. Read off your own machine
+      <span class="tag">MEA-DEV</span> (hardware-ground-truth §2):
+      $$\text{needed } 122.05\ \text{GiB} \;-\; \text{measured } \mathbf{121.6875}\ \text{GiB}
+        \;=\; \mathbf{-0.36\ GiB}.$$
+      <strong>It does not fit — by 0.3%, before a single byte of activations.</strong> A firmware/driver
+      carveout eats <b>6.3125 GiB (4.9%)</b> of the physical 128 GiB before you allocate anything. Three
+      numbers you must not conflate:
+      <div style="overflow-x:auto;">
+      <table class="ledger" style="min-width:460px;">
+        <tbody>
+          <tr><td>Published</td><td>128 GB</td><td>marketing</td></tr>
+          <tr><td><code>MemTotal</code></td><td><b>121.6875 GiB</b></td><td>the ceiling that actually exists</td></tr>
+          <tr><td>free <em>now</em>, ComfyUI up</td><td><b>19.41 GiB</b></td><td><code>mem_get_info()</code> — with page cache, <code>MemAvailable</code> 93.84</td></tr>
+        </tbody>
+      </table>
+      </div>
+      The generalizable villain: <strong>published capacity is never usable capacity — the spec sheet is
+      off by 4.9% before you start.</strong> The page does not assert your budget; the console has you
+      measure it and compute 122.05 against <em>your</em> number.
+    </div>
+
+    <h2>The roofline, as the one formula</h2>
+    <p>You built this on <a href="43-your-box-roofline.html">p.43</a>. For a dense bf16 transformer, one
+      forward reads every weight once ($2N$ bytes) and does $2N$ FLOP per token, so the arithmetic
+      intensity is just the token count:</p>
+    <div class="box rule"><span class="box-title">📐 Arithmetic intensity is tokens per forward — and the ridge</span>
+      $$I = \frac{2N\,S_{\text{fwd}}}{2N} = \boxed{\,S_{\text{fwd}}\ \text{FLOP/byte}\,},
+        \qquad I^\star = \frac{P_{\text{peak}}}{BW}.$$
+      The ridge is <span class="tag">INF</span> and <em>genuinely unresolved</em>, because the dense-BF16
+      ceiling is unpublished (constants §6.4): $I^\star = 62\text{e}12/273\text{e}9 = \mathbf{227}$
+      (working, FP32-accumulate) <em>or</em> $125\text{e}12/273\text{e}9 = \mathbf{458}$ (if the ceiling
+      is ~125 TF, FP16-accumulate). The verdicts below hold under <em>both</em>.
+      <b>[THREAD:dot-product beat FINAL]</b> — $I$ comes from $2N$ FLOP over $2N$ bytes: one multiply-add
+      per weight, the dot product at hardware scale, the same atom from p.3.
+    </div>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$I$</td><td>arithmetic intensity — work per byte fetched</td><td>FLOP/byte</td><td>$= S_{\text{fwd}}$ at bf16</td></tr>
+        <tr><td>$S_{\text{fwd}}$</td><td>tokens pushed through one weight read</td><td>count</td><td>1 (decode) … 4096 (diffusion)</td></tr>
+        <tr><td>$P_{\text{peak}}$</td><td>dense-BF16 compute ceiling</td><td>FLOP/s</td><td>~62 or ~125 TF <span class="tag">INF</span>, constants §6.3</td></tr>
+        <tr><td>$BW$</td><td>memory bandwidth</td><td>bytes/s</td><td>273 GB/s <span class="tag">VP</span>, constants §6.1</td></tr>
+        <tr><td>$I^\star$</td><td>ridge — where the two limits cross</td><td>FLOP/byte</td><td>$P_{\text{peak}}/BW$ = 227 or 458</td></tr>
+      </tbody>
+    </table>
+
+    <h2>Same machine, opposite verdicts</h2>
+    <p>Plug each track's $S_{\text{fwd}}$ into $I \approx S_{\text{fwd}}$. They land on opposite sides of
+      the ridge — which is the entire reason this one box <em>feels</em> weak for chat and strong for
+      images:</p>
+
+    <div class="box key track-llm"><span class="box-title">◆ LLM decode, batch 1 → the Spark is weak</span>
+      $S_{\text{fwd}} = 1 \Rightarrow I = 1$, which is <strong>227–458× below the ridge → bandwidth-bound.</strong>
+      The tensor cores sit idle waiting on DRAM; you are limited by how fast the box can <em>read</em> the
+      weights, not multiply them. Quantizing helps (it cuts the bytes), adding compute does not.
+    </div>
+    <div class="box key track-diffusion"><span class="box-title">◇ Diffusion sampling, 4096 latent tokens → the Spark is strong</span>
+      $S_{\text{fwd}} = 4096 \Rightarrow I = 4096$, which is <strong>9–18× above the ridge → compute-bound.</strong>
+      One weight read is amortized over 4096 tokens of the latent grid; the cores actually work. Same
+      machine, same ridge, opposite side of $I^\star$.
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ And it is measured, on his box</span>
+      SGLang, Llama-3.1-8B FP8, LMSYS <span class="tag">VP</span> (constants §6.7): batching decode
+      $1 \to 32$ takes it from <strong>20.5 → 368 tok/s (18×)</strong>, while prefill stays
+      <strong>flat: 7,991 → 7,949</strong>. Prefill was already compute-bound and gained nothing from more
+      batch; decode was bandwidth-bound and gained ~linearly. That is $I \approx S_{\text{fwd}}$, measured,
+      on the machine you own.
+    </div>
+
+    <h2>What the course still refuses to hand you</h2>
+    <div class="box warn"><span class="box-title">⚠️ Two numbers you are not allowed to trust from the course</span>
+      The ridge is a range and not a fact because <strong>two inputs are unresolved</strong>, and a course
+      that printed them would be lying:
+      <ul style="margin:8px 0 4px 1.1em;">
+        <li><strong>The dense BF16 ceiling</strong> — 62 TF (FP32-accumulate) vs 125 TF (FP16-accumulate).
+          NVIDIA publishes neither. The SDXL-BF16 datapoint (69.7 TF/s <em>if</em> CFG was on) leans 125;
+          community GEMM reports lean 62 <span class="tag">INF</span> (constants §6.3).</li>
+        <li><strong>Achieved memory bandwidth</strong> — 273 GB/s is the <em>theoretical</em> peak
+          <span class="tag">VP</span>; the fraction you actually get is <span class="tag">MEA</span>.</li>
+      </ul>
+      You measure both with <code>09_spark_capability_probe.py</code>, and the measurement fixes the ridge.
+      This is not a loose end to hide — it is the last lesson: measurement outranks assertion.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why 0.65 and not 1.0 — the decode heuristic's honest error bars</summary><div>
+      <p>The batch-1 decode rate for a dense model has a one-line predictor (constants §6.6):</p>
+      $$\text{decode tok/s} \approx 0.65 \times \frac{BW\ (\text{GB/s})}{\text{weight bytes read per token (GB)}}.$$
+      <p>The <b>0.65</b> is the round, slightly-conservative memory-bandwidth-utilization coefficient (mean
+        MBU across four dense measurements is 0.69; error bars ±10–15%). The subtle part is the
+        <em>denominator</em>: weight bytes read per token is the checkpoint file <strong>minus the
+        embedding table</strong> — <code>embed_tokens</code> is <em>gathered</em> (one row per token), not
+        streamed. Get that wrong and the prediction moves 15–25 pp.</p>
+      <p>The punchline, verbatim: <strong>if your heuristic predicts more than 100% of peak bandwidth, your
+        model is an MoE.</strong> gpt-oss-20B decodes at 49.7 tok/s, which on its 12.8 GB checkpoint implies
+        637 GB/s = 234% of the 273 GB/s bus — impossible — because only ~3.6 B of its ~20.9 B params are
+        active per token.</p>
+      <p>For Qwen3-8B in bf16 (weights 16.38 GB), the roofline <em>ceiling</em> is
+        $273/16.38 = \mathbf{16.67}$ tok/s, and the realistic <em>expectation</em> is
+        $0.65 \times 16.67 \approx \mathbf{10.8}$ tok/s. Say which is which — the ceiling is what the bus
+        allows, the ~10.8 is what you will see. (The old "~19.5 tok/s" figure is retired; it was a
+        7B/14 GB ceiling for a retired anchor.) The roofline verdict above does not depend on any of this,
+        which is why it lives in a collapsible.</p>
+    </div></details>
+
+    <!-- ================= THE PREDICT-YOUR-BOX CONSOLE ================= -->
+    <div class="box try"><span class="box-title">Try it — grade your three predictions</span>
+      Pick a workload. The <em>ledger</em> on the left computes GiB needed against your measured box and
+      prints FITS or OOM; the <em>roofline</em> on the right places the workload's $I = S_{\text{fwd}}$
+      against the ridge and prints bandwidth- or compute-bound. Full-FT overshoots your line by a hair;
+      LLM decode sits far left of the ridge; diffusion sits far right. Every number is computed live from
+      the frozen constants — nothing is baked.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Predict-your-box console · Qwen3-8B anchor <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="box-sel">
+          <label>Workload:
+            <select id="pb-work">
+              <optgroup label="Training (memory is the wall)">
+                <option value="fullft">Full fine-tune, AdamW (16 B/param)</option>
+                <option value="fullft8">Full fine-tune, 8-bit Adam (10 B/param)</option>
+                <option value="lora">LoRA r=16, all-linear</option>
+                <option value="qlora">QLoRA r=16 (NF4, DQ on)</option>
+              </optgroup>
+              <optgroup label="Inference (the roofline is the wall)">
+                <option value="decode1">LLM decode, batch 1</option>
+                <option value="decode32">LLM decode, batch 32</option>
+                <option value="prefill">LLM prefill, S=2048</option>
+                <option value="diffusion">Diffusion sample, 4096 latent tokens</option>
+              </optgroup>
+            </select>
+          </label>
+          <label>Your box <code>MemTotal</code> (GiB):
+            <input type="number" id="pb-box" value="121.6875" step="0.0001" min="1">
+          </label>
+          <button class="btn secondary" id="pb-measure" type="button">Reset to measured 121.6875</button>
+        </div>
+        <p style="font-size:.8rem;color:var(--text-dim);margin:2px 0 8px">
+          The box field ships pre-filled with the <span class="tag">MEA-DEV</span> value read off his
+          Spark. <strong>Replace it with your own</strong> <code>torch.cuda.mem_get_info()</code> total —
+          the FITS/OOM verdict is computed against whatever you type.</p>
+
+        <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:18px" class="pb-grid">
+          <div>
+            <div class="seg-label"><strong>Memory ledger</strong> — GiB needed vs your box</div>
+            <table class="ledger-tbl" id="pb-ledger"></table>
+            <div id="pb-verdict-mem" style="margin-top:8px"></div>
+          </div>
+          <div>
+            <div class="seg-label"><strong>Roofline</strong> — $I = S_{\text{fwd}}$ vs the ridge</div>
+            <canvas id="pb-roof" height="240"></canvas>
+          </div>
+        </div>
+
+        <div class="roof-legend">
+          <span><span class="swatch" style="background:#4fc3f7"></span>roofline $P(I)=\min(P_{\text{peak}},BW\!\cdot\!I)$</span>
+          <span><span class="dot" style="background:#ffb74d"></span>this workload</span>
+          <span><span class="dot" style="background:#81c784"></span>measured decode (Llama-3.1-8B FP8)</span>
+        </div>
+        <div class="seg-label">Compute ceiling (the unresolved one — try both, watch the ridge move):</div>
+        <div class="seg-row" id="pb-ceil">
+          <button data-tf="62" class="active">62 TF/s → ridge 227</button>
+          <button data-tf="125">125 TF/s → ridge 458</button>
+        </div>
+        <div class="seg-label">Tokens per forward $S_{\text{fwd}}$ (sweep it — the workload sets a start point):</div>
+        <div class="controls" id="pb-ctrls"></div>
+        <div class="readout" id="pb-roof-out"></div>
+      </div>
+    </div>
+    <p style="font-size:.85rem;color:var(--text-dim)">Your three predictions, graded: full fine-tune
+      <strong>OOMs</strong> (−0.36 GiB, before activations); LLM decode b=1 sits at $I=1$, hundreds-fold
+      <strong>bandwidth-bound</strong> — slow; diffusion at $I=4096$ is <strong>compute-bound</strong> —
+      fast. Same box, three answers, one console. <b>[THREAD:memory-ledger beat FINAL]</b> ·
+      <b>[THREAD:dot-product beat FINAL]</b></p>
+
+    <h2>Measure the three numbers yourself</h2>
+    <div class="box try"><span class="box-title">Try it — <code>code/predict_your_box.py</code></span>
+      This is the console, on your box, against <em>your</em> silicon. It reads memory facts (no GPU),
+      computes 122.05 GiB against your own <code>total</code>, then times a big bf16 GEMM against both
+      ceilings in both accumulate modes. It installs nothing and must run in a fresh venv — never
+      ComfyUI's (hardware-ground-truth §3).
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python · code/predict_your_box.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line">GiB = <span class="tok-num">2</span> ** <span class="tok-num">30</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Step 1 — the wall. What does your box ACTUALLY have?</span></span>
+<span class="line">free, total = torch.cuda.<span class="tok-fn">mem_get_info</span>()          <span class="tok-com"># bytes</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"usable now: {free/GiB:.2f} GiB of {total/GiB:.2f} GiB"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Step 2 — the ledger, against YOUR total (not 128, not the spec sheet).</span></span>
+<span class="line">P = <span class="tok-num">8_190_735_360</span>                                <span class="tok-com"># Qwen3-8B, exact (p.36)</span></span>
+<span class="line">need_gib = P * <span class="tok-num">16</span> / GiB                          <span class="tok-com"># 122.05 GiB, full AdamW</span></span>
+<span class="line">slack = total / GiB - need_gib</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"full FT needs {need_gib:.2f} GiB -> slack {slack:+.2f} GiB "</span></span>
+<span class="line">      <span class="tok-str">f"({'FITS' if slack &gt; 0 else 'OOM, before activations'})"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Step 3 — the ceiling + the ridge. A big bf16 GEMM, both accumulate modes.</span></span>
+<span class="line">n = <span class="tok-num">8192</span></span>
+<span class="line">a = torch.<span class="tok-fn">randn</span>(n, n, device=<span class="tok-str">"cuda"</span>, dtype=torch.bfloat16)</span>
+<span class="line">b = torch.<span class="tok-fn">randn</span>(n, n, device=<span class="tok-str">"cuda"</span>, dtype=torch.bfloat16)</span>
+<span class="line"><span class="tok-kw">for</span> allow_fp16_acc <span class="tok-kw">in</span> (<span class="tok-kw">False</span>, <span class="tok-kw">True</span>):</span>
+<span class="line">    torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = allow_fp16_acc</span>
+<span class="line">    torch.cuda.<span class="tok-fn">synchronize</span>(); t0 = torch.cuda.<span class="tok-fn">Event</span>(enable_timing=<span class="tok-kw">True</span>)</span>
+<span class="line">    t1 = torch.cuda.<span class="tok-fn">Event</span>(enable_timing=<span class="tok-kw">True</span>); t0.<span class="tok-fn">record</span>()</span>
+<span class="line">    <span class="tok-kw">for</span> _ <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">50</span>): c = a @ b</span>
+<span class="line">    t1.<span class="tok-fn">record</span>(); torch.cuda.<span class="tok-fn">synchronize</span>()</span>
+<span class="line">    secs = t0.<span class="tok-fn">elapsed_time</span>(t1) / <span class="tok-num">1e3</span> / <span class="tok-num">50</span></span>
+<span class="line">    tf = <span class="tok-num">2</span> * n ** <span class="tok-num">3</span> / secs / <span class="tok-num">1e12</span>            <span class="tok-com"># YOUR ceiling: 62-ish, or 125-ish?</span></span>
+<span class="line">    ridge = tf * <span class="tok-num">1e12</span> / (<span class="tok-num">273e9</span>)                <span class="tok-com"># YOUR ridge: 227, or 458?</span></span>
+<span class="line">    <span class="tok-fn">print</span>(<span class="tok-str">f"{'fp16' if allow_fp16_acc else 'fp32'}-acc: "</span></span>
+<span class="line">          <span class="tok-str">f"{tf:6.1f} TF/s  ->  ridge {ridge:5.0f} FLOP/byte"</span>)</span></code></pre>
+    </div>
+    <p style="font-size:.86rem;color:var(--text-dim)">You just measured the wall, the ceiling, and the
+      ridge — the three numbers the course refused to hand you (constants §10, <span class="tag">MEA</span>
+      list). Whichever ceiling your box lands on, understanding <em>why</em> teaches accumulate precision
+      better than any paragraph.</p>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-pb"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- The predict-your-box console: ledger + roofline, live ---- */
+  (function () {
+    const P = 8190735360;            // Qwen3-8B, exact (constants §1.2)
+    const N_LORA = 43646976;         // LoRA r=16 all-linear trainable (constants §3)
+    const NF4 = 0.515869;            // NF4 double-quant B/param (constants §3)
+    const BW = 273e9;                // bytes/s [VP]
+    const GiB = 2 ** 30;
+    const N_LL = 8.03e9;             // Llama-3.1-8B params, for measured decode points
+    const roofColor = "#4fc3f7", markColor = "#ffb74d", measColor = "#81c784";
+
+    // Each workload: how to compute state bytes, its canonical S_fwd, whether the
+    // ledger or the roofline is the star, and a note. All from frozen constants.
+    const WORK = {
+      fullft:    { kind: "train", stateB: () => 16 * P,                    sfwd: 2048, kO: 12, name: "Full fine-tune, AdamW" },
+      fullft8:   { kind: "train", stateB: () => 10 * P,                    sfwd: 2048, kO: 8,  name: "Full fine-tune, 8-bit Adam" },
+      lora:      { kind: "train", stateB: () => 2 * P + 16 * N_LORA,       sfwd: 2048, kO: 12, name: "LoRA r=16, all-linear" },
+      qlora:     { kind: "train", stateB: () => NF4 * P + 16 * N_LORA,     sfwd: 2048, kO: 12, name: "QLoRA r=16 (NF4)" },
+      decode1:   { kind: "infer", weightsB: 2 * P,  sfwd: 1,    name: "LLM decode, batch 1" },
+      decode32:  { kind: "infer", weightsB: 2 * P,  sfwd: 32,   name: "LLM decode, batch 32" },
+      prefill:   { kind: "infer", weightsB: 2 * P,  sfwd: 2048, name: "LLM prefill, S=2048" },
+      diffusion: { kind: "infer", weightsB: 2 * P,  sfwd: 4096, name: "Diffusion sample, 4096-tok" },
+    };
+
+    const workSel = document.getElementById("pb-work");
+    const boxIn = document.getElementById("pb-box");
+    const measBtn = document.getElementById("pb-measure");
+    const ledgerT = document.getElementById("pb-ledger");
+    const verdictM = document.getElementById("pb-verdict-mem");
+    const roofCanvas = document.getElementById("pb-roof");
+    const roofOut = document.getElementById("pb-roof-out");
+
+    let P_peak = 62e12;   // toggled 62/125 TF
+    let curS = 1;         // the exact S_fwd in play (workload-set or slider-set)
+
+    // S_fwd slider over log10 space (1 -> 40960). Its 0.01 step would snap
+    // canonical values (4096 -> 4074), so a workload sets curS exactly and only
+    // moves the slider for display; a user drag re-derives curS from the slider.
+    const sfwd = makeCtrl(document.getElementById("pb-ctrls"), {
+      label: "S_fwd (tokens/forward)", min: 0, max: Math.log10(40960), step: 0.01, value: 0,
+      fmt: v => Math.round(Math.pow(10, v)).toLocaleString()
+    });
+    const getS = () => curS;
+
+    function fmtGB(b) { return (b / 1e9).toFixed(2); }
+    function fmtGiB(b) { return (b / GiB).toFixed(2); }
+
+    function drawLedger() {
+      const w = WORK[workSel.value];
+      const box = parseFloat(boxIn.value) || 121.6875;
+      let rows = "", needGiB, note;
+
+      if (w.kind === "train") {
+        const state = w.stateB();
+        needGiB = state / GiB;
+        if (workSel.value === "fullft") {
+          rows =
+            `<tr><td>weights (bf16)</td><td>${fmtGB(2 * P)} GB</td></tr>` +
+            `<tr><td>gradients (bf16)</td><td>${fmtGB(2 * P)} GB</td></tr>` +
+            `<tr><td>fp32 master + Adam m,v</td><td>${fmtGB(12 * P)} GB</td></tr>`;
+        } else if (workSel.value === "fullft8") {
+          rows =
+            `<tr><td>weights + grads (bf16)</td><td>${fmtGB(4 * P)} GB</td></tr>` +
+            `<tr><td>fp32 master + 8-bit m,v</td><td>${fmtGB(6 * P)} GB</td></tr>`;
+        } else if (workSel.value === "lora") {
+          rows =
+            `<tr><td>frozen base weights (bf16)</td><td>${fmtGB(2 * P)} GB</td></tr>` +
+            `<tr><td>adapter + optimizer (16·N_t)</td><td>${fmtGB(16 * N_LORA)} GB</td></tr>`;
+        } else {
+          rows =
+            `<tr><td>NF4 base (0.516·P)</td><td>${fmtGB(NF4 * P)} GB</td></tr>` +
+            `<tr><td>adapter + optimizer (16·N_t)</td><td>${fmtGB(16 * N_LORA)} GB</td></tr>`;
+        }
+        rows += `<tr class="total"><td>state total</td><td>${fmtGB(state)} GB = ${fmtGiB(state)} GiB</td></tr>`;
+        rows += `<tr><td style="color:var(--text-dim)">+ activations [EST]</td><td style="color:var(--text-dim)">2–6 GB (both sides)</td></tr>`;
+        note = "LoRA/QLoRA do <em>not</em> shrink weights or activations — only optimizer state (187×).";
+      } else {
+        // inference: memory is serving weights (+KV); the roofline is the wall.
+        needGiB = w.weightsB / GiB;
+        rows =
+          `<tr><td>serving weights (bf16)</td><td>${fmtGB(w.weightsB)} GB</td></tr>` +
+          `<tr><td>+ KV cache</td><td style="color:var(--text-dim)">144 KiB/token</td></tr>` +
+          `<tr class="total"><td>weights</td><td>${fmtGB(w.weightsB)} GB = ${fmtGiB(w.weightsB)} GiB</td></tr>`;
+        note = "Inference fits easily — the question here is <em>speed</em>, not fit. Read the roofline →";
+      }
+      ledgerT.innerHTML = rows;
+
+      const slack = box - needGiB;
+      const fits = slack > 0;
+      verdictM.innerHTML =
+        `<span class="verdict ${fits ? "fit" : "oom"}">${fits ? "FITS" : "OOM"}</span> ` +
+        `<span style="font-family:var(--mono);font-size:.86rem">${needGiB.toFixed(2)} GiB vs ${box} → ` +
+        `${slack >= 0 ? "+" : ""}${slack.toFixed(2)} GiB</span>` +
+        `<div style="font-size:.8rem;color:var(--text-dim);margin-top:4px">${note}</div>`;
+    }
+
+    function dot(p, x, y, color, r) {
+      const g = p.g; g.save(); g.fillStyle = color;
+      g.beginPath(); g.arc(p._tx(x), p._ty(y), r || 5, 0, 2 * Math.PI); g.fill(); g.restore();
+    }
+
+    function drawRoof() {
+      const p = new Plot(roofCanvas, {
+        xmin: 1e-2, xmax: 1e4, ymin: 1e10, ymax: 2e14, xlog: true, ylog: true,
+        xlabel: "arithmetic intensity  I  (FLOP/byte)", ylabel: "throughput (FLOP/s)"
+      });
+      p.clear(); p.grid();
+
+      // roofline P = min(P_peak, BW·I)
+      const xs = [], ys = [];
+      for (let e = -2; e <= 4; e += 0.02) { const I = Math.pow(10, e); xs.push(I); ys.push(Math.min(P_peak, BW * I)); }
+      p.trace(xs, ys, roofColor, 2.5);
+
+      const ridge = P_peak / BW;
+      p.vline(ridge, cssVar("--plot-tick", "#8391ab"), [4, 4]);
+      p.label(ridge * 1.08, P_peak * 0.5, "I* = " + ridge.toFixed(0), cssVar("--accent2", "#7fd1ff"));
+
+      // measured decode points (Llama-3.1-8B FP8): P = tok/s · 2N
+      const twoN = 2 * N_LL;
+      dot(p, 2, 20.5 * twoN, measColor, 4.5);
+      dot(p, 64, 368 * twoN, measColor, 4.5);
+
+      // the live workload marker at I = S_fwd
+      const I = getS();
+      const Pw = Math.min(P_peak, BW * I);
+      dot(p, I, Pw, markColor, 7);
+
+      const bound = I < ridge;
+      const factor = bound ? ridge / I : I / ridge;
+      roofOut.innerHTML =
+        `S_fwd = <b>${I.toLocaleString()}</b> → I = <b>${I.toLocaleString()}</b> FLOP/byte · ` +
+        `ridge I* = <b>${ridge.toFixed(0)}</b> (${(P_peak / 1e12).toFixed(0)} TF) → ` +
+        `<b>${factor.toFixed(factor < 10 ? 1 : 0)}× ${bound ? "below → bandwidth-bound" : "above → compute-bound"}</b>`;
+    }
+
+    function redraw() { drawLedger(); drawRoof(); }
+
+    function onWorkChange() {
+      const w = WORK[workSel.value];
+      sfwd.input.value = Math.log10(w.sfwd);
+      sfwd.input.dispatchEvent(new Event("input"));  // refresh the value label (this snaps curS)
+      curS = w.sfwd;                                  // ...so set the exact value AFTER, no slider-snap
+      redraw();
+    }
+
+    workSel.addEventListener("change", onWorkChange);
+    boxIn.addEventListener("input", drawLedger);
+    measBtn.addEventListener("click", () => { boxIn.value = "121.6875"; drawLedger(); });
+    sfwd.onInput(() => { curS = Math.max(1, Math.round(Math.pow(10, sfwd.get()))); drawRoof(); });
+
+    document.getElementById("pb-ceil").querySelectorAll("button").forEach(b =>
+      b.addEventListener("click", () => {
+        document.getElementById("pb-ceil").querySelectorAll("button").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        P_peak = parseFloat(b.dataset.tf) * 1e12;
+        drawRoof();
+      }));
+
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redraw, 0));
+    onWorkChange();  // initial paint (defaults to fullft)
+  })();
+
+  /* ---- QUIZ (7; ≥2 numeric) ---- */
+  renderQuiz("quiz-pb", [
+    {
+      q: "Qwen3-8B full fine-tune state (AdamW, 16 B/param), in GiB?",
+      num: 122.05, tol: 0.1, unit: "GiB",
+      why: "$8.19\\text{e}9 \\times 16 / 2^{30} = 131.05\\text{ GB} = 122.05\\text{ GiB}$ [DER, constants §2.2]. Activations are a separate [EST] line on top."
+    },
+    {
+      q: "What is your Spark's measured usable <code>MemTotal</code>, in GiB?",
+      num: 121.6875, tol: 0.01, unit: "GiB",
+      why: "121.6875 GiB [MEA-DEV] — 128 is marketing; a firmware carveout of 6.3125 GiB (4.9%) is gone before you allocate a byte. Full-FT misses this by 0.36 GiB."
+    },
+    {
+      q: "LLM decode at batch 1 is <em>slow</em> on the Spark because…",
+      opts: [
+        "the GPU has too few TFLOPs — it is compute-limited",
+        "$I = 1 \\ll$ the ridge, so it is bandwidth-bound — starved waiting on DRAM",
+        "the model does not fit in memory",
+        "decode uses fp32 and prefill uses bf16"
+      ],
+      a: 1,
+      why: "$I = S_{\\text{fwd}} = 1$, hundreds-fold below the ridge → bandwidth-bound. The 'too slow / low TFLOPs' answer is exactly the compute-bound misconception the roofline exists to kill."
+    },
+    {
+      q: "Same Spark — why is diffusion sampling <em>strong</em>?",
+      opts: [
+        "diffusion needs far less memory than an LLM",
+        "diffusion runs in FP4 while decode runs in bf16",
+        "$I = 4096 \\gg$ the ridge, so it is compute-bound — the cores actually work",
+        "the GPU clocks higher for image workloads"
+      ],
+      a: 2,
+      why: "$I = S_{\\text{fwd}} = 4096$, 9–18× above the ridge → compute-bound. Conflating this with memory (answer 1) is the trap: it is the same roofline division, opposite side of $I^\\star$."
+    },
+    {
+      q: "If the dense BF16 ceiling turns out to be 62 TF/s and $BW = 273$ GB/s, the ridge $I^\\star$ is (FLOP/byte):",
+      num: 227, tol: 5, unit: "FLOP/byte",
+      why: "$62\\text{e}12 / 273\\text{e}9 = 227$ [INF] — and it would be 458 at 125 TF. Both verdicts (decode, diffusion) hold under either ridge; only the number turns on the unresolved ceiling."
+    },
+    {
+      q: "\"LoRA r=16 only trains 43 M params, so its total memory footprint is about 0.6 GB.\" What is wrong?",
+      opts: [
+        "nothing — 0.6 GB is correct",
+        "it is 14.3 GB — LoRA halves the activation memory",
+        "it is 17.08 GB total — only optimizer state shrinks 187×; the frozen base and activations do not",
+        "it is 4.93 GB — that is the QLoRA number"
+      ],
+      a: 2,
+      why: "0.61 GB is the trainable <em>state</em> alone (that is what shrank 187× = P/N_t). Total is 16.38 GB frozen base + 0.70 GB adapter/state = 17.08 GB, plus the same activations as full-FT (constants §2.3/§2.4). The retired 224×/417× and '14.3 GB' figures are the distractors."
+    },
+    {
+      q: "Which two numbers on this page are you <em>not</em> allowed to trust from the course, and why?",
+      opts: [
+        "the parameter count and the KV cache — they are model-specific",
+        "the dense BF16 ceiling and the achieved bandwidth — both are [MEA]: unpublished / theoretical-peak, so you measure them",
+        "the ridge and the wall — they are marketing",
+        "the LoRA and QLoRA state sizes — they depend on rank"
+      ],
+      a: 1,
+      why: "The dense BF16 ceiling (62 vs 125 TF, unpublished [INF]) and achieved bandwidth (273 GB/s is theoretical peak [VP]; achieved is [MEA]). The course ships a script, not a fabricated number (constants §6.3, §10)."
+    }
+  ], "Predict-your-box self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>61. Conditioning, Cross-Attn &amp; CFG — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local only. The PREDICT box, Symbol Ledger, and callout boxes come
+     from the shared .box.predict / table.ledger / .box.* components in
+     course.css. Everything here is specific to this page. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .demo-grid { display: grid; grid-template-columns: 1fr; gap: 14px; }
+  .tag-inf { font-size: .72rem; color: var(--text-dim); border: 1px solid var(--border); border-radius: 4px;
+             padding: 0 5px; margin-left: 4px; vertical-align: middle; }
+  table.encbox { width: 100%; border-collapse: collapse; font-size: .86rem; margin: .6em 0; }
+  table.encbox th, table.encbox td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  table.encbox th { color: var(--text-dim); font-weight: 600; }
+  table.wgtab { width: 100%; border-collapse: collapse; font-size: .86rem; margin: .6em 0; }
+  table.wgtab th, table.wgtab td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  table.wgtab td:first-child { font-family: var(--mono); color: var(--track-diffusion); white-space: nowrap; }
+</style>
+</head>
+<body data-page="61-conditioning-cross-attention-cfg.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · Conditioning</span>
+    <h1>Conditioning: Text Encoders, Cross-Attention &amp; CFG</h1>
+    <p class="subtitle">Your most-turned knob, derived. Guidance is the dial you have
+      moved a thousand times and understood least. By the end of this page it is five lines
+      of Bayes and one substitution from page 56 — and you will know exactly why turning it
+      past a point makes an image that belongs to no real distribution, and why it works anyway.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: answered in "Read it as a straight line" (part c)
+         and in "guidance ≠ cfg" (2 passes), and again in Q1/Q2. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You set <code>cfg 7.5</code> in the KSampler node. Two commitments before you scroll:
+      <ol style="margin:.5em 0 0 1.1em;padding:0">
+        <li>Are you sampling from <b>(a)</b> the conditional distribution
+          $p(\mathbf x\mid\mathbf c)$, <b>(b)</b> a <em>sharper</em> version of it, or
+          <b>(c)</b> a distribution that <em>no real image belongs to</em>?</li>
+        <li>How many forward passes through the network does <code>cfg 7.5</code> cost
+          <em>per sampling step</em>?</li>
+      </ol>
+    </div>
+
+    <!-- ============================ INTUITION: one symbol ============================ -->
+    <h2>Conditioning changes the loss by exactly one symbol</h2>
+
+    <p>Everything you built on pages 54–57 — the forward rotation, the MSE objective, the
+      samplers, flow matching — used an unconditional network $\epsilon_\theta(\mathbf x_t, t)$
+      that only ever saw a noisy latent and a noise level. Text-to-image adds <em>one</em>
+      argument to that function and changes nothing else:</p>
+
+    <div class="box key"><span class="box-title">🔑 Conditioning is one extra input to the same network</span>
+      $$\mathcal L \;=\; \mathbb E_{\mathbf x_0,\,\boldsymbol\epsilon,\,t,\,\mathbf c}
+        \Big[\,\big\|\,\boldsymbol\epsilon - \epsilon_\theta(\mathbf x_t,\,t,\,\mathbf c)\,\big\|_2^2\,\Big].$$
+      Train on <em>(image, caption)</em> pairs instead of images alone; the forward process,
+      the loss shape, and the samplers are untouched. That single degree of freedom is <em>why
+      diffusion took over</em>: $\mathbf c$ can be a caption, a depth map, a pose, another image
+      — you condition by concatenating, and the machinery does not care what it is.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathcal L$</td><td>the training loss, per example</td><td>scalar (nats²·energy)</td><td>page 55's $\mathcal L_{\text{simple}}$, plus $\mathbf c$</td></tr>
+        <tr><td>$\boldsymbol\epsilon$</td><td>the noise that was actually added</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>the forward draw, $\mathcal N(0,I)$</td></tr>
+        <tr><td>$\epsilon_\theta$</td><td>the noise-prediction network</td><td>same as $\mathbf x_t$</td><td>page 55; now takes a third argument</td></tr>
+        <tr><td>$\mathbf x_t$</td><td>the latent noised to level $t$</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>Eq. 3.3, page 54</td></tr>
+        <tr><td>$t$</td><td>diffusion timestep (noise level)</td><td>scalar, $0..T$</td><td>a uniform draw per step</td></tr>
+        <tr><td>$\mathbf c$</td><td><b>the conditioning</b> — the encoded prompt</td><td>$(S_{\text{txt}}, d_c)$</td><td>a frozen text encoder (below)</td></tr>
+      </tbody>
+    </table>
+
+    <p>The <em>how</em> — the wire that actually lets $\epsilon_\theta$ read $\mathbf c$ — is
+      the cross-attention (U-Net, page 58) or joint MMDiT attention (DiT, page 59) you already
+      dissected. The prompt enters as the $K,V$ of a cross-attention block; the image patches
+      are the $Q$. Nothing new here — reopen those shape tables if the wiring is fuzzy.</p>
+
+    <div class="ribbon">c        (S_txt, d_c)                # encoded prompt: 77 tokens × 768 (SD1.5)
+Q = image_patches @ W_q          (HW, d_head)     # queries from the canvas
+K = c @ W_k , V = c @ W_v         (S_txt, d_head)  # keys/values from the PROMPT
+A = softmax(Q Kᵀ / √d_head)       (HW, S_txt)      # "which patch cares about which word"
+out = A V                         (HW, d_head)     # the prompt, painted onto the patches</div>
+
+    <!-- ============================ ENCODER BOXES ============================ -->
+    <h2>What lives in the two "text encoder" boxes</h2>
+
+    <p>In every workflow you have a node (or two) that turns a string into $\mathbf c$. Here is
+      what has actually been in that box across the models on your disk — and the trend that
+      ends this page.</p>
+
+    <div class="box worked"><span class="box-title">✍️ The encoder, model by model</span>
+      <table class="encbox">
+        <thead><tr><th>Model</th><th>Text encoder(s)</th><th>Tokens</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td>SD1.5</td><td>CLIP-L (123M)</td><td><b>77</b></td><td>bag-of-words-ish; can't bind "red cube / blue sphere"</td></tr>
+          <tr><td>SDXL</td><td>CLIP-L + OpenCLIP bigG</td><td>77</td><td>two CLIPs concatenated</td></tr>
+          <tr><td>SD3.5 / FLUX.1</td><td>CLIP-L + <b>T5-XXL 4.7B</b> <span class="tag-inf">VP</span></td><td>up to 512</td><td>T5 adds syntax → attribute binding</td></tr>
+          <tr><td><b>FLUX.2-dev</b> (your disk)</td><td><b>Mistral-3 24B VLM</b> <span class="tag-inf">VP</span></td><td>long</td><td>the encoder is now bigger than all of FLUX.1</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The encoder is <em>frozen</em> — and that is the whole trick</span>
+      CLIP, T5, and Mistral-3 were trained by <em>other people for other tasks</em>. The
+      diffusion model does <b>not</b> train them; it learns to <em>read</em> a fixed language.
+      Two consequences you have lived:
+      <ul style="margin:.5em 0 0 1.1em;padding:0">
+        <li><b>Why 77?</b> CLIP's 2021 context length — a historical accident. Every
+          prompt-chunking / <code>BREAK</code> hack you have used exists to route around this
+          one frozen number.</li>
+        <li><b>Why T5 <em>alongside</em> CLIP?</b> CLIP encodes a vibe (a pooled vector →
+          fed to adaLN, page 59); T5 has real syntax (a sequence → fed to attention). "CLIP
+          for the mood, T5 for the words."</li>
+      </ul>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The 2026 headline: the text encoder became an LLM</span>
+      <span class="thread" style="border:none;padding:0;margin:.2em 0;display:block">
+        <b>[THREAD:Qwen3-8B — beat: the branches touch]</b> Same object as the LLM track, new
+        guise. The image-track encoder grew: CLIP-L 123M → T5 4.7B → <b>Mistral-3 24B</b> — an
+        encoder <em>twice the size of the entire FLUX.1 model, hired only to read the prompt.</em>
+      </span>
+      Your FLUX.2 encoder on disk is a <b>40-layer GQA (32 query / 8 KV heads) RoPE Mistral-3</b>
+      <span class="tag-inf">VP · hardware-ground-truth §4</span> — grouped-query attention (page 37),
+      RoPE (page 33), an SiLU MLP (page 35): <em>every component the LLM track taught you</em>,
+      now doing the reading for your image model. The capstone cashes this in — the tracks that
+      forked at page 44 are already growing back together.
+    </div>
+
+    <!-- ============================ DERIVE CFG ============================ -->
+    <h2>Classifier-free guidance, derived in five lines</h2>
+
+    <p>You have a conditional score $\epsilon_\theta(\mathbf x_t,t,\mathbf c)$ and — because you
+      randomly dropped the caption on ~10% of training steps — an <em>unconditional</em> one
+      $\epsilon_\theta(\mathbf x_t,t,\varnothing)$ from the same network. Watch what falls out
+      of Bayes' rule.</p>
+
+    <div class="box key"><span class="box-title">🔑 Five lines from Bayes to the guidance formula</span>
+      <p><b>1.</b> Bayes on the conditional density:
+        $\;p(\mathbf x\mid\mathbf c)\;\propto\;p(\mathbf c\mid\mathbf x)\,p(\mathbf x).$</p>
+      <p><b>2.</b> Take $\log$, then $\nabla_{\mathbf x}$. The evidence $p(\mathbf c)$ has no
+        $\mathbf x$ in it, so it dies — the same normalizer-dodge that page 53 promised and page
+        56 delivered:
+        $$\nabla_{\mathbf x}\log p(\mathbf c\mid\mathbf x)
+          = \nabla_{\mathbf x}\log p(\mathbf x\mid\mathbf c) - \nabla_{\mathbf x}\log p(\mathbf x).$$</p>
+      <p><b>3.</b> Read it aloud: <em>(conditional score) − (unconditional score)</em> is a
+        classifier gradient — and <b>we never trained a classifier.</b> That is the
+        <em>classifier-free</em> in the name.</p>
+      <p><b>4.</b> To make the prompt <em>count more</em>, amplify that classifier term by a
+        factor $w_g$: sample from $\tilde p_{w_g} \propto p(\mathbf x)\,p(\mathbf c\mid\mathbf x)^{w_g}$.
+        Its score is $\;\nabla\log p(\mathbf x) + w_g\big[\nabla\log p(\mathbf x\mid\mathbf c) - \nabla\log p(\mathbf x)\big].$</p>
+      <p><b>5.</b> Convert scores to $\epsilon$ with page 56's identity
+        $\mathbf s_\theta = -\epsilon_\theta/\sqrt{1-\bar\alpha_t}$. The minus signs and the
+        $\sqrt{1-\bar\alpha_t}$ are common to every term and cancel:</p>
+      $$\boxed{\;\tilde\epsilon_\theta \;=\; \epsilon_\theta(\mathbf x_t,t,\varnothing)
+        \;+\; w_g\big[\,\epsilon_\theta(\mathbf x_t,t,\mathbf c) - \epsilon_\theta(\mathbf x_t,t,\varnothing)\,\big]\;}$$
+      <p style="margin:.6em 0 0">That is <code>cfg</code> in the KSampler node, derived from Bayes
+        and one substitution. Page 56 was worth it.</p>
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\tilde\epsilon_\theta$</td><td>the <b>guided</b> noise estimate actually used to denoise</td><td>same as $\mathbf x_t$</td><td>what we're building</td></tr>
+        <tr><td>$\epsilon_\theta(\cdots,\mathbf c)$</td><td>conditional prediction (prompt on)</td><td>same</td><td>network, forward pass #1</td></tr>
+        <tr><td>$\epsilon_\theta(\cdots,\varnothing)$</td><td>unconditional prediction (prompt off)</td><td>same</td><td>network, forward pass #2</td></tr>
+        <tr><td>$\varnothing$</td><td>the null / empty conditioning</td><td>$(S_{\text{txt}},d_c)$ of zeros or ""</td><td>caption-dropout at train time</td></tr>
+        <tr><td>$w_g$</td><td><b>the CFG guidance scale</b></td><td>scalar, $\ge 0$</td><td>your KSampler <code>cfg</code> field</td></tr>
+        <tr><td>$\epsilon_\theta(\mathbf c)-\epsilon_\theta(\varnothing)$</td><td>the <b>CFG direction</b> — "what the prompt adds"</td><td>same</td><td>the difference vector</td></tr>
+      </tbody>
+    </table>
+
+    <p class="xref"><b>Translation note.</b> Papers and code write the guidance scale as
+      $w$, $s$, <code>cfg</code>, <code>cfg_scale</code>, or <code>guidance_scale</code>; we
+      write $w_g$ (a bare $w$ is banned course-wide). The null conditioning $\varnothing$ is
+      the empty-string / zero embedding, <em>not</em> a negative prompt (that comes below).</p>
+
+    <div class="thread"><b>[THREAD:the dot product — beat: the CFG direction is the atom]</b>
+      $\epsilon_\theta(\mathbf c)-\epsilon_\theta(\varnothing)$ is a vector in latent space, and
+      CFG is a step along it. Same atom as the neuron's weighted sum, attention's $QK^\top$, and
+      LoRA's $BA$ — a direction you scale.
+      <b>[THREAD:the chain rule — beat: CFG is a statement about scores]</b> Every term here is
+      a $\nabla_{\mathbf x}\log p$. Page 56 is the hard prerequisite; without the score identity
+      line 5 has nothing to substitute.</div>
+
+    <!-- ============================ GEOMETRY ============================ -->
+    <h2>Read it as a straight line</h2>
+
+    <p>Rewrite the boxed formula around the conditional point:
+      $\;\tilde\epsilon = \epsilon_\varnothing + w_g(\epsilon_c - \epsilon_\varnothing)\;$ is
+      exactly <code>lerp(uncond, cond, w_g)</code> — a line you have written in shader code. The
+      only new idea is that <b>you are allowed to set $w_g &gt; 1$ and walk off the end of the
+      segment.</b></p>
+
+    <table class="wgtab">
+      <thead><tr><th>$w_g$</th><th>Where $\tilde\epsilon$ lands</th><th>What you see</th></tr></thead>
+      <tbody>
+        <tr><td>0</td><td>at $\epsilon_\varnothing$</td><td>prompt ignored — pure unconditional</td></tr>
+        <tr><td>1</td><td>at $\epsilon_c$ exactly</td><td>the model's <em>honest</em> $p(\mathbf x\mid\mathbf c)$ — "CFG off"</td></tr>
+        <tr><td>&gt;1</td><td><b>past $\epsilon_c$, off the segment</b></td><td>extrapolation into space no training sample occupied</td></tr>
+        <tr><td>7.5</td><td>6.5 direction-lengths beyond $\epsilon_c$</td><td>the SD1.5 sweet spot — and it is <em>outside</em> the data</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 CFG generates images from a distribution that does not exist</span>
+      For $w_g&gt;1$, $\tilde\epsilon$ points somewhere no honest denoiser would ever have
+      pointed. $\tilde p_{w_g}\propto p(\mathbf x)\,p(\mathbf c\mid\mathbf x)^{w_g}$ is a
+      <em>sharpened, extrapolated</em> distribution — like lowering a softmax temperature past
+      1, but on the image itself. (On the frozen canonical logits $z=[2.0,1.0,0.1]$,
+      $\hat y=[0.659,0.242,0.099]$ <span class="tag-inf">DER · constants §9.2</span>; raising
+      those probabilities to a power $w_g$ and renormalizing pushes mass onto the top class —
+      the same move, on classes instead of pixels.) It is one of the most embarrassing facts in
+      generative modeling: the setting everyone uses provably leaves the data manifold, <em>and
+      it works.</em> <b>Predict-box answer #1: (c).</b>
+    </div>
+
+    <!-- ============================ DEMO 1: 2D toy ============================ -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag $w_g$ from 0 to 20 in the demo below and watch the sample cloud. This is CFG on a
+      two-Gaussian conditional, computed live — the whole story of "fried" output in one slider.
+      Take it in order: $0\to1\to4\to10\to20$.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">D61.1 · CFG on a 2-D toy — the guided field &amp; its samples <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-cfg" height="380"></canvas>
+        <div class="controls" id="d-cfg-ctrls"></div>
+        <div class="readout" id="d-cfg-out"></div>
+      </div>
+    </div>
+
+    <p>At $w_g=1$ the samples sit on the two conditional blobs — correct and unimpressive. At
+      $w_g\approx4$ they tighten. By $w_g=10$ they collapse toward two dots and the guidance
+      vector is several times too long; at $w_g=20$ they shoot into empty space and the
+      "outside true support" fraction runs toward 90%. <b>That is what "fried" means, with two
+      Gaussians and a slider</b> — and all three real mechanisms are visible at once.</p>
+
+    <!-- ============================ WHY FRIED ============================ -->
+    <h2>Why too much guidance looks "fried" — three real mechanisms</h2>
+
+    <div class="box worked"><span class="box-title">✍️ The three mechanisms, in order of blame</span>
+      <p><b>1. Variance / contrast blow-up (dominant, and it's arithmetic).</b> The prediction
+        $\epsilon_\theta$ is supposed to be unit-variance noise. But
+        $\|\tilde\epsilon\| = \|\epsilon_\varnothing + w_g(\epsilon_c-\epsilon_\varnothing)\|$
+        grows roughly linearly in $w_g$ — so at $w_g=7.5$ the "noise" you subtract is several
+        times too big. Over-subtracting inflates $\hat{\mathbf x}_0$'s contrast: blown
+        highlights, crushed blacks, oversaturated color. <b>The one-line fix confirms the
+        diagnosis:</b> the <code>RescaleCFG</code> node renormalizes $\operatorname{std}(\tilde\epsilon)$
+        back to $\operatorname{std}(\epsilon_c)$ — and the frying goes away. A std fix repairs
+        the artifact, so the artifact <em>was</em> a std problem. (You may have used that node
+        without knowing this was what it did.)</p>
+      <p><b>2. Off-manifold extrapolation.</b> A straight line in $\epsilon$-space leaves the
+        curved data manifold. Even with the std corrected, far-out $\tilde\epsilon$ lands in
+        latent regions the VAE decodes to plausible-but-wrong texture.</p>
+      <p><b>3. Diversity collapse.</b> $p(\mathbf c\mid\mathbf x)^{w_g}$ is mode-seeking: it
+        concentrates on the single most-prompt-like sample. High $w_g$ trades variety for
+        prompt-adherence — the "every face looks the same" complaint.</p>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Push $w_g$ high, then drag $\phi$ from 0 to 1 and watch the standard deviation of the
+      guided prediction snap back to the conditional's. The raw curve rises without bound; the
+      rescaled curve is flat. The frying was a scale bug; this is the one-line fix.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">D61.3 · RescaleCFG — std$(\tilde\epsilon)$ vs guidance <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-resc" height="320"></canvas>
+        <div class="controls" id="d-resc-ctrls"></div>
+        <div class="readout" id="d-resc-out"></div>
+      </div>
+    </div>
+
+    <p class="xref">Typical practitioner ranges <span class="tag-inf">EST</span>: SD1.5
+      <b>7–8</b>, SDXL <b>5–7</b>, SD3.5 <b>3.5–4.5</b>, FLUX.1-dev <code>cfg</code> effectively
+      <b>1.0</b>, FLUX.2-klein <b>1.0</b>. CFG requirements fell <em>monotonically</em> as the
+      conditional models improved: <b>CFG is a crutch for a weak conditional model, being
+      engineered out of existence by distillation.</b></p>
+
+    <!-- ============================ THE LINE DEMO ============================ -->
+    <div class="demo">
+      <div class="demo-head">D61.2 · The guidance line — $\tilde\epsilon$ leaves the segment <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-line" height="300"></canvas>
+        <div class="controls" id="d-line-ctrls"></div>
+        <div class="readout" id="d-line-out"></div>
+      </div>
+    </div>
+
+    <p>Two fixed points, $\epsilon_\varnothing$ and $\epsilon_c$, and the guided point
+      $\tilde\epsilon = \operatorname{lerp}(\epsilon_\varnothing,\epsilon_c,w_g)$. Past $w_g=1$
+      the dot visibly leaves the segment between them — geometry and frying, same picture.</p>
+
+    <!-- ============================ GUIDANCE vs CFG ============================ -->
+    <h2>The one that trips everyone: <code>guidance</code> is not <code>cfg</code></h2>
+
+    <div class="box warn"><span class="box-title">⚠️ FLUX.1-dev's <code>guidance</code> ≠ real CFG — highest-priority confusion</span>
+      The <code>FluxGuidance</code> node's <code>guidance</code> (default <b>3.5</b>) is
+      <em>not</em> classifier-free guidance. FLUX.1-dev is <b>guidance-distilled</b> (page 59):
+      the CFG behavior was <em>baked into the weights</em>, and <code>guidance</code> is just the
+      scale-value the model was trained to emulate, <b>fed in as a conditioning input, embedded
+      like the timestep $t$.</b> One forward pass. No unconditional branch. The extrapolation is
+      already compiled in.
+      <p style="margin:.6em 0 0">What this means you can act on:</p>
+      <ul style="margin:.3em 0 0 1.1em;padding:0">
+        <li>Setting real <code>cfg=3.5</code> on FLUX.1-dev <b>doubles your time and makes it
+          worse</b> — you are double-guiding an already-guided model.</li>
+        <li><code>guidance</code> is cheap: it is an embedding, not a second pass.</li>
+        <li>FLUX.1-schnell ignores it entirely.</li>
+        <li><b>FLUX LoRAs must be trained with <code>guidance_scale=1.0</code></b> — the gotcha
+          that reappears on page 62.</li>
+      </ul>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ The cost the UI hides — predict-box answer #2</span>
+      Real CFG needs <b>both</b> $\epsilon_\theta(\mathbf c)$ and $\epsilon_\theta(\varnothing)$,
+      so it is <b>2 forward passes per sampling step.</b> A run showing "20 steps" at
+      <code>cfg 7.5</code> actually evaluates the network
+      $$20 \text{ steps} \times 2 \text{ passes} = \mathbf{40}\ \text{model evaluations.}$$
+      <b>The steps number in the UI is half the truth.</b> A <em>negative prompt</em> costs
+      nothing extra — it just replaces the $\varnothing$ branch with an encoded
+      $\mathbf c^-$ (the unconditional pass was already being computed). On FLUX.1-dev, which
+      runs one pass, a negative prompt does <em>nothing</em> — there is no second branch to
+      repurpose.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Genuine, unresolved uncertainty</span>
+      Nobody has a satisfying theory of <em>why</em> $w_g\approx7$ beats $w_g=1$. Karras's
+      "autoguidance" (guiding with a deliberately <em>worse</em> model works better than guiding
+      with the unconditional one) suggests CFG is correcting model <em>error</em>, not sharpening
+      the true conditional. You are turning a knob the field's best theorists do not fully
+      understand, in a direction that provably leaves the data distribution, and it works. That
+      is the honest state of the art — hold it lightly.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-61"></div>
+
+    <div class="thread"><b>Threads carried:</b> chain-rule (CFG is a score/gradient statement,
+      page 56 is its prerequisite) · the dot product (the CFG direction
+      $\epsilon_c-\epsilon_\varnothing$) · Qwen3-8B (the encoder became a Mistral-3 — the tracks
+      converge). <b>Next:</b> page 62 puts <em>your</em> thing in the model — and
+      <code>guidance_scale=1.0</code> and the <code>strength</code>-as-CFG-frying analogy both
+      return there.</div>
+
+    <p class="xref"><b>Cross-refs.</b> ← 56 (the score identity, hard prerequisite), 58/59
+      (cross-attention &amp; MMDiT — the wiring), 59 (guidance distillation); trunk Bayes page;
+      constants §9.2 (canonical logits). → 62 (LoRA <code>guidance_scale=1.0</code>;
+      <code>strength</code> = CFG-style extrapolation), the capstone (the Mistral reveal).</p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* deterministic RNG + Box–Muller, so every reload is identical (seeded) */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gauss(rnd) {
+    let u = 0, v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+  function drawArrow(g, x0, y0, x1, y1, color, w) {
+    g.save(); g.strokeStyle = color; g.fillStyle = color; g.lineWidth = w || 1.3;
+    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+    const ang = Math.atan2(y1 - y0, x1 - x0), h = 4.6;
+    g.beginPath(); g.moveTo(x1, y1);
+    g.lineTo(x1 - h * Math.cos(ang - 0.4), y1 - h * Math.sin(ang - 0.4));
+    g.lineTo(x1 - h * Math.cos(ang + 0.4), y1 - h * Math.sin(ang + 0.4));
+    g.closePath(); g.fill(); g.restore();
+  }
+
+  /* ---- shared: a 2-D conditional diffusion, sampled for real ----
+     Data = tight isotropic-Gaussian blobs (σ_d). UNCOND is the full 5-blob
+     prior; COND is the 2 blobs the "prompt" selects. At noise level ᾱ_t the
+     noised marginal of a blob-mixture is itself a Gaussian mixture centered at
+     √ᾱ_t·m_k with variance v = (1−ᾱ_t) + ᾱ_t σ_d², so its score is closed-form.
+     ε = −√(1−ᾱ_t)·score (page 56). We then run the REAL DDIM reverse process on
+     the CFG-guided ε — so over-subtraction genuinely throws samples off-manifold,
+     exactly as it does in your KSampler. Nothing is faked. */
+  const UNCOND = [[-1.75, 1.05], [1.6, 1.2], [-1.3, -1.45], [1.5, -1.25], [0.0, 0.05]];
+  const COND = [[-0.8, 0.0], [0.8, 0.0]];            // the two blobs the "prompt" asks for
+  const SIGD = 0.13, RANGE = 3.0;                     // blob width, plot half-range
+
+  // DDPM linear schedule (matches page 54): β 1e-4 → 0.02 over T=1000.
+  const Tmax = 1000, B0 = 1e-4, B1 = 0.02;
+  const ABAR = new Float64Array(Tmax + 1); ABAR[0] = 1;
+  { let acc = 1; for (let t = 1; t <= Tmax; t++) { const beta = B0 + (B1 - B0) * (t - 1) / (Tmax - 1); acc *= (1 - beta); ABAR[t] = acc; } }
+
+  function noisedScore(x, y, modes, abar) {
+    const v = (1 - abar) + abar * SIGD * SIGD, sa = Math.sqrt(abar);
+    let wsum = 0, sx = 0, sy = 0;
+    for (const [mx, my] of modes) {
+      const dx = x - sa * mx, dy = y - sa * my;
+      const w = Math.exp(-(dx * dx + dy * dy) / (2 * v));
+      wsum += w; sx += w * (-dx / v); sy += w * (-dy / v);
+    }
+    if (wsum < 1e-300) return [0, 0];
+    return [sx / wsum, sy / wsum];
+  }
+  // guided ε and the pure conditional ε at (x, level ᾱ)
+  function epsGuided(x, y, wg, abar) {
+    const so = Math.sqrt(1 - abar);
+    const sn = noisedScore(x, y, UNCOND, abar), sc = noisedScore(x, y, COND, abar);
+    const enx = -so * sn[0], eny = -so * sn[1], ecx = -so * sc[0], ecy = -so * sc[1];
+    return { gx: enx + wg * (ecx - enx), gy: eny + wg * (ecy - eny), cx: ecx, cy: ecy };
+  }
+  function distToCond(x, y) {
+    let d = Infinity;
+    for (const [mx, my] of COND) d = Math.min(d, Math.hypot(x - mx, y - my));
+    return d;
+  }
+
+  /* ---- DEMO D61.1: real DDIM sampling of the CFG-guided field ---- */
+  (function () {
+    const canvas = document.getElementById("d-cfg");
+    const out = document.getElementById("d-cfg-out");
+    const wgCtrl = makeCtrl(document.getElementById("d-cfg-ctrls"),
+      { label: "guidance scale w_g", min: 0, max: 20, step: 0.5, value: 1, fmt: v => v.toFixed(1) });
+
+    const accent = () => cssVar("--track-diffusion", "#ff9466");
+    const dimC = () => cssVar("--text-dim", "#8391ab");
+    const goodC = () => cssVar("--good", "#4caf82");
+    const badC = () => cssVar("--bad", "#e0607e");
+
+    // fixed seeded x_T ~ N(0,I) starts, reused each redraw
+    const rnd0 = mulberry32(6112026);
+    const NW = 170, xT = [];
+    for (let i = 0; i < NW; i++) xT.push([gauss(rnd0), gauss(rnd0)]);
+
+    // 10-step DDIM (η=0) grid, t = 1000 → 1 (few steps: like a real fast sampler,
+    // where over-long guided ε genuinely overshoots off the data manifold)
+    const GRID = [];
+    { const S = 10; for (let i = 0; i < S; i++) GRID.push(Math.round(Tmax - i * (Tmax - 1) / (S - 1))); }
+
+    // fixed probe points (level ᾱ=0.5) for a clean ‖~ε‖/‖ε_c‖ readout, independent
+    // of the w_g-dependent trajectory
+    const PA = 0.5, saP0 = Math.sqrt(PA), sVP = Math.sqrt((1 - PA) + PA * SIGD * SIGD), PROBES = [];
+    { const rp = mulberry32(999); for (let i = 0; i < 200; i++) { const [mx, my] = COND[i % 2]; PROBES.push([saP0 * mx + gauss(rp) * sVP * 1.3, saP0 * my + gauss(rp) * sVP * 1.3]); } }
+    function epsRatio(wg) {
+      let s = 0, n = 0;
+      for (const [x, y] of PROBES) { const e = epsGuided(x, y, wg, PA); const mc = Math.hypot(e.cx, e.cy); if (mc > 0.05) { s += Math.hypot(e.gx, e.gy) / mc; n++; } }
+      return n ? s / n : 1;
+    }
+
+    function sampleCloud(wg) {
+      const pts = [];
+      for (let k = 0; k < xT.length; k++) {
+        let x = xT[k][0], y = xT[k][1];
+        for (let i = 0; i < GRID.length; i++) {
+          const t = GRID[i], abar = ABAR[t], sa = Math.sqrt(abar), so = Math.sqrt(1 - abar);
+          const abarPrev = i + 1 < GRID.length ? ABAR[GRID[i + 1]] : 1;
+          const saP = Math.sqrt(abarPrev), soP = Math.sqrt(1 - abarPrev);
+          const e = epsGuided(x, y, wg, abar);
+          const x0x = (x - so * e.gx) / sa, x0y = (y - so * e.gy) / sa;   // x̂0 estimate
+          x = saP * x0x + soP * e.gx;  y = saP * x0y + soP * e.gy;         // DDIM step
+        }
+        pts.push([x, y]);
+      }
+      return { pts, ratio: epsRatio(wg) };
+    }
+
+    function draw() {
+      const wg = wgCtrl.get();
+      const p = new Plot(canvas, { xmin: -RANGE, xmax: RANGE, ymin: -RANGE, ymax: RANGE, xlabel: "x₁", ylabel: "x₂" });
+      p.clear(); p.grid();
+      const g = p.g;
+
+      // quiver: guided score direction at a mid noise level (illustration)
+      const abarVis = 0.5;
+      const N = 15, cell = (p._tx(RANGE) - p._tx(-RANGE)) / N;
+      for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+        const x = -RANGE + (i + 0.5) * (2 * RANGE) / N;
+        const y = -RANGE + (j + 0.5) * (2 * RANGE) / N;
+        const e = epsGuided(x, y, wg, abarVis);
+        // score points opposite ε (toward data); draw that
+        const gx = -e.gx, gy = -e.gy, mag = Math.hypot(gx, gy);
+        if (mag < 1e-6) continue;
+        const len = (0.42 * cell) * Math.tanh(mag * 0.6);
+        const px = p._tx(x), py = p._ty(y);
+        drawArrow(g, px, py, px + (gx / mag) * len, py - (gy / mag) * len, dimC(), 1.1);
+      }
+
+      // true conditional support rings (accent) + non-selected modes (grey)
+      const rr = (p._tx(3 * SIGD) - p._tx(0));
+      g.save(); g.strokeStyle = accent(); g.globalAlpha = 0.55; g.lineWidth = 1.4; g.setLineDash([4, 3]);
+      for (const [mx, my] of COND) { g.beginPath(); g.arc(p._tx(mx), p._ty(my), rr, 0, 2 * Math.PI); g.stroke(); }
+      g.strokeStyle = dimC(); g.globalAlpha = 0.35; g.lineWidth = 1; g.setLineDash([2, 3]);
+      for (const [mx, my] of UNCOND) if (distToCond(mx, my) > 1e-3) { g.beginPath(); g.arc(p._tx(mx), p._ty(my), rr, 0, 2 * Math.PI); g.stroke(); }
+      g.restore();
+
+      // real DDIM samples
+      const { pts, ratio } = sampleCloud(wg);
+      let outCount = 0, mx = 0, my = 0, mxx = 0, myy = 0;
+      g.save();
+      for (let [x, y] of pts) {
+        const outside = distToCond(x, y) > 5 * SIGD;
+        if (outside) outCount++;
+        g.fillStyle = outside ? badC() : goodC(); g.globalAlpha = 0.72;
+        const px = p._tx(Math.max(-RANGE, Math.min(RANGE, x))), py = p._ty(Math.max(-RANGE, Math.min(RANGE, y)));
+        g.beginPath(); g.arc(px, py, 2.6, 0, 2 * Math.PI); g.fill();
+        mx += x; my += y; mxx += x * x; myy += y * y;
+      }
+      g.restore();
+      const n = pts.length; mx /= n; my /= n;
+      const stdCloud = Math.sqrt(Math.max(0, (mxx / n - mx * mx) + (myy / n - my * my)));
+      const fracOut = outCount / n;
+
+      const verdict = wg < 0.5 ? "prompt ignored — generic samples on the 5 prior blobs, not your 2"
+        : Math.abs(wg - 1) < 0.6 ? "honest conditional — samples land on the 2 prompt blobs ✓"
+        : wg <= 6 ? "over-guided — the too-long ε overshoots; samples drifting off the prompt's support"
+        : wg <= 12 ? "frying — most samples thrown off the manifold"
+        : "off the manifold — nearly everything shot into empty space";
+      out.innerHTML =
+        `w_g = <b>${wg.toFixed(1)}</b> &nbsp;·&nbsp; ` +
+        `‖~ε‖ / ‖ε_c‖ ≈ <b>${ratio.toFixed(2)}×</b> (grows ~linearly → the frying) &nbsp;·&nbsp; ` +
+        `sample std <b>${stdCloud.toFixed(2)}</b> &nbsp;·&nbsp; ` +
+        `outside true support <span class="${fracOut > 0.4 ? 'flag-bad' : 'flag-ok'}">${(fracOut * 100).toFixed(0)}%</span> ` +
+        `<span style="color:${badC()}">■</span>outside / <span style="color:${goodC()}">■</span>on-support &nbsp; — ${verdict}`;
+    }
+    wgCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO D61.3: RescaleCFG — std(~eps) vs w_g, raw vs rescaled ---- */
+  (function () {
+    const canvas = document.getElementById("d-resc");
+    const out = document.getElementById("d-resc-out");
+    const phiCtrl = makeCtrl(document.getElementById("d-resc-ctrls"),
+      { label: "rescale mix φ (RescaleCFG)", min: 0, max: 1, step: 0.02, value: 0, fmt: v => v.toFixed(2) });
+
+    const accent = () => cssVar("--track-diffusion", "#ff9466");
+    const goodC = () => cssVar("--good", "#4caf82");
+    const dimC = () => cssVar("--text-dim", "#8391ab");
+
+    // a fixed batch of noised x_t points in the conditional marginal's support
+    // (level ᾱ=0.5); their per-component ε std stands in for the latent's std.
+    const abar = 0.5, saV = Math.sqrt(abar), vV = (1 - abar) + abar * SIGD * SIGD, sV = Math.sqrt(vV);
+    const grid = [];
+    const rnd = mulberry32(770);
+    for (let i = 0; i < 600; i++) {
+      const [mx, my] = COND[i % 2];
+      grid.push([saV * mx + gauss(rnd) * sV, saV * my + gauss(rnd) * sV]);
+    }
+    // per-component std of a prediction field over the batch
+    function componentStd(pred /* fn(x,y)->[a,b] */) {
+      let s = 0, ss = 0, n = 0;
+      for (const [x, y] of grid) { const [a, b] = pred(x, y); s += a + b; ss += a * a + b * b; n += 2; }
+      const m = s / n; return Math.sqrt(Math.max(0, ss / n - m * m));
+    }
+    const stdC = componentStd((x, y) => { const e = epsGuided(x, y, 1, abar); return [e.cx, e.cy]; });
+    function stdTilde(wg) { return componentStd((x, y) => { const e = epsGuided(x, y, wg, abar); return [e.gx, e.gy]; }); }
+
+    // precompute raw std curve once (w_g independent of phi)
+    const WG = []; const RAW = [];
+    for (let wg = 0; wg <= 20; wg += 0.5) { WG.push(wg); RAW.push(stdTilde(wg)); }
+    const rawMax = Math.max(...RAW);
+
+    function draw() {
+      const phi = phiCtrl.get();
+      // RescaleCFG: std(final) = phi*stdC + (1-phi)*std(tilde)  (a linear blend of stds)
+      const RES = RAW.map(st => phi * stdC + (1 - phi) * st);
+      const p = new Plot(canvas, { xmin: 0, xmax: 20, ymin: 0, ymax: Math.max(rawMax * 1.05, stdC * 1.2), xlabel: "guidance scale w_g", ylabel: "std of prediction" });
+      p.clear(); p.grid();
+      p.trace(WG, RAW, dimC(), 2);                 // raw std(~eps), rising
+      p.trace(WG, RES, accent(), 2.6);             // rescaled std at current phi
+      p.hline(stdC, goodC(), [5, 4]);              // the conditional's std (target)
+      p.label(0.5, stdC + rawMax * 0.02, "std(ε_c) — the target", goodC());
+      p.label(13.5, RAW[27] , "raw std(~ε)", dimC());
+
+      const rawAt = stdTilde(7.5), resAt = phi * stdC + (1 - phi) * rawAt;
+      out.innerHTML =
+        `at w_g = 7.5: raw std(~ε) = <b>${rawAt.toFixed(2)}</b> (target ${stdC.toFixed(2)}) → ` +
+        `overshoots by <b>${(rawAt / stdC).toFixed(2)}×</b> → contrast blow-up. ` +
+        `RescaleCFG at φ = <b>${phi.toFixed(2)}</b> → std = <span class="${Math.abs(resAt - stdC) < 0.15 ? 'flag-ok' : ''}">${resAt.toFixed(2)}</span>` +
+        (phi > 0.95 ? " ✓ snapped back to the conditional's std — frying gone" : "");
+    }
+    phiCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO D61.2: the guidance LINE — tilde-eps leaves the segment ---- */
+  (function () {
+    const canvas = document.getElementById("d-line");
+    const out = document.getElementById("d-line-out");
+    const wgCtrl = makeCtrl(document.getElementById("d-line-ctrls"),
+      { label: "guidance scale w_g", min: 0, max: 20, step: 0.5, value: 4, fmt: v => v.toFixed(1) });
+
+    const accent = () => cssVar("--track-diffusion", "#ff9466");
+    const dimC = () => cssVar("--text-dim", "#8391ab");
+    const badC = () => cssVar("--bad", "#e0607e");
+    const goodC = () => cssVar("--good", "#4caf82");
+
+    const E0 = [-0.35, 0.25];   // eps_null
+    const EC = [0.85, 0.65];    // eps_cond
+    const R = 4.2;
+
+    function draw() {
+      const wg = wgCtrl.get();
+      const tx = E0[0] + wg * (EC[0] - E0[0]);
+      const ty = E0[1] + wg * (EC[1] - E0[1]);
+      const p = new Plot(canvas, { xmin: -1.5, xmax: R, ymin: -1.5, ymax: R, xlabel: "ε₁", ylabel: "ε₂" });
+      p.clear(); p.grid();
+      const g = p.g;
+
+      // the segment [eps_null, eps_cond] (the honest region, w_g in [0,1])
+      g.save(); g.strokeStyle = goodC(); g.lineWidth = 3;
+      g.beginPath(); g.moveTo(p._tx(E0[0]), p._ty(E0[1])); g.lineTo(p._tx(EC[0]), p._ty(EC[1])); g.stroke();
+      // the extrapolation ray past eps_cond
+      g.strokeStyle = badC(); g.lineWidth = 1.6; g.setLineDash([5, 4]);
+      g.beginPath(); g.moveTo(p._tx(EC[0]), p._ty(EC[1])); g.lineTo(p._tx(tx), p._ty(ty)); g.stroke();
+      g.restore();
+
+      // the fixed endpoints
+      function dot(pt, col, lab) {
+        g.save(); g.fillStyle = col; g.beginPath(); g.arc(p._tx(pt[0]), p._ty(pt[1]), 5.5, 0, 2 * Math.PI); g.fill();
+        g.fillStyle = col; g.font = "12px system-ui"; g.fillText(lab, p._tx(pt[0]) + 8, p._ty(pt[1]) - 8); g.restore();
+      }
+      dot(E0, dimC(), "ε∅ (uncond)");
+      dot(EC, goodC(), "ε_c (cond, w_g=1)");
+      // the guided point
+      const onSeg = wg <= 1;
+      dot([tx, ty], onSeg ? goodC() : badC(), "~ε (w_g=" + wg.toFixed(1) + ")");
+
+      const dirLen = Math.hypot(EC[0] - E0[0], EC[1] - E0[1]);
+      const tildeLen = Math.hypot(tx - E0[0], ty - E0[1]);
+      out.innerHTML =
+        `‖~ε − ε∅‖ = <b>${tildeLen.toFixed(2)}</b> = w_g × ‖ε_c − ε∅‖ &nbsp;·&nbsp; ` +
+        `past ε_c by <b>${Math.max(0, wg - 1).toFixed(1)}</b> direction-lengths &nbsp;·&nbsp; ` +
+        (onSeg ? `<span class="flag-ok">on the segment — inside the honest range</span>`
+               : `<span class="flag-bad">off the segment — extrapolating past any real prediction</span>`);
+    }
+    wgCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ (7; 2 numeric) ---- */
+  renderQuiz("quiz-61", [
+    {
+      q: "At <code>cfg 7.5</code>, you are drawing samples from…",
+      opts: [
+        "the conditional distribution $p(\\mathbf x\\mid\\mathbf c)$ — CFG just makes it cleaner",
+        "a distribution that no real image belongs to ($\\tilde p_{w_g}\\propto p(\\mathbf x)\\,p(\\mathbf c\\mid\\mathbf x)^{w_g}$, extrapolated off the manifold)",
+        "the unconditional distribution $p(\\mathbf x)$, weighted toward the prompt",
+        "the exact training-set image nearest the prompt"
+      ],
+      a: 1,
+      why: "For $w_g>1$ the guided $\\tilde\\epsilon$ points past $\\epsilon_c$, off the segment — into latent regions no honest denoiser occupies. 'It's just the conditional' is the misconception the whole page corrects."
+    },
+    {
+      q: "How many forward passes through the network does real CFG cost <em>per sampling step</em>?",
+      num: 2, tol: 0,
+      why: "CFG needs both $\\epsilon_\\theta(\\mathbf c)$ and $\\epsilon_\\theta(\\varnothing)$ — two passes per step. FLUX.1-dev's baked-in <code>guidance</code> is the exception: one pass, no unconditional branch."
+    },
+    {
+      q: "FLUX.1-dev's <code>guidance</code> (default 3.5) versus a real <code>cfg</code> scale:",
+      opts: [
+        "identical — two names for the same 2-pass extrapolation",
+        "<code>guidance</code> is a number embedded like $t$ into a guidance-distilled model (1 pass); real <code>cfg</code> is Bayes extrapolation (2 passes)",
+        "<code>guidance</code> is stronger CFG; <code>cfg</code> is weaker CFG",
+        "<code>guidance</code> controls the negative prompt only"
+      ],
+      a: 1,
+      why: "FLUX.1-dev is guidance-distilled: the CFG behavior is compiled into the weights and fed a scale value as a conditioning input — one pass. Setting real cfg=3.5 on top double-guides it: slower and worse."
+    },
+    {
+      q: "The <em>dominant</em> cause of 'fried' output at high $w_g$ is…",
+      opts: [
+        "the VAE decoder saturating",
+        "variance/contrast blow-up — $\\|\\tilde\\epsilon\\|$ grows ~linearly in $w_g$, over-subtracting from $\\hat{\\mathbf x}_0$ (fixed by RescaleCFG)",
+        "the text encoder running out of tokens",
+        "numerical overflow in the sampler"
+      ],
+      a: 1,
+      why: "RescaleCFG renormalizes $\\operatorname{std}(\\tilde\\epsilon)$ back and the frying disappears — a std fix repairing the artifact proves the artifact was a std problem. Off-manifold drift and diversity collapse are real but secondary."
+    },
+    {
+      q: "Why is the text encoder (CLIP / T5 / Mistral-3) <em>frozen</em> during diffusion training?",
+      opts: [
+        "to save VRAM — it would fit otherwise",
+        "it was trained by others for another task; the diffusion model learns to <em>read</em> a fixed language rather than co-training it",
+        "because gradients cannot flow through cross-attention",
+        "so the negative prompt keeps working"
+      ],
+      a: 1,
+      why: "The encoder is a pretrained, fixed language model. The diffusion net learns to interpret its embeddings. This is why '77 tokens' (CLIP's 2021 accident) leaks into every workflow — it is not the diffusion model's choice."
+    },
+    {
+      q: "CFG requirements fell across generations (SD1.5 ~7.5 → FLUX/klein 1.0). Why?",
+      opts: [
+        "samplers got faster",
+        "CFG is a crutch for a <em>weak conditional model</em>; as the conditional $p(\\mathbf x\\mid\\mathbf c)$ improved, less extrapolation was needed — and distillation bakes in what remains",
+        "newer models forbid guidance",
+        "the VAEs got better"
+      ],
+      a: 1,
+      why: "Better conditional models need less push off their own honest prediction. FLUX.1-dev's effective cfg=1.0 with baked-in guidance is the endpoint of that trend."
+    },
+    {
+      q: "A run configured for 20 sampling steps at <code>cfg 7.5</code> evaluates the network how many times?",
+      num: 40, tol: 0,
+      why: "20 steps × 2 passes/step (conditional + unconditional) = 40 model evaluations. The 'steps' number in the UI is half the true compute when CFG is on."
+    }
+  ], "Conditioning, cross-attention & CFG — self-check");
+
+});
+</script>
+</body>
+</html>

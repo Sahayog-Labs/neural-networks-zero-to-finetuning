@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>52. Capstone: GRPO &amp; Verifiable Rewards — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions: the group-advantage board (one row per sampled
+     completion, a reward chip, and a signed advantage bar that grows left of a
+     centre baseline when Aᵢ<0 and right when Aᵢ>0). Everything reads the shared
+     CSS custom properties, so it is theme-aware for free. */
+  .grpo-controls { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 12px; align-items: center; }
+  .grpo-controls .seg { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+  .grpo-controls .seg button {
+    padding: 7px 13px; border: none; background: var(--bg-panel); color: var(--text);
+    cursor: pointer; font-size: .82rem; font-family: var(--font); border-right: 1px solid var(--border);
+  }
+  .grpo-controls .seg button:last-child { border-right: none; }
+  .grpo-controls .seg button.active { background: var(--accent); color: var(--btn-text); font-weight: 700; }
+  .grpo-prompt {
+    font-family: var(--mono); font-size: .9rem; padding: 10px 13px; margin: 4px 0 12px;
+    background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--radius);
+    color: var(--text-dim);
+  }
+  .grpo-prompt b { color: var(--text); }
+  .grpo-board { display: flex; flex-direction: column; gap: 5px; margin: 6px 0; }
+  .grpo-row { display: grid; grid-template-columns: 44px 74px 1fr; align-items: center; gap: 10px; }
+  .grpo-row .g-lab { font-family: var(--mono); font-size: .78rem; color: var(--text-dim); }
+  .grpo-row .g-rew {
+    font-family: var(--mono); font-size: .74rem; text-align: center; padding: 2px 0; border-radius: 5px;
+    font-weight: 700; white-space: nowrap;
+  }
+  .grpo-row .g-rew.pass { background: color-mix(in srgb, var(--good) 26%, transparent); color: var(--good); }
+  .grpo-row .g-rew.part { background: color-mix(in srgb, var(--warn) 30%, transparent); color: var(--warn); }
+  .grpo-row .g-rew.fail { background: color-mix(in srgb, var(--bad) 24%, transparent); color: var(--bad); }
+  /* the signed bar: a centred axis, fill grows out from the middle */
+  .g-baraxis { position: relative; height: 20px; background: var(--bg-code); border-radius: 4px; overflow: hidden; }
+  .g-baraxis::before { content: ""; position: absolute; left: 50%; top: 0; bottom: 0; width: 1px; background: var(--border); }
+  .g-barfill { position: absolute; top: 2px; bottom: 2px; border-radius: 3px; transition: none; }
+  .g-barfill.pos { background: color-mix(in srgb, var(--good) 70%, transparent); left: 50%; }
+  .g-barfill.neg { background: color-mix(in srgb, var(--bad) 65%, transparent); right: 50%; }
+  .g-barval { position: absolute; top: 1px; font-size: .68rem; font-family: var(--mono); color: var(--text); }
+  .grpo-stats { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 10px; font-size: .86rem; }
+  .grpo-stats .stat b { color: var(--accent2); font-family: var(--mono); }
+  .loras-note { font-size: .82rem; color: var(--text-dim); }
+</style>
+</head>
+<body data-page="52-grpo-rlvr-capstone.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆ · Capstone</span>
+    <h1>Capstone: GRPO &amp; Verifiable Rewards</h1>
+    <p class="subtitle">The 2026 reasoning frontier, on your desk. No reward model, no
+      human labels — just a program that can check the answer, and a group average
+      standing in for a value network you were told you needed.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track · closing milestone</span></div>
+    <p>This is the last page of the LLM track. Everything before it built toward one
+      claim: you can predict what your box will do before you run anything. Here you run
+      the newest idea in the field — reinforcement learning from <em>verifiable</em>
+      rewards — on a 0.6B model, on a 240&nbsp;W box, and close the loop.</p>
+
+    <!-- on-page-resolution: this PREDICT is answered in the gray note right after
+         the "What DeepSeek actually used" section, and again by the demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you read on</span>
+      DeepSeek-R1 and the 2026 reasoning models learned to reason without a human
+      labelling a single answer. <strong>What did they use instead of human
+      preferences</strong> — and could you run a tiny version of it on your Spark tonight?
+    </div>
+
+    <h2>Three ways to change a model's behaviour — and where this one sits</h2>
+    <p>You have already met two of the three post-training verbs. On <a href="48-sft-preference-alignment.html">page&nbsp;48</a>
+      SFT taught <em>imitation</em> — copy these answers — and DPO taught <em>preference</em>
+      — this answer beats that one. The third is the subject of this page:</p>
+    <blockquote>SFT teaches imitation. DPO teaches preference. <b>RLVR teaches reasoning
+      wherever a program can check the answer.</b></blockquote>
+    <p>RLVR — reinforcement learning from verifiable rewards — is the most
+      <em>actionable</em> of the three, because "a program that checks the answer" is a
+      thing your own domain almost certainly has. Does the config parse? Does the SQL run?
+      Does the extracted JSON match the schema? Does the unit test pass? Each of those is a
+      ground-truth reward with no human in the loop and no learned reward model to drift or
+      be gamed. If you have a checker, you can do real reinforcement learning.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      This is where the 2026 reasoning models come from. Not from a bigger preference
+      dataset — from a <em>reward you can compute</em>. Where the answer is checkable, you
+      no longer need a human to say which of two completions is better; the checker says so,
+      for free, a thousand times a second.
+    </div>
+
+    <h2>What DeepSeek actually used: GRPO's group-relative advantage</h2>
+    <p>Reinforcement learning needs one hard number per response: <em>how much better than
+      average was this?</em> Classic PPO answers it with a second neural network — a
+      <strong>value network</strong> (a "critic") trained alongside the policy just to predict
+      the average reward from a state. It is half the parameters, half the tuning headaches,
+      and half the failure modes.</p>
+    <p>GRPO (Group Relative Policy Optimization) throws the critic away. For a single prompt
+      it samples a <strong>group</strong> of $G$ responses, scores each with the verifier, and
+      defines each response's advantage relative to the <em>group's own</em> mean and spread:</p>
+
+    <p>$$A_i \;=\; \frac{r_i - \operatorname{mean}(r_1, \dots, r_G)}{\operatorname{std}(r_1, \dots, r_G)}$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$A_i$</td><td>advantage of response $i$ — how far above/below the group it scored, in standard deviations</td><td>scalar, signed</td><td>what we compute, per response</td></tr>
+        <tr><td>$r_i$</td><td>the scalar reward the <em>verifier</em> returned for response $i$ (e.g. 1 = passes the check, 0 = fails)</td><td>scalar</td><td>the program that checks the answer</td></tr>
+        <tr><td>$G$</td><td>group size — how many responses we sample per prompt</td><td>typically 8–64</td><td>a hyperparameter (TRL's <code>num_generations</code>)</td></tr>
+        <tr><td>$\operatorname{mean}(\cdot)$</td><td>the group mean — <strong>the baseline that replaces PPO's value network</strong></td><td>scalar</td><td>computed over the $G$ rewards</td></tr>
+        <tr><td>$\operatorname{std}(\cdot)$</td><td>the group standard deviation — normalizes the advantage scale</td><td>scalar</td><td>computed over the $G$ rewards</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box rule"><span class="box-title">📐 The insight — ship it verbatim</span>
+      PPO needs a learned value network to know "was this better than average?" GRPO just
+      asks $G$ times and takes the mean. <strong>The critic was replaceable by a sample
+      mean</strong> — and that is why GRPO took over.
+    </div>
+
+    <p class="loras-note"><em>Notation note:</em> here $i$ indexes the $G$ responses in the
+      group, not a sequence position — this is one of the few places the course reuses $i$
+      as a group index, matching how the GRPO papers write $A_i$. The rewards $r_i$ come from
+      a program, not a model.</p>
+
+    <h3>Why this is still the chain rule <span class="loras-note" style="font-weight:400">[THREAD:chain rule beat: policy gradient]</span></h3>
+    <p>Same verb, one last time. On <a href="04-derivatives-and-the-flip.html">page&nbsp;4</a>
+      it was a derivative; on <a href="14-backprop-by-pencil.html">page&nbsp;14</a> it was
+      backprop through TN-1; on <a href="48-sft-preference-alignment.html">page&nbsp;48</a> it
+      was the SFT/DPO gradient. The policy-gradient update is the same chain rule applied to a
+      new loss — push up the log-probability of responses that scored above the group mean,
+      push down the ones below it:</p>
+
+    <p>$$\nabla_\theta \mathcal{L} \;=\; -\,\mathbb{E}\!\left[\, A_i \, \nabla_\theta \log \pi_\theta(o_i \mid x) \,\right]$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\nabla_\theta \mathcal{L}$</td><td>the gradient we descend</td><td>$(P,)$ — same shape as $\theta$</td><td>the optimizer step, as always</td></tr>
+        <tr><td>$A_i$</td><td>the group-relative advantage from above — the <em>weight</em> on each response</td><td>scalar</td><td>the equation above</td></tr>
+        <tr><td>$\pi_\theta(o_i \mid x)$</td><td>the policy's probability of response $o_i$ given prompt $x$</td><td>scalar in $(0,1)$</td><td>the model being trained (page&nbsp;48's $\pi_\theta$)</td></tr>
+        <tr><td>$\nabla_\theta \log \pi_\theta$</td><td>the score of the log-prob — <strong>the chain rule, computed by autograd</strong></td><td>$(P,)$</td><td>backprop (page&nbsp;15)</td></tr>
+      </tbody>
+    </table>
+    <p>No new machinery. The advantage $A_i$ is just a scalar multiplier on the same
+      $\log\pi_\theta$ gradient you have differentiated since page&nbsp;14. The clever part
+      is entirely in <em>where the multiplier comes from</em> — a group average instead of a
+      trained critic.</p>
+
+    <h2>Demo — the group-advantage board</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Pick a reward function, then drag $G$. Each row is one sampled response, its verifier
+      reward, and its computed advantage $A_i$ (green bar = above the group mean, red = below).
+      Watch two things: the advantage always centres on zero (that is what subtracting the
+      mean does), and as you raise $G$ the mean/std <strong>stabilize</strong> — the sample
+      baseline gets less noisy. That stabilizing average <em>is</em> the value network,
+      replaced by counting.
+    </div>
+    <div class="demo">
+      <div class="demo-head">GRPO · $A_i = (r_i - \text{mean})/\text{std}$ over a live group <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="grpo-controls" id="grpo-ctrls">
+          <span style="font-size:.82rem;color:var(--text-dim)">reward function:</span>
+          <span class="seg" id="grpo-rf">
+            <button data-rf="exact" class="active">exact-match</button>
+            <button data-rf="schema">schema-valid</button>
+            <button data-rf="math">math-grader</button>
+          </span>
+        </div>
+        <div class="grpo-prompt" id="grpo-prompt"></div>
+        <div class="controls" id="grpo-slider"></div>
+        <div class="grpo-board" id="grpo-board"></div>
+        <div class="grpo-stats" id="grpo-stats"></div>
+        <div class="readout" id="grpo-out"></div>
+      </div>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ One row, by hand</span>
+      Suppose a group's rewards average to $\operatorname{mean}=0.4$ with
+      $\operatorname{std}=0.5$. A response that passed the checker has $r_i = 1$, so its
+      advantage is $A_i = (1 - 0.4)/0.5 = 0.6/0.5 = \mathbf{1.2}$ — it scored 1.2 standard
+      deviations above the group, and the policy gets nudged toward it by exactly that much.
+      A response that failed ($r_i = 0$) gets $A_i = (0 - 0.4)/0.5 = -0.8$ — nudged away.
+      (This is the number the quiz asks for.)
+    </div>
+
+    <h2>Why this capstone needs a container, not a <code>pip install</code></h2>
+    <p>SFT and DPO are <em>offline</em>: the data sits in a file, you stream it through. GRPO
+      is <strong>online</strong> — it must <em>generate</em> the group of $G$ responses
+      <em>inside</em> the training loop, score them, then step. Generation-in-the-loop is the
+      expensive part, and it is exactly what gated this capstone until vLLM was unblocked on
+      the Spark's stack.</p>
+    <p>The validated path is the <code>vllm/vllm-openai:cu130-nightly</code> <strong>container,
+      pinned by digest</strong> <strong>[constants&nbsp;§6.9]</strong>. The reason is sharp and
+      worth internalizing:</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The CUDA-12 wheel trap</span>
+      The PyPI aarch64 vLLM wheel is built against <strong>CUDA&nbsp;12</strong>, and DGX OS is
+      <strong>CUDA-13-only</strong>. Any package pinning <code>libcudart.so.12</code> fails at
+      <em>import</em> — before a single kernel's compute-capability is even checked. This is the
+      real aarch64 trap on this box: not "kernels don't exist," but "the wrong CUDA runtime
+      shared library isn't there." The container ships its own CUDA-13 userspace and sidesteps
+      it entirely. <strong>[constants&nbsp;§6.9, VP]</strong>
+    </div>
+
+    <p>Two dependencies that make the quantized path viable here, both verified on the box:
+      bitsandbytes ships a <strong>native sm_121 build for ARM64 + CUDA&nbsp;13</strong>
+      (x86 does <em>not</em> get it — the Spark is, for once, the better-served platform), and
+      TRL v1 flipped one relevant default:</p>
+
+    <div class="box rule"><span class="box-title">📐 The one TRL v1 break to know</span>
+      <code>GRPOConfig</code>'s <code>vllm_mode</code> default changed
+      <code>"server"</code>&nbsp;→&nbsp;<code>"colocate"</code> <strong>[constants&nbsp;§7.2]</strong>.
+      Colocate runs generation and training in the same process — right for a single box.
+      Bump the pin (<code>trl&gt;=1.8,&lt;2</code>) and move on; the rest of the v0→v1
+      migration is, in TRL's own words, minimal.
+    </div>
+
+    <h2>Runnable scope: a 0.6B tonight, the 8B by substitution</h2>
+    <p>Because you generate inside the loop, the capstone runs on <strong>Qwen3-0.6B</strong>
+      — the smoke-test sibling <strong>[constants&nbsp;§1.4]</strong> — so a real
+      generation-in-the-loop job finishes in minutes rather than hours. The <em>arithmetic</em>
+      is identical to the 8B anchor; you recover the 8B's memory and throughput numbers by
+      swapping four config values — $d_{\text{model}}$, $L$, $H_{kv}$, $d_{\text{ff}}$ — into
+      the same formulas from <a href="49-memory-ledger-setup.html">page&nbsp;49</a>. For the
+      anchor those are $4096,\ 36,\ 8,\ 12288$ <strong>[VP, constants&nbsp;§1.1]</strong>; the
+      0.6B is smaller on every axis, which is precisely why it fits a two-hour experiment.</p>
+    <p>Point the reward at something your own domain can check — a
+      <code>reasoning_accuracy_reward</code>, a JSON-schema validator, a math grader — and the
+      model gets measurably better at a task <em>you can verify</em>, with no human labels and
+      no reward model.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "GRPO is magic / RLVR installs knowledge"</span>
+      It does neither. Like all post-training (pages&nbsp;47 and&nbsp;48), GRPO
+      <strong>reweights behaviours the base model already has</strong> toward the ones the
+      verifier scores highly. It cannot install a fact the base never learned — attempting that
+      is the same failure as fine-tuning on documents to "teach facts" (<a href="47-prompt-rag-finetune.html">page&nbsp;47</a>),
+      and it produces the same confident-but-wrong output. RLVR works <em>only</em> where a
+      program can score the output. Where it can, it is remarkable; where it can't, it has
+      nothing to optimize.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it — the stretch run (~2 hr)</span>
+      <code>code/15_grpo_rlvr.py</code>: GRPO with a real verifiable reward on Qwen3-0.6B (or
+      1.7B), <code>--vllm_mode colocate</code> via the <code>cu130</code> container, with a
+      llama.cpp fallback if the container isn't up. If your task has a programmatic checker,
+      this script is the 2026 frontier running on hardware you own.
+    </div>
+
+    <!-- milestone: page 52 of 65 ≈ 80% — the LLM track's closing checkpoint -->
+    <div class="milestone" data-progress="80">
+      <span class="milestone-flag">Milestone</span>
+      In <a href="44-tokenization.html">p.44</a> you counted tokens; in
+      <a href="46-decoding-kv-roofline.html">p.46</a> you predicted your decode speed from the
+      roofline; in <a href="49-memory-ledger-setup.html">p.49</a> you measured your memory and
+      watched an 8B miss the wall by <b>0.36&nbsp;GiB</b>; in
+      <a href="50-lora-applied.html">p.50</a> you fine-tuned it in <b>11.5&nbsp;minutes</b>;
+      here you ran the 2026 reasoning frontier on a 0.6B model on a <b>240&nbsp;W</b> box.
+      You can predict your hardware's behaviour from first principles before running anything —
+      that was the destination.
+      <span class="milestone-pct">80%</span>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Where the predict lands</span>
+      Back to the opener: DeepSeek and the 2026 reasoning models replaced human preferences with
+      a <strong>programmatic, verifiable reward</strong> (RLVR) — a checker, not a labeller — and
+      credited each response against a <strong>group average</strong> instead of a learned value
+      network (GRPO). And yes: with the <code>cu130</code> container you can run a real, tiny
+      version of it on a 0.6B model on your Spark tonight.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-52"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: GRPO group-advantage board ----
+     Real math, live: rewards are drawn deterministically from a fixed per-reward
+     distribution (a seeded generator over a stable 32-length pool), and Aᵢ =
+     (rᵢ − mean)/std is computed live over the first G of them. Taking a stable
+     prefix means the sample mean/std genuinely converge as G grows — that is the
+     "the baseline stops being noisy" aha, not a scripted animation. */
+  (function () {
+    const board = document.getElementById("grpo-board");
+    const stats = document.getElementById("grpo-stats");
+    const out = document.getElementById("grpo-out");
+    const promptEl = document.getElementById("grpo-prompt");
+    const MAXG = 32;
+
+    // Deterministic LCG so the pools are identical on every reload.
+    function lcg(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+
+    // Each reward function: a prompt, and a pool of MAXG rewards drawn from a
+    // fixed pass-rate (exact/schema are binary 0/1; math-grader gives partial
+    // credit {0, 0.5, 1}). Fixed seeds -> reproducible pools.
+    const RF = {
+      exact: {
+        prompt: 'Prompt: <b>"A train covers 60 km in 1.5 h. Speed in km/h?"</b> &nbsp; verifier: exact string match to "40"',
+        pass: 0.40, seed: 20260716,
+        draw(rng) { return rng() < this.pass ? 1 : 0; },
+        label(r) { return r === 1 ? "✓ 40" : "✗ wrong"; },
+        cls(r) { return r === 1 ? "pass" : "fail"; }
+      },
+      schema: {
+        prompt: 'Prompt: <b>"Return JSON {name:str, age:int}."</b> &nbsp; verifier: <code>jsonschema.validate()</code> passes',
+        pass: 0.55, seed: 777001,
+        draw(rng) { return rng() < this.pass ? 1 : 0; },
+        label(r) { return r === 1 ? "✓ valid" : "✗ invalid"; },
+        cls(r) { return r === 1 ? "pass" : "fail"; }
+      },
+      math: {
+        prompt: 'Prompt: <b>"Prove ∑1..n = n(n+1)/2."</b> &nbsp; verifier: math grader, partial credit {0, 0.5, 1}',
+        seed: 424242,
+        draw(rng) { const u = rng(); return u < 0.35 ? 0 : (u < 0.70 ? 0.5 : 1); },
+        label(r) { return r === 1 ? "✓ 1.0" : (r === 0.5 ? "~ 0.5" : "✗ 0.0"); },
+        cls(r) { return r === 1 ? "pass" : (r === 0.5 ? "part" : "fail"); }
+      }
+    };
+    // Build each reward pool once.
+    for (const k in RF) { const rf = RF[k]; const rng = lcg(rf.seed); rf.pool = Array.from({ length: MAXG }, () => rf.draw(rng)); }
+
+    let curRF = "exact";
+    const Gc = makeCtrl(document.getElementById("grpo-slider"),
+      { label: "group size G", min: 2, max: MAXG, step: 1, value: 8, fmt: v => String(v) });
+
+    function mean(a) { return a.reduce((x, y) => x + y, 0) / a.length; }
+    function std(a) { const m = mean(a); const v = a.reduce((x, y) => x + (y - m) * (y - m), 0) / a.length; return Math.sqrt(v); }
+
+    function draw() {
+      const rf = RF[curRF];
+      const G = Gc.get();
+      const rewards = rf.pool.slice(0, G);
+      const m = mean(rewards), s = std(rewards);
+      const eps = 1e-8;                              // matches TRL's std floor; avoids /0 on a degenerate group
+      const denom = s < eps ? eps : s;
+      const adv = rewards.map(r => (r - m) / denom);
+      const maxAbs = Math.max(1e-6, ...adv.map(a => Math.abs(a)));
+
+      promptEl.innerHTML = rf.prompt;
+      board.innerHTML = "";
+      rewards.forEach((r, i) => {
+        const row = document.createElement("div"); row.className = "grpo-row";
+        const a = adv[i];
+        const pct = (Math.abs(a) / maxAbs) * 50;      // half-width max; centre at 50%
+        const side = a >= 0 ? "pos" : "neg";
+        const valLeft = a >= 0 ? `left:calc(50% + 4px)` : `right:calc(50% + 4px)`;
+        row.innerHTML =
+          `<span class="g-lab">#${i + 1}</span>` +
+          `<span class="g-rew ${rf.cls(r)}">${rf.label(r)}</span>` +
+          `<span class="g-baraxis"><span class="g-barfill ${side}" style="width:${pct}%"></span>` +
+          `<span class="g-barval" style="${valLeft}">${a >= 0 ? "+" : ""}${a.toFixed(2)}</span></span>`;
+        board.appendChild(row);
+      });
+
+      const nPass = rewards.filter(r => r === 1).length;
+      stats.innerHTML =
+        `<span class="stat">mean reward <b>${m.toFixed(3)}</b></span>` +
+        `<span class="stat">std <b>${s.toFixed(3)}</b></span>` +
+        `<span class="stat">passed <b>${nPass}/${G}</b></span>`;
+      // Show the equation with live values substituted, for the first above-mean row.
+      const iEx = adv.findIndex(a => a > 0);
+      let subst = "";
+      if (iEx >= 0) {
+        const r = rewards[iEx];
+        subst = ` · e.g. #${iEx + 1}: A = (${r} − ${m.toFixed(3)})/${s.toFixed(3)} = <b>${adv[iEx].toFixed(2)}</b>`;
+      }
+      out.innerHTML =
+        `The policy is nudged toward the green rows and away from the red ones, each by its own $A_i$${subst}. ` +
+        `Raise <b>G</b> and the mean/std settle — the group average is a low-noise stand-in for PPO's value network.`;
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }] });
+    }
+
+    // Reward-function segmented control.
+    document.getElementById("grpo-rf").addEventListener("click", (e) => {
+      const b = e.target.closest("button"); if (!b) return;
+      curRF = b.dataset.rf;
+      [...e.currentTarget.children].forEach(c => c.classList.toggle("active", c === b));
+      draw();
+    });
+    Gc.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-52", [
+    {
+      q: "RLVR (reinforcement learning from verifiable rewards) replaces human preference labels with what?",
+      opts: [
+        "A programmatic checker that scores each answer (a verifiable reward)",
+        "A larger, cleaner preference dataset",
+        "A second LLM acting as a judge",
+        "A hand-tuned reward model trained on ratings"
+      ],
+      a: 0,
+      why: "The whole point is a program — unit test, schema validator, math grader — that returns a ground-truth reward with no human and no learned reward model. A judge LLM (option 3) is exactly what RLVR avoids, since it can drift and be gamed."
+    },
+    {
+      q: "A GRPO group has mean reward $0.4$ and std $0.5$. A response the verifier passed has $r_i = 1$. Its advantage $A_i$ is:",
+      num: 1.2, tol: 0.05,
+      why: "$A_i = (r_i - \\text{mean})/\\text{std} = (1 - 0.4)/0.5 = 0.6/0.5 = 1.2$. It scored 1.2 standard deviations above the group, so the policy is nudged toward it by that much."
+    },
+    {
+      q: "Compared with PPO, what does GRPO drop?",
+      opts: [
+        "The learned value network (critic) — the group mean is the baseline instead",
+        "The policy network itself",
+        "The reward function",
+        "Backpropagation through the policy"
+      ],
+      a: 0,
+      why: "PPO trains a separate value network to estimate 'better than average.' GRPO replaces that estimate with the mean over G sampled responses — 'the critic was replaceable by a sample mean.' The policy, reward, and backprop all remain."
+    },
+    {
+      q: "Why does this capstone need the <code>vllm/vllm-openai:cu130-nightly</code> container rather than a plain <code>pip install vllm</code>?",
+      opts: [
+        "The PyPI aarch64 vLLM wheel is built for CUDA 12 and fails at import on the Spark's CUDA-13-only DGX OS",
+        "vLLM cannot run on ARM at all without a container",
+        "The Spark lacks an sm_121 kernel, so vLLM must be JIT-compiled inside a container",
+        "Containers are simply the recommended style; the wheel also works"
+      ],
+      a: 0,
+      why: "The wheel pins libcudart.so.12; DGX OS ships CUDA 13 only, so import fails before any kernel is checked (constants §6.9). The container carries its own CUDA-13 userspace. The 'no sm_121 kernel' story is a separate, refuted claim — the box runs sm_120 binaries fine."
+    },
+    {
+      q: "The capstone runs GRPO on Qwen3-0.6B rather than the 8B anchor because:",
+      opts: [
+        "Generation-in-the-loop is slow, so a small model finishes fast — and the arithmetic transfers to the 8B by swapping four config numbers",
+        "GRPO only works on models under 1B parameters",
+        "The 8B does not fit in memory for LoRA",
+        "The 0.6B gives higher verifier rewards"
+      ],
+      a: 0,
+      why: "GRPO is online — it must generate the group each step, which is expensive — so the 0.6B keeps a real run to minutes. The memory/throughput formulas are identical; you recover the 8B numbers by substituting d, L, H_kv, d_ff (constants §1.4). The 8B fits LoRA comfortably (page 49/50); size is about run time, not fit."
+    },
+    {
+      q: "Can GRPO/RLVR install a new fact the base model never learned?",
+      opts: [
+        "No — like all post-training, it reweights behaviours the base already has toward verifiably-correct ones",
+        "Yes — the verifiable reward writes new knowledge into the weights",
+        "Yes, but only for math and code",
+        "No, because it never updates the weights at all"
+      ],
+      a: 0,
+      why: "RLVR steers existing behaviours toward what the checker scores highly; it cannot add knowledge that isn't there — the same limit as SFT-on-documents (page 47). It very much does update the weights (option 4 is wrong); it just can't create facts from a reward signal."
+    }
+  ], "Capstone self-check");
+
+});
+</script>
+</body>
+</html>

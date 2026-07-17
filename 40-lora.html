@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>40. LoRA: Low-Rank Adaptation — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the count/reconciliation ledgers carry wide KaTeX. Let each table
+   scroll inside its own box on narrow screens so the page body never scrolls. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; }
+}
+.lora-demo-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .lora-demo-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="40-lora.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV · Adaptation · ⭐ The Whole-Course Payoff</span>
+    <h1>LoRA: Low-Rank Adaptation</h1>
+    <p class="subtitle">You cannot afford to move all 8.19 billion of Qwen3-8B's weights — page&nbsp;38 measured that
+      bill in centuries. So you don't. You freeze the base and train two skinny matrices whose product is the
+      <em>change</em>. This page derives that trick once, to the byte, for the whole course — neither track re-derives it.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:memory-ledger — the reality check]</b> · <b>[THREAD:dot-product — the atom]</b> ·
+      <b>[THREAD:chain-rule — the verb]</b> · <b>[THREAD:TN1 — the object]</b>. Four threads converge here. The ledger
+      you opened on page&nbsp;18 (16&nbsp;B/param) meets its escape hatch; the dot product returns as the product
+      $BA$; the chain rule explains why a zero-initialised adapter is safe to bolt onto a production model; and TN-1
+      itself becomes a LoRA target. This is the page pages&nbsp;50 (LLM) and the diffusion track both open by naming —
+      "as the trunk derived on page&nbsp;40…" — and then re-derive <em>nothing</em>.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in "The memory ledger for LoRA" box below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      LoRA freezes Qwen3-8B's 16.38&nbsp;GB base and trains two skinny matrices per weight. Compared with a full
+      fine-tune, where does LoRA's memory saving <em>mostly</em> come from? Commit to one before you scroll:
+      <b>(a)</b> the model itself gets smaller, &nbsp;<b>(b)</b> it needs to cache fewer activations, &nbsp;<b>(c)</b>
+      the gradients and the optimizer state — the bulk — simply vanish.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>The bet: the <em>change</em> is low-rank, not the model</h2>
+    <p>Fine-tuning turns the pretrained weight $W_0$ into $W_0 + \Delta W$. On page&nbsp;39 you flipped a dropdown and
+      saw the difference with your own eyes: a real weight matrix $W_0$ is nearly full rank — its scree plot decays
+      slowly, and deleting directions <em>destroys the model</em>. But $\Delta W$, the change a fine-tune makes, has a
+      scree plot that <em>falls off a cliff</em>: a few directions carry almost all of it. <b>[THREAD:dot-product]</b>
+      — the same "how much of this is in that?" from the dot-product page, now measuring how many directions a matrix
+      really moves in.</p>
+    <p>LoRA takes that observation to the bank. Don't store a $4096\times4096$ change — <b>store two skinny matrices
+      whose product <em>is</em> the change.</b> A rank-$r$ update needs only $r(d_{\text{out}}+d_{\text{in}})$ numbers
+      instead of $d_{\text{out}}\,d_{\text{in}}$, and — the part that actually matters — you only ever compute
+      gradients and optimizer state for <em>those</em>.</p>
+
+    <!-- ===================== THE MATH ===================== -->
+    <h2>The math, once</h2>
+    <div class="box rule"><span class="box-title">📐 The LoRA forward pass</span>
+      $$h \;=\; W_0\,\mathbf x \;+\; \Delta W\,\mathbf x \;=\; W_0\,\mathbf x \;+\; \frac{\alpha}{r}\,BA\,\mathbf x.$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$W_0$</td><td>the frozen pretrained weight — never updated</td><td>$(d_{\text{out}}, d_{\text{in}})$</td><td>the base checkpoint; <code>.detach()</code>ed</td></tr>
+          <tr><td>$A$</td><td>LoRA "down" projection</td><td>$(r, d_{\text{in}})$</td><td>trained; init $\mathcal N(0,\varsigma^2)$</td></tr>
+          <tr><td>$B$</td><td>LoRA "up" projection</td><td>$(d_{\text{out}}, r)$</td><td>trained; <b>init zeros</b> — this is load-bearing</td></tr>
+          <tr><td>$r$</td><td>the rank — a count, $r \ll \min(d_{\text{in}},d_{\text{out}})$</td><td>scalar</td><td>your choice (the capacity knob)</td></tr>
+          <tr><td>$\alpha$</td><td>the LoRA scaling constant (<code>lora_alpha</code>)</td><td>scalar</td><td>your choice; only $\alpha/r$ matters</td></tr>
+          <tr><td>$\mathbf x$, $h$</td><td>layer input / output</td><td>$(d_{\text{in}},1)$ / $(d_{\text{out}},1)$</td><td>the residual stream</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0"><b>Shape ribbon</b> (the update never materialises as a full matrix at train time):</p>
+<pre style="margin:.3em 0 0;font:12px/1.5 Consolas,monospace;color:var(--text-dim);overflow-x:auto">x            (d_in, 1)
+A            (r, d_in)              # (out, in) — ALWAYS
+A x          (r, 1)                 # squeeze d_in down to the rank
+B            (d_out, r)
+B (A x)      (d_out, 1)             # lift the rank back up to d_out
+(α/r)·BAx    (d_out, 1)   ✓         # same shape as W₀x — it just adds</pre>
+    </div>
+    <p><b>[THREAD:dot-product]</b> $BA$ is $r$ stacked outer products, $BA=\sum_{k=1}^{r}\mathbf b_k\mathbf a_k^\top$
+      (page&nbsp;39's rank-1 pieces). Reading it right-to-left, $BA\mathbf x$ asks $r$ alignment questions — "how much
+      of $\mathbf x$ points along $\mathbf a_k$?" — and recombines the $r$ answers with the columns of $B$. The
+      dot-product atom, assembling an update.</p>
+
+    <!-- ===================== WHY B=0 ===================== -->
+    <h2>Why $B$ starts at zero (a chain-rule beat)</h2>
+    <p>With $B=0$, the product $BA=0$, so $\Delta W = 0$ and <b>the adapted model is bit-identical to the base at
+      step&nbsp;0.</b> Training starts from the pretrained model exactly, not from a randomly perturbed copy — which is
+      why you can bolt a LoRA adapter onto a production model without fear of degrading it before the first gradient.
+      <b>[THREAD:chain-rule]</b>.</p>
+    <div class="box key"><span class="box-title">🔑 The adapter unfreezes itself, $B$ first</span>
+      Zero-init looks like a trap — if $B=0$, how does anything learn? Read the chain rule. The gradient into $A$
+      passes <em>through</em> $B$, so $\partial\mathcal L/\partial A \propto B = 0$ at step&nbsp;0 — $A$ cannot move.
+      But $\partial\mathcal L/\partial B \propto A \neq 0$, so <b>$B$ moves on the very first step</b>. Once $B\neq0$,
+      $A$'s gradient wakes up. The adapter bootstraps itself: $B$ first, then both. The live demo below shows this
+      exactly — at step&nbsp;1 the measured $\lVert\nabla A\rVert$ is <em>identically</em> zero while
+      $\lVert\nabla B\rVert$ is not. (The escape hatch <code>init_lora_weights=False</code> exists only for debugging.)
+    </div>
+    <p><b>Freezing $W_0$ is just <code>.detach()</code>.</b> <b>[THREAD:chain-rule]</b> — it is the same stop-gradient
+      you met in the autograd chapter (page&nbsp;15): grey out one edge of the graph and no gradient flows to it, so
+      the optimizer never allocates a slot for it. No new machinery; the entire memory win falls out of one method call.</p>
+
+    <!-- ===================== WORKED COUNT ===================== -->
+    <h2>Worked: the exact trainable count for Qwen3-8B</h2>
+    <p>Per adapted matrix, LoRA trades $d_{\text{in}}\,d_{\text{out}}$ parameters for $r(d_{\text{in}}+d_{\text{out}})$.
+      At $r=16$, targeting <em>every</em> linear (<code>all-linear</code>), on Qwen3-8B's 36 layers
+      (<code>constants.md</code> §3, [DER]):</p>
+    <div class="box worked"><span class="box-title">✍️ LoRA parameter count, r = 16, all-linear</span>
+      <table class="ledger">
+        <thead><tr><th>Matrix</th><th>Shape (out × in)</th><th>Base params</th><th>LoRA @ r=16</th></tr></thead>
+        <tbody>
+          <tr><td><code>q_proj</code></td><td>4096 × 4096</td><td>16,777,216</td><td>131,072 &nbsp;(<b>128×</b>)</td></tr>
+          <tr><td><code>k_proj</code></td><td>1024 × 4096</td><td>4,194,304</td><td>81,920</td></tr>
+          <tr><td><code>v_proj</code></td><td>1024 × 4096</td><td>4,194,304</td><td>81,920</td></tr>
+          <tr><td><code>o_proj</code></td><td>4096 × 4096</td><td>16,777,216</td><td>131,072</td></tr>
+          <tr><td><code>gate_proj</code></td><td>12288 × 4096</td><td>50,331,648</td><td>262,144</td></tr>
+          <tr><td><code>up_proj</code></td><td>12288 × 4096</td><td>50,331,648</td><td>262,144</td></tr>
+          <tr><td><code>down_proj</code></td><td>4096 × 12288</td><td>50,331,648</td><td>262,144</td></tr>
+          <tr><td><b>per layer</b> (7 linears)</td><td></td><td>192,937,984</td><td><b>1,212,416</b></td></tr>
+          <tr><td><b>× 36 layers</b></td><td></td><td>6,945,767,424</td><td><b>43,646,976</b></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">A single $4096\times4096$ matrix: $16(4096+4096)=\mathbf{131{,}072}$ vs
+        $4096^2=\mathbf{16{,}777{,}216}$ — a <b>128×</b> reduction. Across the whole model:
+        <b>43,646,976 trainable = 0.533% of $P$</b>. You are training one parameter in 188.</p>
+    </div>
+
+    <!-- ===================== RECONCILIATION ===================== -->
+    <div class="box key"><span class="box-title">🔑 It closes to the byte, not "to three significant figures"</span>
+      The 6,945,767,424 above omits the norms (correctly — they aren't LoRA targets), so it is <em>not</em> the model's
+      parameter count. Add them back and the embeddings, and it reconciles <b>exactly</b>:
+      $$\underbrace{6{,}945{,}767{,}424}_{\text{7 linears}\,\times\,36} + \underbrace{36\times8{,}448}_{304{,}128\ \text{norms}} + \underbrace{4{,}096}_{\text{final norm}} + \underbrace{2\times622{,}329{,}856}_{\text{embed + lm\_head}} = \mathbf{8{,}190{,}735{,}360}.$$
+      To the byte. This is the moment a model card stops being an authority and becomes arithmetic you can check. The
+      adapter file itself, $r=16$ in bf16, is $43{,}646{,}976\times2 = \mathbf{87.3\ MB}$ — you can email it.
+    </div>
+
+    <!-- ===================== MEMORY LEDGER ===================== -->
+    <h2>The memory ledger — and the PREDICT answer</h2>
+    <p><b>[THREAD:memory-ledger]</b> Page&nbsp;18 charged 16&nbsp;B/param for a full AdamW fine-tune: weights (2) +
+      grads (2) + fp32 master (4) + Adam $m$ (4) + Adam $v$ (4). For Qwen3-8B that is
+      $8{,}190{,}735{,}360\times16 = \mathbf{131.05\ GB}$ of state. LoRA keeps the 2-byte base weights resident but
+      allocates grads + master + $m$ + $v$ only for the <em>43.6 million</em> trainable params (14&nbsp;B each):</p>
+    <div class="box worked"><span class="box-title">✍️ Full → LoRA, state-to-state (activations named separately, both sides)</span>
+      <table class="ledger">
+        <tbody>
+          <tr><td>Frozen base weights (bf16, no grad)</td><td>$8.19\text{e}9 \times 2\ \text{B}$</td><td><b>16.38 GB</b></td></tr>
+          <tr><td>Adapter weights (bf16)</td><td>$43{,}646{,}976 \times 2\ \text{B}$</td><td>0.087 GB (87.3 MB)</td></tr>
+          <tr><td>Adapter trainable state (grad + master + $m$ + $v$)</td><td>$43{,}646{,}976 \times 14\ \text{B}$</td><td>0.61 GB</td></tr>
+          <tr><td><b>LoRA total (state)</b></td><td>$16.38 + 0.087 + 0.61$</td><td><b>17.08 GB / 15.91 GiB</b></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0"><b>Full → LoRA: 131.05 GB → 17.08 GB = 7.67×</b> (state-to-state, both exclude
+        activations). But the sharper number is the <em>trainable</em> state alone:
+        <b>114.67 GB → 0.61 GB = 187×</b> — and 187 is <em>exactly</em> the parameter ratio,
+        $8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$, because optimizer state is linear in trainable parameters.</p>
+    </div>
+    <div class="box key"><span class="box-title">🔑 What LoRA actually compresses (ratified, D-05)</span>
+      LoRA is <b>not</b> a model-compression technique. LoRA is an <b>optimizer-state compression</b> technique. The base
+      model didn't shrink — all 16.38&nbsp;GB is still resident. The trainable state shrank by 187×, which is exactly
+      $8{,}190{,}735{,}360 \div 43{,}646{,}976$, because optimizer state is linear in trainable parameters. That's the
+      whole trick. <b>So the PREDICT answer is (c)</b> — gradients and optimizer state, the bulk, are what vanish.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "LoRA saves memory because it has fewer weights."</span>
+      Half-true, and the boring half. The <em>weights</em> barely shrink — all 16.38&nbsp;GB of base is still resident.
+      What vanishes is the 114.67&nbsp;GB of gradients and Adam state, replaced by 0.61&nbsp;GB. That was the bulk. Saying
+      "fewer weights" points at the one term that <em>didn't</em> move.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "LoRA reduces activation memory."</span>
+      False (<code>constants.md</code> §2.4). LoRA freezes weights but does <em>not</em> shorten the graph — you still
+      backprop through the entire network, so the activation cache (page&nbsp;18's villain) is ~unchanged. Every
+      LoRA-vs-full comparison on this page is <b>state-to-state, with activations as a separate identical line on both
+      sides.</b> Measure LoRA's real footprint on your box and you'll find it <em>above</em> 17.08&nbsp;GB by exactly
+      the activation term — so the honest course tells you first.
+      <span style="color:var(--text-dim)">(Retired numbers you may see elsewhere, all wrong here: ~130&nbsp;GB→14.3&nbsp;GB, 224×, 417×.)</span>
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "α is a strength dial — turn it up to learn harder."</span>
+      $\alpha$ and the learning rate $\eta$ are <b>nearly redundant</b>: what reaches the weights is the effective scale
+      $\alpha/r$ times $\eta$, one combined step size. Pick a convention for $\alpha$ ($\alpha=2r$ folklore, or a fixed
+      $\alpha=16$) and <b>tune $\eta$ instead</b>. The two conventions genuinely disagree (an unresolved fork — say so),
+      but tuning <em>both</em> $\alpha$ and $\eta$ just wastes a hyperparameter on a knob you already have. The demo lets
+      you crank $\alpha$ and watch it destabilise training exactly the way too-high $\eta$ does. (LoRA tolerates ~10×
+      higher $\eta$ than full FT — <b>1e-4–3e-4</b> [EST] vs 1e-5–2e-5 — precisely because $B$ is zero-init, so the
+      adapter starts as an exact no-op.)
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Attention is where the knowledge is — target q_proj/v_proj."</span>
+      The most persistent stale advice in the field. Look at the count you just computed: the MLP matrices
+      (<code>gate</code>/<code>up</code>/<code>down</code>) are <b>150,994,944 of 192,937,984 targetable params per
+      layer = 78%</b>. Attention-only means you froze 78% of the model and then wondered why it didn't learn. <b>Use
+      <code>target_modules="all-linear"</code>.</b> <span style="color:var(--text-dim)">(One MoE caveat, D-06: HF
+      implements experts as <code>nn.Parameter</code>, not <code>nn.Linear</code>, so <code>all-linear</code> silently
+      skips them — reach them with <code>target_parameters=[…]</code>.)</span>
+    </div>
+
+    <!-- ===================== RANK FOLLOWS DATA ===================== -->
+    <div class="box key"><span class="box-title">🔑 Rank follows the dataset, not the model</span>
+      $r$ <em>is</em> the capacity knob — the classical bias-variance U-curve (page&nbsp;23), relocated into a config
+      file. So it should scale with the <b>information content of your dataset</b>, not the size of your model. An LLM
+      SFT run over a broad instruction set wants $r=64$–256; a diffusion concept LoRA on 15–20 photos wants $r=8$–32 —
+      push $r$ high there and it <em>memorises the photos</em>. Same rule, opposite ends. And rank is nearly free in
+      memory: $r=256$ all-linear is 698,351,616 params = 8.53% of $P$ → 27.55&nbsp;GB, still trivially fits your box.
+      <b>Your dataset constrains your rank, not your memory</b> — being stingy with $r$ out of superstition is the error.
+      Both tracks reopen this rule at their own target-and-rank pages.
+    </div>
+    <p>One page away: the 16.38&nbsp;GB frozen base is read-only — so why store it at full precision? Compress it to
+      ~4 bits and the whole thing gets cheaper still. That is QLoRA, page&nbsp;41.</p>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Watch a frozen net get adapted, live</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      A base MLP <code>[2,8,8,1]</code> is <b>frozen at random init</b> (its boundary is garbage on the spiral). Only the
+      LoRA matrices $A,B$ train — real forward, real backprop, real Adam, in your browser. Press <b>Train</b> and watch:
+      the boundary starts <em>identical to the frozen base</em> (because $B=0$), then bends to fit the spiral as the
+      adapter wakes up. The readout reports $\lVert\nabla A\rVert$ and $\lVert\nabla B\rVert$ at step&nbsp;1 — proof that
+      <b>$B$ moves before $A$</b>. Then sweep $\alpha$ and $\eta$ and confirm they fight over the same effective step;
+      flip <b>rsLoRA</b> ($\alpha/\sqrt r$) and see it only bites at high rank.
+    </div>
+    <div class="demo">
+      <div class="demo-head">LoRA on a live net · frozen base [2,8,8,1] + trainable A,B <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div class="lora-demo-grid">
+          <div><canvas id="d-lora-field" height="320"></canvas></div>
+          <div><canvas id="d-lora-loss" height="320"></canvas></div>
+        </div>
+        <div class="controls" id="d-lora-ctrls"></div>
+        <p style="margin:6px 0 0">
+          <label style="user-select:none"><input type="checkbox" id="d-lora-rslora"> rsLoRA &nbsp;(scale $\alpha/\sqrt r$ instead of $\alpha/r$)</label>
+        </p>
+        <p style="margin:10px 0 0">
+          <button class="btn" id="d-lora-go">Train</button>
+          <button class="btn secondary" id="d-lora-reset">Reset</button>
+        </p>
+        <div class="readout" id="d-lora-out">Ready.</div>
+      </div>
+    </div>
+
+    <h2>The two skinny matrices, reconstructing a full-shape update</h2>
+    <p>The animation multiplies $B\,(d_{\text{out}}\times r)$ by $A\,(r\times d_{\text{in}})$ to fill in
+      $\Delta W\,(d_{\text{out}}\times d_{\text{in}})$ — here a rank-2 update rebuilding a full $6\times6$. On Qwen3-8B's
+      <code>q_proj</code> the same picture is $B\,(4096\times16)\,@\,A\,(16\times4096)\to\Delta W\,(4096\times4096)$:
+      131,072 stored numbers standing in for 16,777,216. <b>[THREAD:TN1]</b> — and the smallest possible LoRA target is
+      TN-1's own $W_2$, shape $(1,2)$: a rank-1 adapter on it is just $B\,(1,1)\,A\,(1,2)$. Same object, now a fine-tuning
+      surface.</p>
+    <div class="demo">
+      <div class="demo-head">ΔW = B A · a rank-2 update fills a full matrix <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-lora-mm" height="210"></canvas>
+        <p style="margin:10px 0 0"><button class="btn secondary" id="d-lora-mm-go">Animate B @ A → ΔW</button></p>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/05_lora_from_scratch.py</code> — implement a LoRA linear in ~40 lines of PyTorch, wrap Qwen3-8B's
+      <code>q_proj</code>, and print <code>model.print_trainable_parameters()</code>. On your own box you will read
+      <code>trainable: 43,646,976 || all: 8,234,382,336 || 0.53%</code> — the worked table above, confirmed by the
+      library. Then flip <code>target_modules="all-linear"</code> and watch the count land on the same integer.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the 2026 PEFT menagerie — DoRA, rsLoRA, PiSSA, LoRA-GA (none of it changes the page above)</summary><div>
+      <p><b>DoRA</b> splits each weight into a magnitude and a direction and gives the magnitude its own trainable
+        scalar; it helps most at <em>low</em> rank, so it buys little once you are at $r=256$. <b>rsLoRA</b> scales the
+        adapter by $\alpha/\sqrt r$ instead of $\alpha/r$ — a wash at small $r$, but it keeps the effective scale from
+        collapsing in the high-rank regime (the demo's toggle). <b>PiSSA</b> initialises $A,B$ from $W_0$'s principal
+        singular vectors (page&nbsp;39's SVD) rather than from noise/zeros, converging faster. <b>LoRA-GA</b>
+        initialises from estimated full gradients (2–4× faster convergence) but is <em>mutually exclusive with
+        QLoRA</em> — it needs full-precision weights, which page&nbsp;41 throws away. All optional; nothing later in the
+        course depends on any of them.</p>
+    </div></details>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz40"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const cvar = (n, f) => (window.vizUtils ? vizUtils.cssVar(n, f) : (window.cssVar ? cssVar(n, f) : f));
+
+  /* ---------------- FLAGSHIP: LoRA on a live net ----------------------------
+     A base MLP [2,8,8,1] is frozen at seeded random init. Per linear layer we
+     add trainable adapters A (r×nin) and B (nout×r); B starts at ZERO so the
+     adapted net is bit-identical to the frozen base at step 0. Training runs
+     real forward/backward on the Value engine over A,B only (W0 frozen), Adam
+     stepped from rAF. The decision field uses a fast NUMERIC LoRA forward that
+     reads the current A,B .data every render — same math, plain numbers, so a
+     ~2000-cell field stays smooth. Nothing precomputed. */
+  (function () {
+    const { Value, RNG, bceWithLogits, makeDataset, Adam } = NN;
+    const fieldCanvas = document.getElementById("d-lora-field");
+    const lossCanvas = document.getElementById("d-lora-loss");
+    const out = document.getElementById("d-lora-out");
+    const goBtn = document.getElementById("d-lora-go");
+    const resetBtn = document.getElementById("d-lora-reset");
+    const rsBox = document.getElementById("d-lora-rslora");
+
+    const rC = makeCtrl(document.getElementById("d-lora-ctrls"),
+      { label: "rank r", min: 1, max: 32, step: 1, value: 4, fmt: v => v.toFixed(0) });
+    const aC = makeCtrl(document.getElementById("d-lora-ctrls"),
+      { label: "lora_alpha α", min: 1, max: 64, step: 1, value: 16, fmt: v => v.toFixed(0) });
+    const lrC = makeCtrl(document.getElementById("d-lora-ctrls"),
+      { label: "learning rate η", min: -4, max: -1, step: 0.04, value: -1.52, unit: "", fmt: v => Math.pow(10, v).toExponential(1) });
+
+    const DOM = 2.4, W = 8, TARGET = 600, N = 64, BASE_SEED = 3;
+    let net, opt, ds, params, raf = null, step0Grad = null;
+
+    function baseSizes() { return [2, W, W, 1]; }
+
+    function build() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      const rng = new RNG(BASE_SEED);
+      const r = rC.get();
+      const sizes = baseSizes();
+      const layers = [];
+      for (let l = 0; l < sizes.length - 1; l++) {
+        const nin = sizes[l], nout = sizes[l + 1];
+        const scale = Math.sqrt(1 / nin);
+        const W0 = [], b0 = [];
+        for (let o = 0; o < nout; o++) { const row = []; for (let i = 0; i < nin; i++) row.push(rng.normal(0, 1) * scale); W0.push(row); b0.push(0); }
+        const rr = Math.min(r, nin, nout);            // effective rank capped by layer dims
+        const sig = 1 / nin;
+        const A = [], B = [];
+        for (let k = 0; k < rr; k++) { const row = []; for (let i = 0; i < nin; i++) row.push(new Value(rng.normal(0, 1) * sig)); A.push(row); }
+        for (let o = 0; o < nout; o++) { const row = []; for (let k = 0; k < rr; k++) row.push(new Value(0)); B.push(row); }   // B = 0
+        layers.push({ nin, nout, W0, b0, A, B, rr, act: (l < sizes.length - 2) ? "tanh" : "id" });
+      }
+      net = { layers, sizes };
+      ds = makeDataset("spiral", N, { rng: new RNG(11), noise: 0.15 });
+      params = [];
+      for (const L of net.layers) { for (const rw of L.A) for (const v of rw) params.push(v); for (const rw of L.B) for (const v of rw) params.push(v); }
+      opt = new Adam(params, { lr: Math.pow(10, lrC.get()) });
+      net.step = 0; net.hist = []; step0Grad = null;
+      timeline = new Timeline(lossCanvas, { ylog: true, ylabel: "training loss", xlabel: "step" });
+      goBtn.disabled = false; goBtn.textContent = "Train";
+      render(true);
+    }
+
+    function scale(rr) { return rsBox.checked ? aC.get() / Math.sqrt(rr) : aC.get() / rr; }
+
+    /* Value forward (used for training). */
+    function fwd(x) {
+      let h = x.map(v => new Value(v));
+      for (const L of net.layers) {
+        const s = scale(L.rr);
+        const ax = [];
+        for (let k = 0; k < L.rr; k++) { let acc = new Value(0); for (let i = 0; i < L.nin; i++) acc = acc.add(L.A[k][i].mul(h[i])); ax.push(acc); }
+        const o2 = [];
+        for (let o = 0; o < L.nout; o++) {
+          let pre = new Value(L.b0[o]);
+          for (let i = 0; i < L.nin; i++) pre = pre.add(h[i].mul(L.W0[o][i]));
+          let bax = new Value(0); for (let k = 0; k < L.rr; k++) bax = bax.add(L.B[o][k].mul(ax[k]));
+          pre = pre.add(bax.mul(s));
+          o2.push(L.act === "tanh" ? pre.tanh() : pre);
+        }
+        h = o2;
+      }
+      return h[0];
+    }
+
+    /* Fast numeric forward (used for the decision field). */
+    function fwdNum(x1, x2) {
+      let h = [x1, x2];
+      for (const L of net.layers) {
+        const s = scale(L.rr);
+        const ax = [];
+        for (let k = 0; k < L.rr; k++) { let acc = 0; for (let i = 0; i < L.nin; i++) acc += L.A[k][i].data * h[i]; ax.push(acc); }
+        const o2 = [];
+        for (let o = 0; o < L.nout; o++) {
+          let pre = L.b0[o];
+          for (let i = 0; i < L.nin; i++) pre += h[i] * L.W0[o][i];
+          let bax = 0; for (let k = 0; k < L.rr; k++) bax += L.B[o][k].data * ax[k];
+          pre += s * bax;
+          o2.push(L.act === "tanh" ? Math.tanh(pre) : pre);
+        }
+        h = o2;
+      }
+      return h[0];
+    }
+
+    function sig(z) { return z >= 0 ? 1 / (1 + Math.exp(-z)) : (function (e) { return e / (1 + e); })(Math.exp(z)); }
+    function gnorm(kind) { let s = 0; for (const L of net.layers) for (const rw of L[kind]) for (const v of rw) s += v.grad * v.grad; return Math.sqrt(s); }
+    function acc() { let c = 0; for (let i = 0; i < ds.X.length; i++) if ((fwdNum(ds.X[i][0], ds.X[i][1]) > 0 ? 1 : 0) === ds.y[i]) c++; return c / ds.X.length; }
+
+    let timeline;
+
+    function render(idle) {
+      const { g, W: Wd, H } = vizUtils.fitCanvas(fieldCanvas, 320);
+      g.clearRect(0, 0, Wd, H);
+      const cmap = vizUtils.sequentialCmap(cvar("--track-llm", "#62c3ff"), cvar("--bad", "#ff6b6b"));
+      const toPx = x1 => (x1 + DOM) / (2 * DOM) * Wd;
+      const toPy = x2 => H - (x2 + DOM) / (2 * DOM) * H;
+      const cell = 8;
+      for (let px = 0; px < Wd; px += cell) {
+        const x1 = (px / Wd) * 2 * DOM - DOM;
+        for (let py = 0; py < H; py += cell) {
+          const x2 = DOM - (py / H) * 2 * DOM;
+          g.fillStyle = cmap(sig(fwdNum(x1, x2)));
+          g.fillRect(px, py, cell, cell);
+        }
+      }
+      const blue = cvar("--track-llm", "#62c3ff"), red = cvar("--bad", "#ff6b6b"), ring = cvar("--bg-canvas", "#0a0810");
+      for (let i = 0; i < ds.X.length; i++) {
+        const [x1, x2] = ds.X[i];
+        g.beginPath(); g.fillStyle = ds.y[i] === 1 ? red : blue; g.strokeStyle = ring; g.lineWidth = 1.3;
+        g.arc(toPx(x1), toPy(x2), 4, 0, 2 * Math.PI); g.fill(); g.stroke();
+      }
+      const effScale = scale(net.layers[1].rr);
+      const scLbl = rsBox.checked ? "α/√r" : "α/r";
+      if (idle) {
+        out.innerHTML = `<b>Adapter is a no-op:</b> $B=0$, so $\\Delta W=0$ and the network is bit-identical to the ` +
+          `frozen base — that messy boundary IS the base's. <b>${params.length}</b> trainable knobs. ` +
+          `Effective scale ${scLbl} = <b>${effScale.toFixed(3)}</b>. Press Train.`;
+        if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$$", right: "$$", display: true }, { left: "$", right: "$", display: false }], throwOnError: false });
+      }
+    }
+
+    function run() {
+      goBtn.disabled = true;
+      const loop = () => {
+        for (let s = 0; s < 3 && net.step < TARGET; s++) {
+          const terms = [];
+          for (let i = 0; i < ds.X.length; i++) terms.push(bceWithLogits(fwd(ds.X[i]), ds.y[i]));
+          let L = terms[0]; for (let i = 1; i < terms.length; i++) L = L.add(terms[i]); L = L.div(terms.length);
+          opt.zeroGrad(); L.backward();
+          if (net.step === 0) step0Grad = { A: gnorm("A"), B: gnorm("B") };   // capture B-first evidence
+          opt.step(); net.step++; net.hist.push(L.data); timeline.push(net.step, L.data);
+        }
+        if (net.step % 15 === 0 || net.step >= TARGET) render(false);
+        const last = net.hist[net.hist.length - 1];
+        const effScale = scale(net.layers[1].rr), scLbl = rsBox.checked ? "α/√r" : "α/r";
+        const bfirst = step0Grad ? `<br>Step 1: ‖∇A‖ = <b>${step0Grad.A.toExponential(2)}</b> (zero — A is frozen until B moves), ‖∇B‖ = <b>${step0Grad.B.toExponential(2)}</b> — <b>B moved first.</b>` : "";
+        out.innerHTML = `step <b>${net.step}</b> · loss <b>${last.toExponential(2)}</b> · accuracy <b>${(acc() * 100).toFixed(0)}%</b> · ${scLbl} = <b>${effScale.toFixed(3)}</b>${bfirst}`;
+        if (net.step < TARGET) raf = requestAnimationFrame(loop);
+        else { raf = null; render(false); out.innerHTML = `done · final loss <b>${net.hist[net.hist.length - 1].toExponential(2)}</b> · accuracy <b>${(acc() * 100).toFixed(0)}%</b> — the frozen base was adapted by two skinny matrices per layer.${bfirst}`; }
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    goBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", build);
+    [rC, aC, lrC].forEach(c => c.onInput(build));      // any structural/scale change → fresh reproducible run
+    rsBox.addEventListener("change", build);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => { render(net.step === 0); timeline && timeline.draw(); }, 0));
+    build();
+  })();
+
+  /* ---------------- ΔW = B A reconstruction (TensorViz) ---------------- */
+  (function () {
+    const canvas = document.getElementById("d-lora-mm");
+    const Bshape = { shape: [6, 2], label: "B (6×2)" };   // up-projection (d_out × r)
+    const Ashape = { shape: [2, 6], label: "A (2×6)" };   // down-projection (r × d_in)
+    const tv = new TensorViz(canvas, { mode: "matmul", A: Bshape, B: Ashape, labels: { C: "ΔW (6×6)" }, height: 210 });
+    document.getElementById("d-lora-mm-go").addEventListener("click", () => tv.animateMatmul({ A: Bshape, B: Ashape }));
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => tv.draw(), 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz40", [
+    {
+      q: "Qwen3-8B, LoRA at $r=16$ targeting <code>all-linear</code>: how many trainable parameters?",
+      num: 43646976, tol: 1000, unit: "params",
+      why: "36 layers × 1,212,416 per layer = 43,646,976 = 0.533% of the 8,190,735,360 total (constants §3)."
+    },
+    {
+      q: "Full FT vs LoRA, comparing <em>trainable state only</em> (grads + optimizer): what is the shrink factor?",
+      num: 187, tol: 3,
+      why: "114.67 GB → 0.61 GB = 187×, which is exactly $8{,}190{,}735{,}360 \\div 43{,}646{,}976 = 187.7$ — optimizer state is linear in trainable params. (Not 7.67×, which is the state-to-state total including the resident base.)"
+    },
+    {
+      q: "Where does LoRA's memory saving mostly come from?",
+      opts: ["The base model gets smaller", "It caches far fewer activations", "The gradients and optimizer state, computed only for the adapter, all but vanish", "The adapter file is tiny on disk"],
+      a: 2,
+      why: "The base stays fully resident (16.38 GB) and activations are ~unchanged (you still backprop through the whole net). The 114.67 GB of grads+master+m+v collapses to 0.61 GB. 'Smaller model' and 'fewer activations' are the two named misconceptions."
+    },
+    {
+      q: "You set <code>target_modules</code> to attention-only and the fine-tune underperforms. The most likely cause:",
+      opts: ["Rank too low — raise r", "You froze the MLPs, which are 78% of each layer's targetable params", "α too small", "The base model is undertrained"],
+      a: 1,
+      why: "The MLP matrices are 150,994,944 of 192,937,984 targetable params/layer = 78%. Attention-only freezes them. Use all-linear. 'Rank too low' pulls the wrong lever."
+    },
+    {
+      q: "$B$ is initialised to zero, so $BA=0$ at step 0. How does the adapter ever start learning?",
+      opts: ["It can't — zero-init is a bug", "$\\partial\\mathcal L/\\partial B \\propto A \\neq 0$, so $B$ moves on step 1; then $A$'s gradient wakes up", "Only $A$ trains; $B$ stays zero forever", "You must set init_lora_weights=False to train at all"],
+      a: 1,
+      why: "The gradient into A passes through B (zero at first), so A is frozen at step 0; the gradient into B passes through A (nonzero), so B moves first. The demo shows ‖∇A‖ = 0 exactly at step 1."
+    },
+    {
+      q: "Full FT of Qwen3-8B is 131.05 GB of state; LoRA $r=16$ is 17.08 GB. The state-to-state reduction is:",
+      num: 7.67, tol: 0.2,
+      why: "$131.05 / 17.08 = 7.67\\times$. This is NOT 187× (that's trainable-state only) and NOT an activation saving — the 16.38 GB base is still resident and activations are unchanged."
+    },
+    {
+      q: "For a diffusion concept LoRA on 18 photographs, is $r=256$ a good choice?",
+      opts: ["Yes — more rank always helps", "Yes — it's nearly free in memory so max it out", "No — that much capacity will memorise the 18 photos; rank follows the dataset's information content", "No — r=256 won't fit on the box"],
+      a: 2,
+      why: "Rank is the capacity/bias-variance knob and follows dataset information, not model size. 18 images is little information; high r memorises them. (It would fit fine — r=256 all-linear is 27.55 GB — but capacity, not memory, is the constraint.)"
+    }
+  ], "LoRA — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,834 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>46. Decoding, KV Cache &amp; the Roofline — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions. Everything uses the shared CSS custom properties so
+     it stays theme-aware for free. */
+  .ctx-row { display: flex; gap: 8px; margin: 4px 0 12px; flex-wrap: wrap; }
+  .ctx-row button {
+    padding: 6px 12px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer;
+    font-size: .82rem; font-family: var(--mono);
+  }
+  .ctx-row button.active { background: var(--track-llm); color: var(--btn-text); border-color: var(--track-llm); font-weight: 700; }
+  .seg-toggle { display: flex; gap: 6px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .seg-toggle button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .8rem;
+    font-family: var(--font);
+  }
+  .seg-toggle button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .field-label { display: block; font-size: .82rem; color: var(--text-dim); margin: 12px 0 4px; }
+  .sampled-out {
+    font-family: var(--mono); font-size: .82rem; background: var(--bg-code);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 12px;
+    margin: 8px 0; line-height: 1.9; word-break: break-word;
+  }
+  .sampled-out .s-chip { background: color-mix(in srgb, var(--track-llm) 22%, transparent); padding: 1px 5px; border-radius: 4px; margin: 0 1px; white-space: pre; }
+  .kvterm { font-family: var(--mono); font-size: .86rem; background: var(--bg-code);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 11px 13px; margin: 10px 0; line-height: 1.7; }
+  .kvterm b { color: var(--track-llm); }
+  .demo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .demo-grid { grid-template-columns: 1fr; } }
+  .legend-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0 4px; font-size: .82rem; color: var(--text-dim); }
+  .legend-dot { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+  .data-note { color: var(--text-dim); font-size: .82rem; margin: 6px 0 2px; }
+</style>
+</head>
+<body data-page="46-decoding-kv-roofline.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Getting Text Back Out: Decoding, the KV Cache &amp; the Roofline</h1>
+    <p class="subtitle">Page 45 taught the model to <em>score</em> the next token. Now we make it
+      actually emit one — then another, and another — and discover that generation is the single
+      most bandwidth-starved thing the Spark ever does, and exactly why.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>Decoding sits between "the model has logits" and "you have text." Three ideas live here:
+      how a logit vector becomes a sampled token, why holding a conversation needs a growing
+      cache of keys and values, and how one division predicts your box's tokens-per-second before
+      you ever run it.</p>
+
+    <!-- on-page-resolution rule: this PREDICT is answered in "Prefill vs decode" and the
+         boxed decode-heuristic below, and again in the quiz. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      The same Qwen3-8B, on the same Spark. <strong>Prefill</strong> (reading your prompt) runs at
+      ~8,000 tok/s. <strong>Decode</strong> (emitting one token at a time) runs at ~20 tok/s. That's
+      a <strong>~390× gap on identical hardware</strong>. Before you scroll: guess <em>why</em> — and
+      guess how many tokens/second bf16 Qwen3-8B decode will hit on <em>your</em> box (10? 100? 1000?).
+    </div>
+
+    <!-- ======================================================================
+         SECTION 1 — DECODING MATH
+         ====================================================================== -->
+    <h2>1 · From a logit vector to a token</h2>
+    <p>At every position the model hands you a vector of $V = 151{,}936$ real numbers — the logits
+      $\mathbf{z}$, one per vocabulary entry <strong>[VP, constants §1.1]</strong>. A <em>decoding
+      strategy</em> turns that vector into exactly one chosen token ID. The base move is a
+      temperature-scaled softmax:</p>
+    <p>$$p_v \;=\; \frac{\exp(z_v / T_{\text{samp}})}{\sum_{v'=1}^{V}\exp(z_{v'} / T_{\text{samp}})}$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$z_v$</td><td>the logit (raw score) for vocab entry $v$</td><td>scalar, real</td><td>the model's final <code>lm_head</code></td></tr>
+        <tr><td>$p_v$</td><td>probability assigned to token $v$ after scaling</td><td>$(0,1)$, rows sum to 1</td><td>computed here</td></tr>
+        <tr><td>$T_{\text{samp}}$</td><td>sampling temperature</td><td>scalar $>0$</td><td>your decoding knob</td></tr>
+        <tr><td>$v, v'$</td><td>vocabulary indices</td><td>$1\dots V$</td><td>notation §3</td></tr>
+      </tbody>
+    </table>
+    <p>The limits are worth memorizing: $T_{\text{samp}}\!\to\!0^{+}$ collapses the softmax onto its
+      largest logit — pure <strong>argmax</strong>, i.e. greedy decoding; $T_{\text{samp}}=1$ leaves the
+      model's own calibrated distribution untouched; $T_{\text{samp}}\!\to\!\infty$ flattens everything
+      toward a uniform draw over the whole vocabulary.</p>
+
+    <p><em>Translation note.</em> This course writes $T_{\text{samp}}$ for sampling temperature. Papers
+      and APIs write <code>temperature</code> or a bare $T$ — but $T$ in <em>this</em> course is the
+      diffusion chain length (the number of noising steps), so we subscript it here to keep the two
+      apart (notation §3.2, §4.5). Whenever you set <code>temperature=0.7</code> in an API call, that is
+      $T_{\text{samp}} = 0.7$.</p>
+
+    <p>On top of temperature, three <em>truncation</em> rules decide which tokens are even eligible before
+      the draw. All three run on the probabilities $p_v$:</p>
+    <div class="box rule"><span class="box-title">📐 The three truncations</span>
+      <ul style="margin:6px 0 0">
+        <li><strong>Top-<em>k</em>:</strong> keep the $k$ largest-probability tokens, set the rest to
+          $-\infty$, renormalize. A <em>fixed count</em>, regardless of how peaked the distribution is.</li>
+        <li><strong>Top-<em>p</em> (nucleus):</strong> keep the smallest set of tokens whose cumulative
+          probability first reaches $p_{\text{thresh}}$ (e.g. 0.9), renormalize. A <em>fixed mass</em> —
+          the count adapts to the shape.</li>
+        <li><strong>Min-<em>p</em>:</strong> keep every token with $p_v \ge p_{\min}\cdot\max_{v'}p_{v'}$
+          — a floor <em>relative to the top token</em>. Peaked distributions keep few; flat ones keep many.</li>
+      </ul>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Temperature adds randomness"</span>
+      It does not add anything. Temperature is a <strong>monotone rescaling of the logits</strong>:
+      dividing every $z_v$ by the same positive $T_{\text{samp}}$ can stretch or squeeze the <em>gaps</em>
+      between probabilities, but it <strong>can never change their order</strong>. The token with the
+      largest logit stays the token with the largest probability at every temperature. The demo below
+      proves it: the top-ranked token is identical at $T_{\text{samp}} = 0.1$ and $T_{\text{samp}} = 2.0$.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Higher temperature = more creative"</span>
+      Up to a point. But the probability mass you're releasing at high $T_{\text{samp}}$ lives in the
+      <em>tail</em>, and the tail is mostly <strong>wrong</strong> tokens — misspellings, wrong-language
+      fragments, non-sequiturs. Past roughly $T_{\text{samp}} \approx 1.2$ you are buying degradation, not
+      creativity. "Creative" sampling is a narrow band, not a monotonic dial.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Beam search always gives the best answer"</span>
+      Beam search maximizes total sequence <em>likelihood</em> — and for open-ended generation the
+      highest-likelihood continuation is bland, repetitive, often degenerate (the "likelihood trap":
+      the safest next word forever is a loop). Reserve beam search for tasks with a single correct
+      answer — translation, constrained extraction — not for chat.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      In the sandbox below, pick the <em>confident</em> context and the <em>uncertain</em> one and watch
+      the two ahas the prose above promised. First: drag $T_{\text{samp}}$ from 0.1 to 2.0 and confirm the
+      <strong>top bar never moves to a different token</strong>. Second: set <strong>top-<em>p</em> = 0.9</strong>
+      and note how many tokens survive on each context — then switch to <strong>top-<em>k</em> = 20</strong>
+      and watch that number stop adapting.
+    </div>
+
+    <div class="demo track-llm">
+      <div class="demo-head">Decoding sandbox — real softmax, top-k, top-p, min-p <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <span class="field-label">Position (which logit vector you're decoding from)</span>
+        <div class="ctx-row" id="ctx-row"></div>
+        <div class="controls" id="dec-ctrls"></div>
+        <canvas id="dec-bars" height="360"></canvas>
+        <div class="readout" id="dec-out"></div>
+        <span class="field-label">40 tokens sampled from <em>this</em> position's distribution</span>
+        <div class="sampled-out" id="dec-samples"></div>
+        <p class="data-note">These are representative logit distributions with real token strings, chosen
+          to make the mechanism visible; only the top ~30 logits plus a lumped tail are shipped, and the
+          softmax / top-k / top-p / min-p / entropy math below runs live on them. This is <em>not</em> an
+          autoregressive continuation — the 40 draws all come from this one position. Reproduce every number
+          against real Qwen3 logits with the script in the box further down.</p>
+      </div>
+    </div>
+
+    <p><strong>Resolving the two ahas.</strong> On the <em>confident</em> position, top-$p$ = 0.9 keeps only
+      a couple of tokens — the model has already made up its mind, and nucleus sampling respects that. On the
+      <em>uncertain</em> position the very same top-$p$ = 0.9 keeps dozens, because the mass is spread thin.
+      Top-$k$ = 20, by contrast, keeps exactly 20 in <em>both</em> cases — far too few when the model is
+      genuinely unsure, needlessly many when it is certain. <strong>That mismatch is the entire argument for
+      top-$p$ over top-$k$, and it is invisible until you interact with it.</strong> Entropy (shown live, in
+      bits) is the one-number summary: low on the confident position, high on the uncertain one.</p>
+
+    <!-- ======================================================================
+         SECTION 2 — THE KV CACHE
+         ====================================================================== -->
+    <h2>2 · The KV cache — why the second token is cheap</h2>
+    <p>Decoding is autoregressive: token $i+1$ attends to every earlier position $1\dots i$. Recomputing
+      all of their keys and values from scratch each step would be quadratic madness. So we <em>cache</em>
+      them. Each layer stores one key vector and one value vector per past token; the query is the only
+      thing computed fresh. The cache's size grows linearly with context, and its byte count is exactly:</p>
+    <p>$$\text{KV bytes} \;=\; 2 \cdot L \cdot H_{kv} \cdot d_{\text{head}} \cdot b \cdot S \cdot B$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value (Qwen3-8B)</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$2$</td><td>one tensor for $K$, one for $V$</td><td>2</td><td>keys <em>and</em> values</td></tr>
+        <tr><td>$L$</td><td>number of transformer layers</td><td>36</td><td>constants §1.1 [VP]</td></tr>
+        <tr><td>$H_{kv}$</td><td><strong>key/value</strong> heads — <em>not</em> query heads $H$</td><td>8</td><td>constants §1.1 [VP]</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head width</td><td>128</td><td>constants §1.1 [VP]</td></tr>
+        <tr><td>$b$</td><td>bytes per stored element</td><td>2 (bf16)</td><td>KV dtype</td></tr>
+        <tr><td>$S$</td><td>sequence length (context in tokens)</td><td>up to 40,960</td><td>notation §4.2</td></tr>
+        <tr><td>$B$</td><td>batch size (concurrent sequences)</td><td>1</td><td>your workload</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn"><span class="box-title">⚠️ It is $H_{kv}$, not $H$</span>
+      The single most common error in this formula is writing $H = 32$ (the query heads) where it should
+      be $H_{kv} = 8$ (the key/value heads). Qwen3-8B uses <strong>grouped-query attention</strong>: 32
+      query heads share just 8 K/V heads. Using $H$ overcounts the cache by exactly $32/8 = 4\times$. This
+      is not a typo for "heads" — it is the whole reason GQA exists.
+    </div>
+    <div class="box worked"><span class="box-title">✍️ Worked — 144 KiB per token [DER, constants §4]</span>
+      Per token, per layer: $2 \times 8 \times 128 \times 2 = 4{,}096$ B $= 4$ KiB. Across all 36 layers:
+      $$2 \cdot 36 \cdot 8 \cdot 128 \cdot 2 \;=\; 147{,}456\ \text{B} \;=\; \mathbf{144\ KiB/token}.$$
+      Now scale by context (still $B=1$, bf16): at $S = 32{,}768$ that's $\mathbf{4.50\ GiB}$; at the full
+      $S = 40{,}960$, $\mathbf{5.625\ GiB}$; at a hypothetical $S = 131{,}072$, <strong>18.0 GiB</strong> —
+      which is <em>larger than the 16.38 GB of model weights</em>. Past a certain context the cache is the
+      biggest thing in memory.
+    </div>
+    <p><strong>The GQA punchline.</strong> Had Qwen3-8B used ordinary multi-head attention with $H_{kv} = 32$,
+      the cache would be $576$ KiB/token $= \mathbf{22.50\ GiB}$ at full context — versus $5.625$ GiB with
+      GQA. <strong>Grouped-query attention saves exactly $4\times$ on the KV cache</strong> (constants §4),
+      and that saving is what makes long-context decoding fit at all. And why cache $K$ and $V$ but not $Q$?
+      Because $\mathbf{q}_i$ is used once — to attend from position $i$ — and then never again, while
+      $K_{1:i}$ and $V_{1:i}$ are re-read by every future token. You cache what gets reused.</p>
+    <div class="box warn"><span class="box-title">⚠️ "I'll just turn the KV cache off to save memory"</span>
+      Turning it off doesn't make decode cheaper — it makes it $O(S^2)$, recomputing every past key and
+      value at every step, which on a long context is hundreds of times <em>more</em> compute (the LMSYS-style
+      measurement is ~500× on realistic lengths). The real levers for a tight memory budget are a
+      <strong>shorter context, a smaller batch, or an fp8 KV cache</strong> — never disabling the cache.
+    </div>
+
+    <!-- ======================================================================
+         SECTION 3 — PREFILL vs DECODE, THE ROOFLINE
+         ====================================================================== -->
+    <h2>3 · Prefill vs decode, and the roofline that separates them</h2>
+    <p>Prefill and decode run the identical network, yet they hit opposite walls. To see why, reopen the
+      trunk's roofline.</p>
+    <div class="track-banner track-llm"><span class="track-label">Trunk callback — the roofline, p.43</span></div>
+    <p>On p.43 you derived, for a dense bf16 transformer, that <em>arithmetic intensity equals tokens per
+      forward pass</em>:</p>
+    <p>$$I \;=\; \frac{\text{FLOPs}}{\text{bytes}} \;=\; \frac{2N\,S_{\text{fwd}}}{2N} \;=\; S_{\text{fwd}}\quad\text{FLOP/byte}$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$I$</td><td>arithmetic intensity — FLOPs done per byte moved</td><td>FLOP/byte</td><td>p.43 (trunk)</td></tr>
+        <tr><td>$N$</td><td>non-embedding parameter count</td><td>6,946,071,552</td><td>constants §1.1 [VP]</td></tr>
+        <tr><td>$S_{\text{fwd}}$</td><td>tokens processed in one forward pass</td><td>1 (decode) / 2048 (prefill)</td><td>the workload</td></tr>
+        <tr><td>$I^{\star}$</td><td>the <strong>ridge</strong> — where compute- and bandwidth-bound meet</td><td>see below</td><td>p.43 / constants §6.4</td></tr>
+      </tbody>
+    </table>
+    <p>The Spark's ridge is $I^{\star} = P_{\text{peak}}/\text{BW}$. Its exact value depends on the dense-BF16
+      compute ceiling, <strong>which NVIDIA does not publish for the GB10 — so this number is
+      <em>inferred, not published</em></strong> (constants §6.3–6.4): with the working ~62 TFLOP/s ceiling the
+      ridge is <strong>227 FLOP/byte</strong>; if the true usable ceiling is ~125 TFLOP/s (a live alternative
+      that one SDXL benchmark leans toward), the ridge is <strong>458</strong>. The course prints 227 with the
+      inference label and names 458 as the live alternative — and the exercise below settles it by
+      <em>measurement</em>. Either way the verdict for decode is the same:</p>
+    <ul>
+      <li><strong>Decode</strong> processes one token per forward, so $S_{\text{fwd}} = 1 \Rightarrow I = 1$ —
+        that is <strong>227× to 458× below the ridge</strong>. Decode is brutally <strong>bandwidth-bound</strong>:
+        the GPU spends nearly all its time waiting for weights to stream in from memory, doing almost no arithmetic
+        with each byte. This is where the Spark is <em>weak</em>.</li>
+      <li><strong>Prefill</strong> processes the whole prompt at once, $S_{\text{fwd}} = 2048 \Rightarrow I = 2048$
+        — well above the ridge, firmly <strong>compute-bound</strong>. Same machine, same weights, opposite bottleneck.</li>
+    </ul>
+    <p>That is the answer to the prediction's first half: the ~390× prefill/decode gap is not a bug or a
+      driver problem — it is $S_{\text{fwd}} = 2048$ versus $S_{\text{fwd}} = 1$, two points on opposite sides
+      of the roofline.</p>
+
+    <div class="box rule"><span class="box-title">📐 The decode heuristic — [EST], ±10–15%</span>
+      $$\text{decode tok/s} \;\approx\; 0.65 \times \frac{\text{BW (GB/s)}}{\text{weight bytes read per token (GB)}}
+        \qquad\text{dense models, batch 1}$$
+      Because decode is bandwidth-bound, throughput is set by how fast you can read the weights once per token.
+      The 0.65 is the round, slightly-conservative memory-bandwidth-utilization (MBU) coefficient — real dense
+      batch-1 systems land in the 60–75% band. This is <strong>an estimate</strong>; the label travels with it.
+    </div>
+    <p>The subtle part is the numerator's denominator: <em>which</em> bytes get read per token. The physically
+      correct count is <strong>decode-traffic = checkpoint size − the embedding table</strong>, because the input
+      embedding is <em>gathered</em> (one row looked up per token) rather than streamed. For a quantized model this
+      is neither the file size nor params×bits — it is the file minus that one lookup table, and getting it wrong
+      moves a prediction by 15–25 percentage points. Under the correct convention, four independent real
+      measurements all land in the 60–75% MBU band (constants §6.6–6.7 [VP]): Llama-3.1-8B FP8 <strong>60.3%</strong>,
+      70B FP8 <strong>69.8%</strong>, 8B NVFP4 <strong>70.5%</strong>, Qwen3-14B NVFP4 <strong>74.7%</strong>.</p>
+    <div class="box key"><span class="box-title">🔑 The failure mode is the lesson</span>
+      <em>If your heuristic predicts more than 100% of peak bandwidth, your model is an MoE.</em> gpt-oss-20B
+      decodes at 49.7 tok/s, which on its 12.8 GB checkpoint <em>implies</em> a bandwidth of 637 GB/s — that's
+      <strong>234% of the Spark's 273 GB/s bus</strong>, a physical impossibility. The resolution: it's a
+      mixture-of-experts, ~3.6B of ~20.9B params active per token, so only the active weights are read. A second
+      trap: DeepSeek-R1-14B's 83.5 tok/s looks impossible too, until you notice it was measured at <strong>batch
+      8, not 1</strong> — the weight read amortizes across 8 streams. One impossible number teaches the heuristic,
+      its domain, and MoE's memory/compute decoupling at once.
+    </div>
+    <div class="box worked"><span class="box-title">✍️ Qwen3-8B decode predictions [DER, constants §6.7]</span>
+      Weights stream once per token; $\text{ceiling} = \text{BW}/\text{weight bytes}$, expectation $= 0.65\times$ceiling.
+      <table class="ledger" style="margin-top:8px">
+        <thead><tr><th>Precision</th><th>Weight bytes</th><th>Ceiling (tok/s)</th><th>Expect ×0.65 (tok/s)</th></tr></thead>
+        <tbody>
+          <tr><td>bf16</td><td>16.38 GB</td><td><strong>16.67</strong></td><td><strong>~10.8</strong></td></tr>
+          <tr><td>fp8</td><td>8.19 GB</td><td>33.33</td><td>~21.7</td></tr>
+          <tr><td>NVFP4</td><td>~4.10 GB</td><td>66.6</td><td>~43</td></tr>
+        </tbody>
+      </table>
+      So the prediction's second half resolves to: <strong>~10.8 tok/s expected, 16.67 tok/s ceiling</strong> for
+      bf16 Qwen3-8B on the 273 GB/s bus. The <em>ceiling</em> is what you could hit at 100% MBU; the
+      <em>expectation</em> is what you will actually see. Say which is which — they are 6 tok/s apart.
+    </div>
+    <p><strong>Measured, on his box (constants §6.7 [VP]).</strong> Llama-3.1-8B on the Spark: decode
+      $\mathbf{20.5}$ tok/s at batch 1 rising to $\mathbf{368}$ tok/s at batch 32 — an <strong>18×</strong> gain —
+      while prefill stays flat at $7{,}991 \to 7{,}949$ tok/s. That is the roofline, measured: decode was starving
+      for bandwidth and batching fed it; prefill was already compute-bound and gained nothing. Memory bandwidth:
+      $\mathbf{273\ GB/s}$ [VP].</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      The sandbox below lets you drive the KV formula and the decode roofline directly. Push <em>context</em> toward
+      the maximum and watch Qwen3-8B's KV cache overtake its own $16.38$ GB of weights — the "cache exceeds the model"
+      regime; raise the <em>batch</em> and it blows clean through your $121.69$ GiB memory line. Flip the attention
+      mode from GQA to MHA and watch the KV bar jump $4\times$ (exactly $H/H_{kv} = 32/8$). On the right, drag
+      <em>bandwidth</em> to the Spark's 273 GB/s marker and read where Qwen3-8B lands against the four measured MBU dots.
+    </div>
+
+    <div class="demo track-llm">
+      <div class="demo-head">KV cache &amp; the decode roofline <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="seg-toggle" id="attn-toggle">
+          <button data-a="gqa" class="active" type="button">GQA (native)</button>
+          <button data-a="mha" type="button">MHA (H_kv = H)</button>
+          <button data-a="mqa" type="button">MQA (H_kv = 1)</button>
+        </div>
+        <div class="seg-toggle" id="dtype-toggle">
+          <button data-d="2" class="active" type="button">KV bf16</button>
+          <button data-d="1" type="button">KV fp8</button>
+        </div>
+        <div class="controls" id="kv-ctrls"></div>
+        <div class="kvterm" id="kv-formula"></div>
+        <div class="demo-grid">
+          <div>
+            <canvas id="kv-bars" height="300"></canvas>
+            <div class="readout" id="kv-out"></div>
+          </div>
+          <div>
+            <canvas id="roof-plot" height="300"></canvas>
+            <div class="legend-row" id="roof-legend"></div>
+            <div class="readout" id="roof-out"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p><strong>The roofline, in one picture.</strong> Every point on the right panel is one division:
+      $\text{tok/s} = \text{BW}/\text{bytes}$, a straight line of slope $-1$ on log–log axes. The four
+      measured dots cluster at 60–75% of that ceiling — they land on the $\times0.65$ line, not the ceiling —
+      because real systems never quite saturate the bus. Drag bandwidth up to an H100's ~3,350 GB/s or a
+      B200's ~8,000 and the whole line lifts: decode throughput is <em>bandwidth</em>, almost nothing else.</p>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/02_kv_cache_and_roofline.py</code>
+      Measure the KV cache growing with context on real Qwen3-8B (verify 144 KiB/token empirically), then benchmark
+      decode tok/s and plot measured-versus-273 GB/s, reproducing the 60–75% MBU band on your own box. ~20 minutes.
+      <strong>Safety:</strong> this contends for memory with ComfyUI — shut ComfyUI down first, or expect an OOM
+      that is <em>your</em> fault, not the model's.
+    </div>
+
+    <p><code>[THREAD:memory ledger beat: the KV line]</code> — same reality-check thread from p.18 and p.43, now
+      with its third line item. The ledger read <em>16 B/param</em> for training state (p.18), then
+      <em>activations</em>; decoding adds <em>KV cache</em> at 144 KiB/token, and p.49 stacks all three against
+      your measured 121.69 GiB. Same object, new line. <code>[THREAD:Qwen3-8B beat: 144 KiB/token]</code> — the
+      cache figure now joins $V=151{,}936$, $P=8{,}190{,}735{,}360$, and 16.38 GB in the reflex set.</p>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-decoding"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO 1 — DECODING SANDBOX
+     Real temperature softmax, top-k, top-p, min-p, entropy, multinomial draw.
+     Logit vectors are representative (top ~30 tokens + a lumped tail); the math
+     is computed live via NN.softmax on every slider tick. Seeded RNG.
+     ========================================================================== */
+  (function () {
+    const { softmax, RNG } = NN;
+
+    // ---- representative logit distributions (token string + logit) ----------
+    // Confident: model has decided. Uncertain: mass spread across many options.
+    const CTX = {
+      france: {
+        label: '"The capital of France is"',
+        tail: 0.02,
+        toks: [
+          [" Paris", 15.0], [" the", 12.9], [" a", 12.0], [" located", 11.4],
+          [" home", 11.0], [" one", 10.7], [" known", 10.4], [" in", 10.1],
+          [" situated", 9.8], [" France", 9.5], [" now", 9.2], [" also", 9.0],
+          [" famous", 8.8], [" often", 8.5], [" arguably", 8.2], [" still", 8.0],
+          [" France's", 7.8], [" perhaps", 7.5], [" certainly", 7.2], [" indeed", 7.0]
+        ]
+      },
+      lang: {
+        label: '"The best programming language is"',
+        tail: 0.06,
+        // deliberately shallow: ~50 plausible continuations, near-flat logits.
+        toks: null // generated below
+      },
+      cat: {
+        label: '"The cat sat on the"',
+        tail: 0.04,
+        toks: [
+          [" mat", 13.0], [" floor", 12.4], [" couch", 12.0], [" bed", 11.7],
+          [" ground", 11.4], [" table", 11.1], [" roof", 10.7], [" sofa", 10.4],
+          [" chair", 10.1], [" windowsill", 9.8], [" carpet", 9.5], [" step", 9.2],
+          [" porch", 8.9], [" fence", 8.6], [" wall", 8.3], [" edge", 8.0],
+          [" grass", 7.7], [" ledge", 7.4], [" rug", 7.1], [" desk", 6.9]
+        ]
+      },
+      math: {
+        label: '"2 + 2 ="',
+        tail: 0.005,
+        toks: [
+          [" 4", 22.0], [" four", 14.5], [" 5", 10.0], [" 22", 9.0],
+          [" 3", 8.5], [" the", 7.5], [" 4.", 7.0], [" 2", 6.5],
+          [" \\n", 6.0], [" ...", 5.5], [" (", 5.0], [" 6", 4.8]
+        ]
+      },
+      func: {
+        label: '"It is important to"',
+        tail: 0.05,
+        toks: [
+          [" note", 12.5], [" understand", 12.3], [" remember", 12.1], [" know", 11.8],
+          [" realize", 11.5], [" ensure", 11.3], [" consider", 11.1], [" recognize", 10.9],
+          [" keep", 10.6], [" have", 10.3], [" be", 10.1], [" make", 9.9],
+          [" point", 9.6], [" emphasize", 9.3], [" distinguish", 9.0], [" mention", 8.7],
+          [" avoid", 8.4], [" first", 8.1], [" always", 7.8], [" also", 7.5]
+        ]
+      }
+    };
+    // Build the shallow "uncertain" distribution: ~50 tokens, gently decaying.
+    (function () {
+      const langs = [" Python", " JavaScript", " Rust", " C", " C++", " Go", " Java",
+        " TypeScript", " Haskell", " Lisp", " Ruby", " Swift", " Kotlin", " Scala",
+        " Julia", " R", " Perl", " PHP", " Elixir", " Clojure", " Zig", " OCaml",
+        " F#", " Erlang", " Dart", " Lua", " Nim", " Crystal", " Racket", " Scheme",
+        " Fortran", " COBOL", " Assembly", " SQL", " Bash", " MATLAB", " whatever",
+        " the", " subjective", " debatable", " arguably", " probably", " really",
+        " a", " one", " honestly", " clearly", " obviously", " still", " never"];
+      const arr = [];
+      for (let i = 0; i < langs.length; i++) arr.push([langs[i], 10.0 - i * 0.075]);
+      CTX.lang.toks = arr;
+    })();
+
+    const ctxRow = document.getElementById("ctx-row");
+    const ctrlsEl = document.getElementById("dec-ctrls");
+    const barCanvas = document.getElementById("dec-bars");
+    const out = document.getElementById("dec-out");
+    const samplesEl = document.getElementById("dec-samples");
+    let ctxKey = "france";
+
+    // Context buttons
+    Object.keys(CTX).forEach((k, idx) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.textContent = CTX[k].label;
+      if (k === ctxKey) b.classList.add("active");
+      b.addEventListener("click", () => {
+        ctxKey = k;
+        ctxRow.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+        draw();
+      });
+      ctxRow.appendChild(b);
+    });
+
+    const tCtrl = makeCtrl(ctrlsEl, { label: "T_samp (temperature)", min: 0.1, max: 2.0, step: 0.05, value: 1.0, fmt: v => v.toFixed(2) });
+    const kCtrl = makeCtrl(ctrlsEl, { label: "top-k (0 = off)", min: 0, max: 100, step: 1, value: 0, fmt: v => v === 0 ? "off" : v.toFixed(0) });
+    const pCtrl = makeCtrl(ctrlsEl, { label: "top-p (1 = off)", min: 0.1, max: 1.0, step: 0.02, value: 1.0, fmt: v => v >= 1 ? "off" : v.toFixed(2) });
+    const mpCtrl = makeCtrl(ctrlsEl, { label: "min-p (0 = off)", min: 0, max: 0.5, step: 0.01, value: 0, fmt: v => v === 0 ? "off" : v.toFixed(2) });
+
+    // Compute the full probability vector after temperature + truncations.
+    // Returns {probs, kept:boolean[], toks, entropyBits, nKept}.
+    function computeDist() {
+      const ctx = CTX[ctxKey];
+      const toks = ctx.toks;
+      const T = tCtrl.get();
+      const logits = toks.map(t => t[1]);
+      // Temperature softmax over the shipped logits (the lumped tail carries a
+      // small fixed mass, added after, so probabilities still sum to ~1).
+      let p = softmax(logits.map(z => z / T), { stable: true });
+      const tail = ctx.tail;
+      p = p.map(v => v * (1 - tail)); // reserve tail mass
+      // ---- truncations operate on the shipped tokens ----
+      const n = p.length;
+      let kept = new Array(n).fill(true);
+      // top-k
+      const k = kCtrl.get();
+      if (k > 0 && k < n) {
+        const order = p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+        const keepSet = new Set(order.slice(0, k).map(o => o[1]));
+        for (let i = 0; i < n; i++) if (!keepSet.has(i)) kept[i] = false;
+      }
+      // top-p (nucleus) — smallest set reaching the threshold
+      const pp = pCtrl.get();
+      if (pp < 1.0) {
+        const order = p.map((v, i) => [v, i]).sort((a, b) => b[0] - a[0]);
+        let cum = 0; const keepSet = new Set();
+        for (const [v, i] of order) { keepSet.add(i); cum += v; if (cum >= pp) break; }
+        for (let i = 0; i < n; i++) if (!keepSet.has(i)) kept[i] = false;
+      }
+      // min-p — floor relative to the max
+      const mp = mpCtrl.get();
+      if (mp > 0) {
+        const pmax = Math.max(...p);
+        for (let i = 0; i < n; i++) if (p[i] < mp * pmax) kept[i] = false;
+      }
+      // entropy of the FULL (pre-truncation) distribution, in bits
+      let H = 0;
+      for (const v of p) if (v > 0) H -= v * Math.log2(v);
+      if (tail > 0) H -= tail * Math.log2(tail / 50); // rough tail contribution
+      const nKept = kept.filter(Boolean).length;
+      return { probs: p, kept, toks, entropyBits: H, nKept, tail };
+    }
+
+    function drawBars() {
+      const d = computeDist();
+      const dpr = window.devicePixelRatio || 1;
+      const cssH = +(barCanvas.dataset.baseH || (barCanvas.dataset.baseH = barCanvas.getAttribute("height")));
+      const cssW = barCanvas.clientWidth || 600;
+      if (barCanvas.width !== Math.round(cssW * dpr) || barCanvas.height !== Math.round(cssH * dpr)) {
+        barCanvas.width = Math.round(cssW * dpr); barCanvas.height = Math.round(cssH * dpr);
+        barCanvas.style.height = cssH + "px";
+      }
+      const g = barCanvas.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, cssW, cssH);
+
+      const N = Math.min(d.toks.length, 30);
+      // order by prob desc for a clean bar chart
+      const order = d.probs.map((v, i) => i).sort((a, b) => d.probs[b] - d.probs[a]).slice(0, N);
+      const pmax = Math.max(...d.probs);
+      const labelW = 92, right = 14, top = 8, rowH = (cssH - top - 6) / N;
+      const barMax = cssW - labelW - right - 46;
+      const keepC = cssVar("--track-llm", "#62c3ff");
+      const cutC = cssVar("--text-dim", "#8391ab");
+      const txtC = cssVar("--text", "#e6ecf5");
+      g.font = "11px Consolas, monospace"; g.textBaseline = "middle";
+
+      order.forEach((i, r) => {
+        const y = top + r * rowH + rowH / 2;
+        const w = (d.probs[i] / pmax) * barMax;
+        const on = d.kept[i];
+        g.fillStyle = txtC; g.textAlign = "right";
+        g.fillText(d.toks[i][0].replace(/ /g, "·").slice(0, 13), labelW - 6, y);
+        g.fillStyle = on ? keepC : cutC;
+        g.globalAlpha = on ? 1 : 0.32;
+        g.fillRect(labelW, y - rowH * 0.34, Math.max(1, w), rowH * 0.68);
+        g.globalAlpha = 1;
+        g.fillStyle = on ? txtC : cutC; g.textAlign = "left";
+        g.fillText((d.probs[i] * 100).toFixed(1) + "%", labelW + w + 6, y);
+      });
+
+      // sampled draws from the truncated+renormalized distribution
+      const rng = new RNG(1234 + ctxKey.length + Math.round(tCtrl.get() * 100) + kCtrl.get() * 7 + Math.round(pCtrl.get() * 100) * 3 + Math.round(mpCtrl.get() * 100) * 11);
+      const kept = d.kept;
+      let mass = 0; for (let i = 0; i < d.probs.length; i++) if (kept[i]) mass += d.probs[i];
+      samplesEl.innerHTML = "";
+      if (mass <= 0) { samplesEl.textContent = "(every token truncated — loosen a filter)"; }
+      else {
+        for (let s = 0; s < 40; s++) {
+          let x = rng.random() * mass, pick = -1;
+          for (let i = 0; i < d.probs.length; i++) { if (!kept[i]) continue; x -= d.probs[i]; if (x <= 0) { pick = i; break; } }
+          if (pick < 0) pick = order[0];
+          const chip = document.createElement("span");
+          chip.className = "s-chip";
+          chip.textContent = d.toks[pick][0];
+          samplesEl.appendChild(chip);
+        }
+      }
+
+      // readout: top token invariance + counts + entropy
+      const topTok = d.toks[order[0]][0];
+      out.innerHTML = `top token <b>${topTok.replace(/ /g, "·")}</b> at ${(d.probs[order[0]] * 100).toFixed(1)}% ` +
+        `· <b>${d.nKept}</b> of ${d.toks.length} tokens survive the filters ` +
+        `· entropy <b>${d.entropyBits.toFixed(2)} bits</b> ` +
+        `(low = confident, high = uncertain). The top token does not change with temperature.`;
+    }
+
+    function draw() { drawBars(); }
+    [tCtrl, kCtrl, pCtrl, mpCtrl].forEach(c => c.onInput(draw));
+    draw();
+    window.addEventListener("resize", draw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==========================================================================
+     DEMO 2 — KV CACHE  +  DECODE ROOFLINE
+     KV bytes computed live from the frozen formula; roofline is tok/s = BW/bytes
+     with the four measured MBU dots overlaid. All figures from constants.md.
+     ========================================================================== */
+  (function () {
+    // The course's single arithmetic anchor (constants §1.1 [VP]; "Qwen3-8B is the
+    // only arithmetic anchor", spec-part5 §GLOBAL). No second preset: Llama-3.3-70B
+    // is scoped to the LLM-hardware page only (constants §1.4), not this page, and
+    // constants.md ships no other large-model KV config to freeze from.
+    const MODELS = {
+      qwen8:  { name: "Qwen3-8B", L: 36, Hkv: 8, H: 32, dhead: 128, weightGB: 16.38 }   // constants §1.1/§1.2
+    };
+    // Four measured decode dots (constants §6.7 [VP]) — decode-traffic bytes.
+    const DOTS = [
+      { name: "Llama-3.1-8B FP8",  gb: 8.0,  tps: 20.5,  mbu: "60.3%" },
+      { name: "Llama-3.1-70B FP8", gb: 70.0, tps: 2.7,   mbu: "69.8%" },
+      { name: "Llama-3.1-8B NVFP4", gb: 4.98, tps: 38.65, mbu: "70.5%" },
+      { name: "Qwen3-14B NVFP4",   gb: 8.98, tps: 22.71, mbu: "74.7%" }
+    ];
+    const MEASURED_BW = 273; // GB/s [VP]
+    const MEM_GIB = 121.69;  // measured usable MemTotal [MEA-DEV]
+    const GIB = 1024 ** 3;
+
+    let modelKey = "qwen8", attnMode = "gqa", kvBytes = 2;
+
+    const kvCtrls = document.getElementById("kv-ctrls");
+    const ctxCtrl = makeCtrl(kvCtrls, { label: "context S (tokens)", min: 512, max: 262144, step: 512, value: 32768, fmt: v => v.toLocaleString() });
+    const batchCtrl = makeCtrl(kvCtrls, { label: "batch B", min: 1, max: 64, step: 1, value: 1, fmt: v => v.toFixed(0) });
+    const bwCtrl = makeCtrl(kvCtrls, { label: "memory bandwidth (GB/s) — Spark = 273", min: 100, max: 8000, step: 1, value: 273, fmt: v => v.toFixed(0) });
+
+    const formulaEl = document.getElementById("kv-formula");
+    const kvCanvas = document.getElementById("kv-bars");
+    const kvOut = document.getElementById("kv-out");
+    const roofCanvas = document.getElementById("roof-plot");
+    const roofLegend = document.getElementById("roof-legend");
+    const roofOut = document.getElementById("roof-out");
+
+    function effHkv(m) { return attnMode === "gqa" ? m.Hkv : attnMode === "mha" ? m.H : 1; }
+
+    function kvPerTokenBytes(m) { return 2 * m.L * effHkv(m) * m.dhead * kvBytes; }
+
+    function setupCanvas(cv) {
+      const dpr = window.devicePixelRatio || 1;
+      const cssH = +(cv.dataset.baseH || (cv.dataset.baseH = cv.getAttribute("height")));
+      const cssW = cv.clientWidth || 400;
+      if (cv.width !== Math.round(cssW * dpr) || cv.height !== Math.round(cssH * dpr)) {
+        cv.width = Math.round(cssW * dpr); cv.height = Math.round(cssH * dpr);
+        cv.style.height = cssH + "px";
+      }
+      const g = cv.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, cssW, cssH);
+      return { g, W: cssW, H: cssH };
+    }
+
+    function drawKvBars() {
+      const m = MODELS[modelKey];
+      const S = ctxCtrl.get(), B = batchCtrl.get();
+      const perTok = kvPerTokenBytes(m);                 // B/token (all layers)
+      const kvTotalGiB = perTok * S * B / GIB;
+      const weightsGiB = m.weightGB * 1e9 / GIB;
+      const actGiB = 4.0 * B;                             // labelled estimate (2–6 GB, constants §2.2)
+
+      // formula readout, term by term
+      const perTokKiB = perTok / 1024;
+      formulaEl.innerHTML =
+        `KV bytes = 2 · L(<b>${m.L}</b>) · H_kv(<b>${effHkv(m)}</b>) · d_head(<b>${m.dhead}</b>) · ` +
+        `b(<b>${kvBytes}</b>) · S(<b>${S.toLocaleString()}</b>) · B(<b>${B}</b>)<br>` +
+        `= <b>${perTok.toLocaleString()}</b> B/token/layer-set = <b>${perTokKiB.toFixed(0)} KiB/token</b> ` +
+        `&nbsp;→&nbsp; total KV = <b>${kvTotalGiB.toFixed(2)} GiB</b>` +
+        // Ratio computed live from the model's own head counts — MHA uses H heads,
+        // native GQA uses Hkv, so the cache multiple is exactly H/Hkv (4× for
+        // Qwen3-8B: 32/8). Never hard-code it (a wrong preset would self-contradict).
+        (attnMode === "mha" ? ` &nbsp;<span style="color:var(--warn,#ff6b6b)">(MHA: ${(m.H / m.Hkv)}× the GQA cache)</span>` : "");
+
+      const { g, W, H } = setupCanvas(kvCanvas);
+      const segs = [
+        { label: "weights", gib: weightsGiB, color: cssVar("--accent", "#b48cff") },
+        { label: "KV cache", gib: kvTotalGiB, color: cssVar("--track-llm", "#62c3ff") },
+        { label: "activations*", gib: actGiB, color: cssVar("--accent2", "#45e0b8") }
+      ];
+      const total = segs.reduce((a, s) => a + s.gib, 0);
+      const scaleMax = Math.max(total, MEM_GIB) * 1.08;
+      const left = 10, right = 12, barY = 46, barH = 58;
+      const px = v => left + (v / scaleMax) * (W - left - right);
+
+      // stacked bar
+      let x = left;
+      g.font = "11px system-ui"; g.textBaseline = "middle";
+      for (const s of segs) {
+        const w = (s.gib / scaleMax) * (W - left - right);
+        g.fillStyle = s.color; g.fillRect(x, barY, Math.max(0, w), barH);
+        x += w;
+      }
+      // memory line (measured usable) + 24 GB (a 4090)
+      function memLine(v, label, col) {
+        const X = px(v);
+        g.strokeStyle = col; g.setLineDash([5, 4]); g.lineWidth = 2;
+        g.beginPath(); g.moveTo(X, barY - 12); g.lineTo(X, barY + barH + 12); g.stroke();
+        g.setLineDash([]);
+        g.fillStyle = col; g.textAlign = "center"; g.font = "10px system-ui";
+        g.fillText(label, X, barY - 20);
+      }
+      memLine(MEM_GIB, "121.69 GiB (your box)", cssVar("--warn", "#ff6b6b"));
+      memLine(24 * 1e9 / GIB, "24 GB (4090)", cssVar("--text-dim", "#8391ab"));
+
+      // legend under the bar
+      g.textAlign = "left"; g.font = "11px system-ui"; g.textBaseline = "middle";
+      let ly = barY + barH + 34;
+      segs.forEach((s, i) => {
+        const lx = left + (i % 3) * ((W - left) / 3);
+        g.fillStyle = s.color; g.fillRect(lx, ly - 5, 11, 11);
+        g.fillStyle = cssVar("--text", "#e6ecf5");
+        g.fillText(`${s.label} ${s.gib.toFixed(1)}`, lx + 16, ly);
+      });
+
+      const fits = total <= MEM_GIB;
+      kvOut.innerHTML = `total footprint <b>${total.toFixed(1)} GiB</b> of ${MEM_GIB} GiB ` +
+        `— <b style="color:${fits ? "var(--accent2)" : "var(--warn,#ff6b6b)"}">${fits ? "fits" : "over the wall"}</b>. ` +
+        `KV = <b>${kvTotalGiB.toFixed(2)} GiB</b> (${perTokKiB.toFixed(0)} KiB/token). ` +
+        `<span style="color:var(--text-dim)">*activations = labelled estimate ~4 GB×B (constants §2.2)</span>`;
+    }
+
+    function drawRoofline() {
+      const m = MODELS[modelKey];
+      const BW = bwCtrl.get();
+      const { g, W, H } = setupCanvas(roofCanvas);
+      // log-log axes: x = weight bytes (GB) 1..200, y = tok/s
+      const p = new Plot(roofCanvas, {
+        xmin: 1, xmax: 200, ymin: 1, ymax: 1000, xlog: true, ylog: true,
+        xlabel: "weight bytes read / token (GB)", ylabel: "decode tok/s"
+      });
+      p.clear(); p.grid();
+      // ceiling line tok/s = BW/bytes, slope -1
+      const xs = [], yc = [], yh = [];
+      for (let gb = 1; gb <= 200; gb *= 1.15) { xs.push(gb); yc.push(BW / gb); yh.push(0.65 * BW / gb); }
+      p.trace(xs, yc, cssVar("--text-dim", "#8391ab"), 1.6);      // ceiling
+      p.trace(xs, yh, cssVar("--track-llm", "#62c3ff"), 2.4);     // ×0.65 expectation
+
+      // the four measured dots
+      const g2 = p.g;
+      function dot(gb, tps, color, r) {
+        const X = p._tx(gb), Y = p._ty(tps);
+        g2.save(); g2.fillStyle = color; g2.beginPath(); g2.arc(X, Y, r || 4.5, 0, 7); g2.fill(); g2.restore();
+        return [X, Y];
+      }
+      DOTS.forEach(d => dot(d.gb, d.tps, cssVar("--accent2", "#45e0b8")));
+
+      // Qwen3-8B bf16 prediction at current BW: ceiling & expectation markers
+      const predCeil = BW / m.weightGB, predExp = 0.65 * predCeil;
+      const [mx, my] = dot(m.weightGB, predExp, cssVar("--accent", "#b48cff"), 6);
+      g2.save(); g2.fillStyle = cssVar("--text", "#e6ecf5"); g2.font = "10px system-ui";
+      g2.fillText(`${m.name} ~${predExp.toFixed(1)}`, mx + 8, my); g2.restore();
+
+      roofLegend.innerHTML =
+        `<span><span class="legend-dot" style="background:${cssVar("--text-dim", "#8391ab")}"></span>ceiling BW/bytes</span>` +
+        `<span><span class="legend-dot" style="background:${cssVar("--track-llm", "#62c3ff")}"></span>×0.65 expectation</span>` +
+        `<span><span class="legend-dot" style="background:${cssVar("--accent2", "#45e0b8")};border-radius:50%"></span>measured MBU dots</span>` +
+        `<span><span class="legend-dot" style="background:${cssVar("--accent", "#b48cff")};border-radius:50%"></span>${m.name} prediction</span>`;
+
+      roofOut.innerHTML = `at BW = <b>${BW} GB/s</b>, ${m.name} bf16: ceiling <b>${predCeil.toFixed(2)}</b> tok/s, ` +
+        `expect <b>${predExp.toFixed(1)}</b> tok/s (×0.65). ` +
+        (Math.abs(BW - MEASURED_BW) < 1 ? `On the Spark's 273 GB/s bus, that's the frozen 16.67 ceiling / ~10.8 expected.` :
+          `Drag back to 273 for the Spark.`) +
+        ` Measured MBU dots land 60.3–74.7% — on the ×0.65 line, not the ceiling.`;
+    }
+
+    function redraw() { drawKvBars(); drawRoofline(); }
+
+    // toggles (single anchor model — no model toggle; attention + dtype only)
+    document.getElementById("attn-toggle").querySelectorAll("button").forEach(b => {
+      b.addEventListener("click", () => {
+        attnMode = b.dataset.a;
+        b.parentElement.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+        redraw();
+      });
+    });
+    document.getElementById("dtype-toggle").querySelectorAll("button").forEach(b => {
+      b.addEventListener("click", () => {
+        kvBytes = +b.dataset.d;
+        b.parentElement.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+        redraw();
+      });
+    });
+    [ctxCtrl, batchCtrl, bwCtrl].forEach(c => c.onInput(redraw));
+    redraw();
+    window.addEventListener("resize", redraw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redraw, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ
+     ========================================================================== */
+  renderQuiz("quiz-decoding", [
+    {
+      q: "The KV cache for Qwen3-8B at bf16 costs how many bytes per token (all 36 layers)?",
+      num: 147456, tol: 0, unit: "B",
+      why: "$2 \\cdot L(36) \\cdot H_{kv}(8) \\cdot d_{head}(128) \\cdot b(2) = 147{,}456$ B $= 144$ KiB/token [DER, constants §4]. The classic error is using $H = 32$ query heads instead of $H_{kv} = 8$ K/V heads, which overcounts by exactly $4\\times$."
+    },
+    {
+      q: "In the KV-cache formula the head factor is $H_{kv}$, not $H$. Why?",
+      opts: [
+        "It's just shorthand — $H_{kv}$ and $H$ are the same 32 heads",
+        "Grouped-query attention shares K/V across query heads, so only $H_{kv} = 8$ distinct K/V vectors are cached per position, not $H = 32$",
+        "The cache stores queries too, and $H_{kv}$ counts those",
+        "$H_{kv}$ is a typo the field never corrected"
+      ],
+      a: 1,
+      why: "GQA gives Qwen3-8B 32 query heads but only 8 K/V heads. The cache holds keys and values, so it scales with $H_{kv} = 8$. Using $H = 32$ is the single most common KV error and inflates the cache 4× — the very saving GQA was designed to capture (constants §4)."
+    },
+    {
+      q: "On the Spark's 273 GB/s bus, the bf16 Qwen3-8B decode *ceiling* (weights 16.38 GB, 100% MBU) is about how many tok/s?",
+      num: 16.67, tol: 0.5, unit: "tok/s",
+      why: "$273 / 16.38 = 16.67$ tok/s [DER, constants §6.7]. This is the ceiling — what you'd hit at 100% memory-bandwidth utilization, which no real system reaches. It is NOT what you'll actually observe."
+    },
+    {
+      q: "And the *expected* bf16 Qwen3-8B decode throughput, applying the ×0.65 MBU coefficient?",
+      num: 10.8, tol: 1.5, unit: "tok/s",
+      why: "$0.65 \\times 16.67 \\approx 10.8$ tok/s [EST, constants §6.7]. Real dense batch-1 systems land at 60–75% MBU, so the expectation sits below the 16.67 ceiling. Confusing the ceiling for the expectation is the trap the worked box warns against — they are ~6 tok/s apart."
+    },
+    {
+      q: "What does raising the sampling temperature actually change about the token distribution?",
+      opts: [
+        "It reorders the tokens so a different one becomes most likely",
+        "It only rescales the gaps between probabilities — the ranking is untouched, so the top token is identical at every temperature",
+        "It adds fresh randomness that wasn't in the logits",
+        "It truncates the tail like top-p does"
+      ],
+      a: 1,
+      why: "Temperature divides every logit by the same positive constant — a monotone transform that stretches or squeezes gaps but never changes order. The 'temperature adds randomness' box corrects exactly this: the top-ranked token is the same at $T_{samp} = 0.1$ and $2.0$."
+    },
+    {
+      q: "Your decode heuristic predicts a model needs 234% of the Spark's 273 GB/s bus bandwidth. The correct conclusion is:",
+      opts: [
+        "Your arithmetic is wrong somewhere",
+        "It's measurement noise — rerun the benchmark",
+        "The model is a mixture-of-experts: only a fraction of its parameters are active per token, so far fewer weight bytes are actually read",
+        "The published bandwidth spec must be understated"
+      ],
+      a: 2,
+      why: "More than 100% of peak bandwidth is physically impossible, so the byte count is wrong — the model is an MoE (gpt-oss-20B: ~3.6B of ~20.9B params active). The heuristic assumes every weight is read per token; MoE breaks that assumption. 'If your heuristic predicts >100% of peak bandwidth, your model is an MoE' (constants §6.6)."
+    },
+    {
+      q: "Prefill and decode run the same weights but hit opposite bottlenecks. Which is which?",
+      opts: [
+        "Prefill is bandwidth-bound; decode is compute-bound",
+        "Both are compute-bound; decode is just slower",
+        "Prefill is compute-bound ($S_{fwd}$ large, above the ridge); decode is bandwidth-bound ($S_{fwd} = 1$, far below it)",
+        "Both are bandwidth-bound; prefill just has more tokens"
+      ],
+      a: 2,
+      why: "Arithmetic intensity $I = S_{fwd}$. Prefill ($S_{fwd} = 2048$) sits above the ridge → compute-bound; decode ($S_{fwd} = 1$) sits 227–458× below it → bandwidth-bound. Same machine, opposite verdicts — measured on his box as decode 20.5→368 tok/s under batching while prefill stayed flat (constants §6.5, §6.7)."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

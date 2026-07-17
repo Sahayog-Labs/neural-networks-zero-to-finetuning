@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>25. Architecture Is Inductive Bias — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the "belief installed / mechanism / fails when" table needs to
+   scroll on narrow screens rather than squeeze — it's five rows of prose, not
+   a symbol ledger, so it doesn't use table.ledger's compact styling. */
+.arch-table-wrap { overflow-x: auto; }
+.arch-table { width: 100%; border-collapse: collapse; min-width: 640px; }
+.arch-table th, .arch-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; font-size: .93rem; }
+.arch-table th { color: var(--text-dim); font-weight: 600; white-space: nowrap; }
+.arch-table td:first-child { font-weight: 700; white-space: nowrap; }
+.arch-table tr.thesis td { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+</style>
+</head>
+<body data-page="25-architecture-inductive-bias.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Architecture Is Inductive Bias</h1>
+    <p class="subtitle">Pages 1–24 taught you one architecture: the plain MLP, dense layer after dense layer. It
+      trained (page 17), it fit in a memory ledger (page 18), it fine-tuned for real (page 24). So why does every
+      model you actually use — the U-Net under your ComfyUI workflow, the transformer under every LLM — look
+      nothing like it? Not because an MLP can't represent what they represent. Because it can't <em>learn</em> it
+      from the data and compute you actually have. This page makes that distinction precise, then prices it.</p>
+
+    <!-- ===================== PREDICT (opens the page) ===================== -->
+    <!-- on-page-resolution: answered by the killer worked example immediately below it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A 224×224 RGB image goes into a fully-connected layer with 1,000 hidden units. A conv layer with 64 filters
+      of size 3×3×3 processes the same image. Which has more parameters, and by roughly what factor —
+      <b>10×, 1,000×, or 100,000×</b>? Commit to one before you scroll.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>A hard-coded prejudice about your data</h2>
+    <p>An architecture is a hard-coded prejudice about your data — a shortcut if you're right and a wall if you're
+      wrong. Here's the sentence that matters for you specifically: an MLP is a <b>universal approximator</b>, so
+      architecture is <em>never</em> about what a network can represent. It's entirely about what it can
+      <b>learn from finite data in finite time</b>. Every architectural choice below is a bet about your data,
+      installed before training starts.</p>
+
+    <div class="box rule"><span class="box-title">📐 The universal approximation theorem, stated then punctured</span>
+      For a wide-enough hidden layer, some choice of weights makes a network match any continuous function to
+      arbitrary precision:
+      $$\Big|\sum_{i=1}^{N} w_i\,\phi\!\left(\mathbf{a}_i^\top\mathbf{x}+b_i\right)-f(\mathbf{x})\Big|<\varepsilon$$
+      That's an <b>existence</b> claim — it says weights exist, and says nothing about how large $N$ has to be,
+      whether SGD ever finds those weights, or how much data it takes to find them. Architecture is entirely about
+      those three questions. Representability was never the issue.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$N$</td><td>number of hidden units — how wide the theorem needs the layer to be</td><td>scalar, unbounded</td><td>the theorem's free parameter</td></tr>
+        <tr><td>$w_i$</td><td>output weight for hidden unit $i$</td><td>scalar</td><td>would-be learned parameter</td></tr>
+        <tr><td>$\phi(\cdot)$</td><td>generic activation (notation §4.1 — not $\sigma$ unless the argument is explicit)</td><td>elementwise</td><td>fixed nonlinearity</td></tr>
+        <tr><td>$\mathbf{a}_i$</td><td>hidden unit $i$'s input-weight vector</td><td>$(d,)$</td><td>would-be learned parameter</td></tr>
+        <tr><td>$\mathbf{x}$</td><td>the input</td><td>$(d,)$</td><td>given</td></tr>
+        <tr><td>$b_i$</td><td>hidden unit $i$'s bias</td><td>scalar</td><td>would-be learned parameter</td></tr>
+        <tr><td>$f(\mathbf{x})$</td><td>the target function being approximated</td><td>scalar (or vector, applied per output)</td><td>given, usually unknown</td></tr>
+        <tr><td>$\varepsilon$</td><td>the approximation tolerance</td><td>scalar $>0$</td><td>chosen arbitrarily small</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===================== KILLER WORKED EXAMPLE (resolves the PREDICT) ===================== -->
+    <h2>The killer worked example</h2>
+    <p>Same image, two layers, count the parameters each one owns.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — the 84,000× gap</span>
+      <p><b>Dense layer 1, on the flattened image.</b> Input dimension $224\times224\times3=150{,}528$. A dense
+        layer to 1,000 hidden units owns one weight per (input, output) pair:
+        $$150{,}528\times1{,}000=150{,}528{,}000\approx1.5\times10^{8}\ \text{params}\ \ (\approx301\text{ MB in bf16})$$</p>
+      <p><b>Conv layer, 64 filters of $3\times3\times3$.</b> A filter owns one weight per (input channel, kernel
+        position) pair, shared across every spatial location, plus one bias per filter:
+        $$64\times(3\times3\times3)+64 = 64\times27+64 = 1{,}728+64=\mathbf{1{,}792}\ \text{params}$$</p>
+      <p>$$\frac{150{,}528{,}000}{1{,}792} = \mathbf{84{,}000\times}$$
+        Exactly — $1{,}792\times84{,}000=150{,}528{,}000$. <b>1,792 vs 150,528,000 — an 84,000× gap, in one
+        layer.</b> On the PREDICT above, the honest closest bucket is <b>100,000×</b> (the real ratio, 84,000×,
+        sits between the 1,000× and 100,000× options but an order of magnitude nearer the top one on a log
+        scale).</p>
+      <p>The lesson isn't "conv is smaller." It's <em>what the smallness buys</em>: the FC layer <em>could</em>
+        rediscover one edge detector at all 50,176 pixel positions independently, from data, if you gave it enough
+        examples and enough time. The conv layer is <em>handed</em> translation-equivariance — the same 27-weight
+        stencil is reused everywhere by construction, not learned into place.</p>
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>side</td><td>image height = width, in pixels</td><td>scalar, px</td><td>slider / given</td></tr>
+        <tr><td>$C$</td><td>input channels</td><td>scalar (1 gray, 3 RGB)</td><td>slider / given</td></tr>
+        <tr><td>hidden</td><td>FC layer's output width</td><td>scalar</td><td>slider / given</td></tr>
+        <tr><td>$C_{\text{out}}$</td><td>number of conv filters</td><td>scalar</td><td>slider / given</td></tr>
+        <tr><td>$k$</td><td>kernel side</td><td>scalar, px</td><td>slider / given</td></tr>
+        <tr><td>params$_{\text{FC}}$</td><td>$\text{side}^2\cdot C\cdot\text{hidden}$</td><td>scalar</td><td>computed</td></tr>
+        <tr><td>params$_{\text{conv}}$</td><td>$C_{\text{out}}(C\cdot k^2+1)$</td><td>scalar</td><td>computed</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===================== THE TABLE TO CITE FOREVER ===================== -->
+    <h2>The table to print once and cite forever</h2>
+    <div class="arch-table-wrap">
+      <table class="arch-table">
+        <thead><tr><th>Architecture</th><th>Belief installed</th><th>Mechanism</th><th>Fails when</th></tr></thead>
+        <tbody>
+          <tr><td>MLP</td><td>none — every input can affect every output equally</td>
+            <td>a dense weight matrix connects every input unit to every output unit</td>
+            <td>the input has structure (spatial, sequential) the dense layer must rediscover from data — needs
+              huge $N$ and huge data, as the arithmetic above just showed</td></tr>
+          <tr><td>CNN</td><td>nearby pixels are related, and the same feature can appear anywhere (locality +
+              translation-equivariance)</td>
+            <td>one small kernel, shared, slid across the input (page 26)</td>
+            <td>the relationship is long-range or non-local — needs depth to grow the receptive field far enough
+              (page 26's receptive-field grower)</td></tr>
+          <tr><td>RNN</td><td>order matters, and the same update rule applies at every step (time-invariance)</td>
+            <td>one shared weight matrix updates a hidden state, step by step (page 28)</td>
+            <td>dependencies are long-range — gradients vanish through many steps, and the step-by-step update
+              can't parallelize across time (the bottleneck that forced attention, page 28)</td></tr>
+          <tr class="thesis"><td>Transformer</td><td><b>any token may relate to any other; which ones is
+              data-dependent</b></td>
+            <td>a learned, pairwise, data-dependent weighting over every position — attention (pages 29–32)</td>
+            <td>$S$ is huge (attention costs $O(S^2)$, page 37) or the dataset is tiny (there's no bias installed
+              to lean on, so it needs scale to make up for the prior it doesn't have)</td></tr>
+          <tr><td>MoE</td><td>different inputs need different specialists, and you don't know which ahead of
+              time</td>
+            <td>a learned router sends each token to a sparse subset of expert FFNs (Part IV, page 38)</td>
+            <td>routing collapses onto a few experts, or load balances poorly — needs auxiliary losses to fix</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>The transformer row is the thesis of this page: its installed bias is <b>unusually weak</b> — "look
+      everywhere, decide what matters from the data itself" is barely a prior at all compared to a conv kernel's
+      hard-coded locality. That weakness is exactly why it needs so much data and compute to get going, and exactly
+      why, once it has them, it stops being capped by a prior that doesn't fit the task. Page 38 (Part IV) makes
+      this quantitative with real scaling-law numbers.</p>
+
+    <div class="box key"><span class="box-title">🧵 [THREAD:QWEN3-8B — the anchor, beat 5] first appearance</span>
+      Every page from here through page 36 will reuse the same fourteen frozen numbers from one real checkpoint,
+      Qwen3-8B — not a toy shape, the model whose safetensors you can `ls` on your own box. <em>What's new here:</em>
+      the reason to anchor on one model at all — in 2026 nearly every frontier open model is variations on the
+      <b>same block</b> (RMSNorm → GQA/MLA attention → RMSNorm → SwiGLU FFN, residual, RoPE). What differs between
+      models is scale, data, and training — not the architecture in this table. <em>Reopen:</em> page 35 assembles
+      that exact block; page 36 spends the anchor's full parameter count down to the last tensor.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three ways this goes wrong in your head</h2>
+
+    <div class="box warn"><span class="box-title">⚠️ "A bigger MLP can do anything a CNN can, so CNNs are just an optimization."</span>
+      True about representation (the UAT above), false about learning. Fix by arithmetic, not argument: 1,792 vs
+      150,528,000, one layer, same image. The FC layer isn't wrong, it's just handed a search problem 84,000× larger
+      than it needs to be.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "More inductive bias is better."</span>
+      Bias is a bet, not a virtue — it caps you exactly where it stops matching the data. Vision Transformers beat
+      CNNs on image classification only once pretraining data crosses roughly 100 million images
+      (<b>[EST]</b> — a folklore threshold from the ViT paper's data-scaling curves, not a frozen
+      <code>constants.md</code> figure); below that, the CNN's baked-in locality prior wins because there isn't
+      enough data to learn locality from scratch. <b>Which architecture wins flips with dataset size</b> — that is
+      the opposite of "more bias, always better."
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Architecture is where the intelligence lives."</span>
+      In 2026, nearly every frontier open model shares one block (see the thread box above). If architecture were
+      where the intelligence lived, they'd all perform identically — they don't, because what differs is scale,
+      data, and training, not the substrate. Architecture is the substrate the intelligence is built on, not the
+      intelligence itself. (Page 35 assembles the block; page 38 makes "scale, data, training" quantitative.)
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: the inductive-bias parameter counter</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag <b>image side</b> up. Watch the FC bar explode — it's quadratic in side length. Watch the conv bar not
+      move at all. That indifference to image size <em>is</em> the bias: a conv kernel's parameter count depends
+      only on its own shape, never on how big the image is.
+    </div>
+    <div class="demo">
+      <div class="demo-head">FC vs conv parameter count, log scale <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-ib-plot" height="320"></canvas>
+        <div class="controls" id="d-ib-ctrls"></div>
+        <div class="readout" id="d-ib-out">Ready.</div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/inductive_bias.py</code> — builds <code>nn.Linear(150528,1000)</code> and
+      <code>nn.Conv2d(3,64,3)</code> the way PyTorch actually would, prints <code>sum(p.numel() for p in
+      m.parameters())</code> for each, and asserts the two counts differ by the 84,000× factor you just derived by
+      hand. Watch 150,528,000 and 1,792 print from a real <code>nn.Module</code>, not a slide.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz25"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Pages 1–24 gave you the MLP, backprop, and a real fine-tune — everything here
+      assumes you own those. → Page&nbsp;26 makes the conv row of the table above mechanical (kernel, stride,
+      receptive field — what your ComfyUI U-Net is built from). → Page&nbsp;38 (Part IV) turns "the transformer's
+      bias is weak" into scaling-law arithmetic. The Qwen3-8B anchor introduced here climaxes on page&nbsp;36's full
+      parameter count.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: FC vs conv parameter count, real arithmetic, log-scale bars ---- */
+  (function () {
+    const canvas = document.getElementById("d-ib-plot");
+    const out = document.getElementById("d-ib-out");
+    const ctrls = document.getElementById("d-ib-ctrls");
+
+    const sideCtrl = makeCtrl(ctrls, { label: "image side", min: 32, max: 512, step: 8, value: 224, unit: "px", fmt: v => v.toFixed(0) });
+    const chCtrl = makeCtrl(ctrls, { label: "channels", min: 1, max: 3, step: 2, value: 3, fmt: v => v === 1 ? "1 (gray)" : "3 (RGB)" });
+    const hidCtrl = makeCtrl(ctrls, { label: "FC hidden units", min: 100, max: 4000, step: 50, value: 1000, fmt: v => v.toFixed(0) });
+    const filtCtrl = makeCtrl(ctrls, { label: "conv filters", min: 8, max: 256, step: 8, value: 64, fmt: v => v.toFixed(0) });
+    const kCtrl = makeCtrl(ctrls, { label: "kernel size", min: 1, max: 7, step: 2, value: 3, fmt: v => v.toFixed(0) + "×" + v.toFixed(0) });
+
+    const accentFC = () => vizUtils.cssVar("--bad", "#ff6b6b");
+    const accentConv = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    // The canvas background (--bg-canvas) stays dark in BOTH themes (course.css), so its
+    // text must be theme-INVARIANT too, not the page-body --text (which flips to near-black
+    // in light theme and goes near-invisible on the still-dark canvas). Reuse the same
+    // theme-invariant --plot-label the shared Plot chrome already draws its axis label with.
+    const textC = () => vizUtils.cssVar("--plot-label", "#a8b4cc");
+
+    function draw() {
+      const side = sideCtrl.get(), C = chCtrl.get(), hidden = hidCtrl.get(), filters = filtCtrl.get(), k = kCtrl.get();
+      // REAL math, live: exactly the two formulas derived above — nothing precomputed.
+      const fc = side * side * C * hidden;
+      const conv = filters * (C * k * k + 1);
+
+      const ymax = Math.max(fc, conv, 10) * 6;
+      const p = new Plot(canvas, { xmin: -1, xmax: 1, ymin: 1, ymax, ylog: true, ylabel: "parameters (log scale)" });
+      p.clear(); p.grid();
+      const g = p.g;
+
+      function bar(cx, halfW, value, color, label) {
+        const x0 = p._tx(cx - halfW), x1 = p._tx(cx + halfW);
+        const y0 = p._ty(1), y1 = p._ty(Math.max(value, 1));
+        g.save();
+        g.fillStyle = color; g.fillRect(x0, y1, x1 - x0, y0 - y1);
+        g.fillStyle = textC(); g.font = "12px system-ui"; g.textAlign = "center";
+        g.fillText(label, p._tx(cx), y0 + 16);
+        g.font = "12px Consolas, monospace";
+        g.fillText(Math.round(value).toLocaleString(), p._tx(cx), y1 - 8);
+        g.restore();
+      }
+      bar(-0.5, 0.35, fc, accentFC(), "FC layer");
+      bar(0.5, 0.35, conv, accentConv(), "conv layer");
+
+      const ratio = fc / conv;
+      // At the defaults (224, 3, 1000, 64, 3) this is EXACTLY 84,000 — the frozen
+      // worked-example number above. Round to the nearest integer everywhere else
+      // so a rounding artifact can never look like it contradicts that figure.
+      const ratioStr = Math.round(ratio).toLocaleString();
+      out.innerHTML = `FC params <b>${eng(fc, "", 4)}</b> (${Math.round(fc).toLocaleString()}) &nbsp;·&nbsp; ` +
+        `conv params <b>${Math.round(conv).toLocaleString()}</b> &nbsp;·&nbsp; ratio <b>${ratioStr}×</b>` +
+        (side === 224 && C === 3 && hidden === 1000 && filters === 64 && k === 3
+          ? ` — the default position reproduces the killer worked example exactly.`
+          : ` — drag image side back to 224 to see the frozen 84,000× figure exactly.`);
+    }
+    [sideCtrl, chCtrl, hidCtrl, filtCtrl, kCtrl].forEach(c => c.onInput(draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz25", [
+    {
+      q: "The universal approximation theorem guarantees that, for a wide-enough hidden layer —",
+      opts: [
+        "a set of weights exists that approximates the target function to any tolerance",
+        "SGD will find those weights, given enough steps",
+        "the guarantee holds even with very few hidden units",
+        "the guarantee applies to any architecture equally, not just wide MLPs"
+      ],
+      a: 0,
+      why: "It's a pure existence claim about weights — silent on whether gradient descent finds them, how large $N$ needs to be, or how much data it takes. Architecture is entirely about those three."
+    },
+    {
+      q: "A dense layer takes a $128\\times128\\times3$ image to 512 hidden units. How many weight parameters (no bias)?",
+      num: 25165824, tol: 100000, unit: "params",
+      why: "$128\\times128\\times3=49{,}152$ inputs $\\times\\,512$ outputs $=25{,}165{,}824$ — one weight per (input, output) pair."
+    },
+    {
+      q: "<code>nn.Conv2d(3, 64, kernel_size=3)</code> — how many parameters, including bias?",
+      num: 1792, tol: 0, unit: "params",
+      why: "$64\\times(3\\times3\\times3)+64 = 64\\times27+64=1{,}728+64=1{,}792$ — one 27-weight stencil per filter, shared across every spatial position, plus one bias per filter."
+    },
+    {
+      q: "A Vision Transformer (ViT) beats a CNN on image classification mainly when —",
+      opts: [
+        "the pretraining dataset is very large (roughly 100M+ images)",
+        "always — it's the newer architecture",
+        "data augmentation is turned off",
+        "the model is trained from scratch on a few thousand images"
+      ],
+      a: 0,
+      why: "Below roughly 100M images [EST], the CNN's baked-in locality/equivariance prior wins because there isn't enough data to learn locality from scratch — 'always, it's newer' is exactly the misconception that bias is a virtue rather than a bet."
+    },
+    {
+      q: "Relative to a CNN's, the transformer's inductive bias is —",
+      opts: [
+        "weaker — 'any token may relate to any other' is barely a prior at all",
+        "stronger — that's why it wins at scale",
+        "identical — both ultimately compute dot products",
+        "not applicable — inductive bias is a training-time concept, not an architectural one"
+      ],
+      a: 0,
+      why: "A conv kernel hard-codes locality and translation-equivariance; attention just says 'look everywhere, decide what matters from data.' That weakness is why it needs scale — and why it isn't capped by a prior that doesn't fit the task once it has it."
+    },
+    {
+      q: "You have 500 labeled images and pick a huge transformer from scratch. It overfits almost instantly. The best fix is to —",
+      opts: [
+        "switch to an architecture with more built-in bias (e.g. a CNN), or get substantially more data",
+        "train for many more epochs — the transformer just needs more time to generalize",
+        "make the transformer even bigger — more parameters generalize better",
+        "do nothing — transformers always win because they're the newest architecture"
+      ],
+      a: 0,
+      why: "500 images is deep in 'the prior matters' territory (misconception (b)): either install more bias by picking a CNN, or buy your way out of needing the prior with real data. More epochs or more parameters make overfitting worse, not better; 'transformers always win' is the exact misconception this page corrects."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

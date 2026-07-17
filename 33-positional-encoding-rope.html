@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>33. Positional Encoding & RoPE — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the RoPE ledgers carry KaTeX rotation matrices wider than a
+   phone. Let each table scroll inside its own box on narrow screens so the
+   page body never scrolls horizontally. Desktop is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+.rope-panels { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.rope-two { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 760px) { .rope-two { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="33-positional-encoding-rope.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture · Trig payoff #2</span>
+    <h1>Positional Encoding and RoPE</h1>
+    <p class="subtitle">Attention, you just learned, is a set operation wearing a sequence costume — it cannot tell
+      "dog bites man" from "man bites dog." This page is how we tell it the order back. The good version doesn't
+      <em>add</em> position; it <em>rotates</em> for it, and the score falls out depending only on the gap between two
+      tokens. It is the most quietly beautiful trick in the architecture, and it is one 2×2 matrix you already know.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product — the atom, beat 5]</b> · <b>[THREAD:chain-rule — the verb]</b> ·
+      <b>[THREAD:Qwen3-8B — the anchor]</b>. The RoPE score is, once more, a dot product — the same needle from
+      page&nbsp;27, now measured between two <em>rotated</em> vectors, so it reads out the angle <em>between</em> their
+      positions. And the payoff — relative position appears without the model ever computing a difference — is the chain
+      rule's cousin: <em>the algebra does the subtraction, you never write it.</em> We anchor everything on Qwen3-8B's
+      real config line, <code>rope_theta: 1000000</code>, which you have scrolled past and never decoded. By the end it
+      is obvious.
+    </div>
+
+    <!-- ==================== PREDICT ==================== -->
+    <!-- on-page resolution: answered in the "permutation-equivariant" box right
+         after the three-line proof below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Take a trained transformer and <b>delete its positional encoding entirely</b>. Now shuffle the words of a sentence
+      and feed them in. Does the output (a) <b>change unpredictably</b>, (b) come out <b>shuffled the same way</b>, or
+      (c) stay <b>identical per token</b>? Commit to one before you scroll — the three-line proof below settles it.
+    </div>
+
+    <!-- ==================== THE PROBLEM ==================== -->
+    <h2>The problem: attention has no idea what order anything is in</h2>
+    <p>You met the score matrix as $S = QK^\top$ — a table of dot products, computed all at once. Look at what is
+      <em>missing</em> from it: nowhere does the position of a token enter. $\mathbf q_i$ is a projection of
+      $\mathbf x_i$; $\mathbf k_j$ is a projection of $\mathbf x_j$; the score $\mathbf q_i\cdot\mathbf k_j$ knows the two
+      <em>contents</em> and nothing about where they sat. The FFN is position-wise too — it hits every position with the
+      same weights independently. So the whole transformer, minus positional encoding, is a <b>set</b> function in a
+      sequence costume.</p>
+
+    <p>Don't take that on faith — it's three lines. Let $P$ be an $S\times S$ permutation matrix (one $1$ per row and
+      column, zeros elsewhere; $P^\top P = I$). Permuting the input rows permutes each projection:
+      $Q' = PQ$, $K' = PK$, $V' = PV$. Then</p>
+    <p>$$S' = Q'K'^\top = (PQ)(PK)^\top = P\,(QK^\top)\,P^\top = PSP^\top,$$</p>
+    <p>row-wise softmax commutes with a consistent row/column permutation, so $A' = PAP^\top$, and finally</p>
+    <p>$$A'V' = (PAP^\top)(PV) = PA\,(P^\top P)\,V = PAV. \qquad\blacksquare$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$P$</td><td>permutation matrix — reorders the $S$ tokens</td><td>$(S,S)$</td><td>the shuffle we apply</td></tr>
+        <tr><td>$Q,K,V$</td><td>query / key / value projections of $X$</td><td>$(S,d_{\text{head}})$</td><td>page 29</td></tr>
+        <tr><td>$S{=}QK^\top$</td><td>the score matrix (pre-softmax)</td><td>$(S,S)$</td><td>page 29 — a table of dot products</td></tr>
+        <tr><td>$A$</td><td>row-softmaxed attention weights</td><td>$(S,S)$, rows sum to 1</td><td>$\operatorname{softmax}_{\text{row}}(S/\sqrt{d_{\text{head}}})$</td></tr>
+        <tr><td>$P^\top P$</td><td>$=I$ — a permutation is orthogonal</td><td>$(S,S)$</td><td>definition of $P$</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The PREDICT answer: permutation-<em>equivariant</em></span>
+      $A'V' = P\,(AV)$ — the outputs come out <b>shuffled exactly the same way</b> the inputs were (answer <b>(b)</b>).
+      Per token, nothing changed: token "bites" gets the identical output vector whether it was 2nd or 5th. So a
+      transformer with no positional signal <b>literally cannot distinguish "dog bites man" from "man bites dog."</b> A
+      CNN gets order for free from kernel geometry; an RNN gets it free from loop order. The transformer
+      <em>threw both away</em> — that was the weak-inductive-bias bet of page&nbsp;25 — and now it has to <b>buy
+      position back.</b> The rest of this page is the three ways people have paid.
+    </div>
+
+    <!-- ==================== TRANSLATION NOTE ==================== -->
+    <div class="box rule"><span class="box-title">🗺️ Translation note (read once, applies all page)</span>
+      We index <b>sequence position by $i,j$</b> (notation §3); the RoPE papers write $m,n$. We reserve
+      <b>$\theta$ for learnable parameters</b> and write a <b>geometric angle as $\vartheta$</b>; the papers overload
+      $\theta$ for both the angle <em>and</em> the frequency base. So the base you will see in configs as
+      <code>rope_theta</code> we call $b$, and the per-pair rotation frequency we write $\varphi_p$ (varphi, distinct
+      from the activation $\phi$). Same math, translated symbols — that is the durable lesson, not a symbol you're
+      failing to know.
+    </div>
+
+    <!-- ==================== THREE APPROACHES ==================== -->
+    <h2>Three ways to pay: absolute, learned, rotated</h2>
+
+    <p><b>(1) Sinusoidal absolute (2017).</b> Add a fixed vector to each token that encodes its position as a stack of
+      sines and cosines at geometrically-spaced frequencies:</p>
+    <p>$$PE_{(pos,\,2p)} = \sin\!\Big(\frac{pos}{b^{\,2p/d}}\Big),\qquad
+        PE_{(pos,\,2p+1)} = \cos\!\Big(\frac{pos}{b^{\,2p/d}}\Big).$$</p>
+    <p>It's a continuous binary counter: the fast dimensions are the ones' digit, the slow dimensions the millions'
+      digit, and together they name a position uniquely. It works, but it has two aches. It is <em>absolute</em> — the
+      model usually wants "you're three tokens behind me," which it must reconstruct from two absolute encodings — and
+      it is <em>added</em>, so position competes with meaning for room in the same vector. Panel&nbsp;A below is exactly
+      this zebra; drive its base and watch the slow columns barely move.</p>
+
+    <p><b>(2) Learned absolute (BERT, GPT-2).</b> Skip the math; just learn a lookup table of shape $(S_{\max}, d)$, one
+      row per position. Simple, and it works to $S_{\max}$. But it <b>cannot extrapolate at all</b>: position 2049 in a
+      model trained to 2048 is a literally untrained, random vector. This is precisely why GPT-2 could not be
+      context-extended after the fact and RoPE-based models can be.</p>
+
+    <!-- ==================== ROPE ==================== -->
+    <h2>(3) RoPE — 2026's default, and it's the rotation matrix you already know</h2>
+
+    <div class="box key"><span class="box-title">🔑 The whole idea in one sentence</span>
+      <b>RoPE doesn't add position — it rotates the vector by an angle proportional to its position.</b> Two tokens'
+      dot product then depends only on the <em>angle between them</em>, which is the <em>difference</em> of their
+      positions. You get relative position for free, out of the geometry, without ever computing a difference.
+    </div>
+
+    <p>Mechanism. Split $\mathbf q\in\mathbb R^{d_{\text{head}}}$ into $d_{\text{head}}/2$ consecutive 2-D pairs. Rotate
+      pair $p$ by an angle equal to the position $i$ times a per-pair frequency $\varphi_p$:</p>
+    <p>$$\begin{pmatrix} q'_{2p} \\ q'_{2p+1}\end{pmatrix}
+        = \underbrace{\begin{pmatrix}\cos i\varphi_p & -\sin i\varphi_p \\[2pt] \sin i\varphi_p & \ \ \cos i\varphi_p\end{pmatrix}}_{\displaystyle \text{the }2\times2\text{ rotation you know}}
+        \begin{pmatrix} q_{2p} \\ q_{2p+1}\end{pmatrix},
+        \qquad \varphi_p = b^{\,-2p/d_{\text{head}}}.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$i,j$</td><td>sequence positions (of the query, of the key)</td><td>$0..S{-}1$</td><td>notation §3 — papers write $m,n$</td></tr>
+        <tr><td>$p$</td><td>which 2-D pair we're rotating</td><td>$0..d_{\text{head}}/2-1 = 0..63$</td><td>$d_{\text{head}}=128$ [VP]</td></tr>
+        <tr><td>$\varphi_p$</td><td>that pair's angular frequency (rad per token)</td><td>$b^{-2p/d_{\text{head}}}$</td><td>the design knob</td></tr>
+        <tr><td>$b$</td><td>the RoPE base, config <code>rope_theta</code></td><td>$1{,}000{,}000$ [VP]</td><td>constants §1.1</td></tr>
+        <tr><td>$R_i$</td><td>block-diagonal rotation for position $i$ (all 64 pairs)</td><td>$(d_{\text{head}},d_{\text{head}})$</td><td>stack of the 2×2 blocks</td></tr>
+      </tbody>
+    </table>
+
+    <p>Applied to $\mathbf q$ and $\mathbf k$ <b>only</b> — never $\mathbf v$, never the residual stream. That
+      restraint is the elegant part: position touches the two vectors whose dot product needs to be position-aware, and
+      leaves everything else alone. For Qwen3-8B, $d_{\text{head}}=128$ gives <b>64 rotation pairs</b>, and the whole
+      scheme has <b>zero learnable parameters</b> — it's pure geometry, computed on the fly at every layer.</p>
+
+    <h3>Why it works — write the identity out, because the identity <em>is</em> the justification</h3>
+    <p>A rotation by $i\varphi$ followed by the transpose of a rotation by $j\varphi$ is a rotation by $(j-i)\varphi$.
+      In matrix form, with $R_i$ the block-diagonal rotation for position $i$, rotations compose so that
+      $R_i^\top R_j = R_{j-i}$. Slide that into the score:</p>
+    <p>$$\big\langle R_i\mathbf q,\; R_j\mathbf k\big\rangle
+        = \mathbf q^\top R_i^\top R_j\,\mathbf k
+        = \mathbf q^\top R_{\,j-i}\,\mathbf k.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\langle R_i\mathbf q, R_j\mathbf k\rangle$</td><td>the attention score after both vectors are position-rotated</td><td>what actually enters the softmax</td></tr>
+        <tr><td>$R_i^\top R_j$</td><td>$=R_{j-i}$ — rotations compose; $R_i^\top=R_{-i}$</td><td>orthogonality of rotations</td></tr>
+        <tr><td>$\mathbf q^\top R_{\,j-i}\,\mathbf k$</td><td>the same score, now visibly a function of $(j-i)$ <b>only</b></td><td>the punchline</td></tr>
+      </tbody>
+    </table>
+
+    <p>Read the right-hand side: the positional part of the score is $R_{j-i}$ — it depends on the <b>gap</b> $j-i$ and
+      on nothing else positional. You injected <em>absolute</em> position ($i$ into the query, $j$ into the key,
+      independently and cheaply) and got <em>relative</em> position ($j-i$) out, for free, because the two rotations
+      compose into one. <b>You never computed $j-i$</b> — the algebra performed the subtraction. And because a rotation
+      preserves length ($\lVert R_i\mathbf q\rVert = \lVert\mathbf q\rVert$), position never steals magnitude from
+      meaning — the ache that sinusoidal-added encodings have. This is genuinely beautiful; Panel&nbsp;B lets you watch
+      the two readouts agree to eight decimals while you drag the positions around.</p>
+
+    <!-- ==================== FREQUENCIES ==================== -->
+    <h2>What the base $b$ actually buys — carry the arithmetic</h2>
+    <p>The frequencies span from fast to slow. The fastest pair, $p=0$, has $\varphi_0 = b^{0} = 1$ radian per token —
+      wavelength $2\pi \approx 6.28$ tokens, regardless of the base. The slowest pair, $p=63$, is where the base bites:
+      $\varphi_{63} = b^{-126/128}$. Plug in the two bases you'll meet:</p>
+
+    <div class="box worked"><span class="box-title">✍️ The slowest pair, two bases [DER]</span>
+      <b>Classic $b = 10{,}000$:</b> $\varphi_{63} = 10000^{-126/128} = 10^{-3.9375} \approx 1.155\times10^{-4}$ rad/token
+      $\;\Rightarrow\;$ wavelength $\dfrac{2\pi}{\varphi_{63}} \approx 5.44\times10^{4}$ tokens.<br>
+      <b>Qwen3-8B's $b = 1{,}000{,}000$ [VP]:</b> $\varphi_{63} = 10^{6\times(-0.984375)} = 10^{-5.90625}
+      \approx 1.24\times10^{-6}$ rad/token $\;\Rightarrow\;$ wavelength $\approx 5.06\times10^{6}$ tokens.<br>
+      Same fast pair (6.28 tokens); the slow end stretched by exactly the base ratio. Panel&nbsp;C plots both and lets
+      you slide a "your context length" line across them.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The rule the base enforces</span>
+      Raising the base stretches the <b>low</b>-frequency end and leaves the high-frequency end alone. The reason it
+      matters: the slowest pair must <b>not complete a full rotation inside your context window</b>, or two positions a
+      wavelength apart become <em>indistinguishable</em> in that pair — they alias. At $b=10^4$ the slow pair wraps
+      around every ~54k tokens (fine at 2k, marginal at 128k); at $b=10^6$ its wavelength is ~5.06M, and Qwen3-8B's
+      <code>max_position_embeddings = 40960</code> [VP] sits comfortably inside it. <b>That is the entire meaning of
+      "increase <code>rope_theta</code> for long context"</b> — the config line you've seen and never decoded.
+    </div>
+
+    <!-- ==================== DEMOS ==================== -->
+    <h2>Drive it: the zebra, the unit circle, the wrap</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Three panels, all computing the real functions above live. <b>A</b> is the sinusoidal zebra — drag the base and
+      watch the slow columns freeze. <b>B</b> is the money panel: two vectors on a unit circle, rotated by their
+      positions; drag them <em>together</em> (fixed gap) and the score does not move. <b>C</b> is aliasing — the slow
+      pair's cosine plotted out to 200k tokens, with a draggable context line. <code>code/rope_identity.py</code>
+      reproduces Panel&nbsp;B's identity in PyTorch — and then springs the <code>rotate_half</code> trap below.
+    </div>
+
+    <!-- Panel A -->
+    <div class="demo">
+      <div class="demo-head">Panel A · Sinusoidal positional encoding — the zebra <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p style="margin:0 0 8px;color:var(--text-dim);font-size:.86rem">128 positions (rows, top→bottom) × 64 sine
+          channels (columns, fast→slow left→right). Value $=\sin(pos\cdot\varphi_p)$, the real function.</p>
+        <canvas id="a-heat" height="320"></canvas>
+        <div class="controls" id="a-ctrls"></div>
+        <div class="readout" id="a-out"></div>
+      </div>
+    </div>
+
+    <!-- Panel B -->
+    <div class="demo">
+      <div class="demo-head">Panel B · The RoPE unit circle — the score knows only the gap <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="rope-two">
+          <div><canvas id="b-circle" height="340"></canvas></div>
+          <div>
+            <div class="controls" id="b-ctrls"></div>
+            <div class="readout" id="b-out" style="margin-top:8px"></div>
+          </div>
+        </div>
+        <p style="margin:10px 0 0;color:var(--text-dim);font-size:.86rem">
+          <b>The move:</b> hold the gap $\Delta = j-i$ fixed and drag the position $i$. Both arrows spin; the score
+          $\langle R_i\mathbf q, R_j\mathbf k\rangle$ <b>does not budge</b>. Change $\Delta$ and it jumps. The two
+          readouts — the score computed by actually rotating both vectors, and $\mathbf q^\top R_\Delta\mathbf k$
+          computed by rotating $\mathbf k$ by the gap alone — agree to the last digit. That equality <em>is</em>
+          $R_i^\top R_j = R_{j-i}$, verified by your own hand.</p>
+      </div>
+    </div>
+
+    <!-- Panel C -->
+    <div class="demo">
+      <div class="demo-head">Panel C · Aliasing — the slowest pair, two bases <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="c-plot" height="300"></canvas>
+        <div class="controls" id="c-ctrls"></div>
+        <div class="readout" id="c-out"></div>
+      </div>
+    </div>
+
+    <!-- ==================== GOTCHA ==================== -->
+    <div class="box warn"><span class="box-title">⚠️ The <code>rotate_half</code> gotcha that costs people days</span>
+      The paper pairs adjacent dimensions $(0,1),(2,3),\dots$. HuggingFace's <code>rotate_half</code> instead
+      <b>splits the vector in half and pairs across</b>: $(0,\,d_{\text{head}}/2),\,(1,\,d_{\text{head}}/2{+}1),\dots$
+      The two conventions are equivalent up to a dimension permutation the learned weights absorb — <em>as long as you
+      pick one and stay in it.</em> Mix them with a pretrained checkpoint and you get output that looks exactly like a
+      training bug (garbage that's <em>almost</em> coherent), with nothing in the stack trace to point at. This is a
+      genuine days-long trap; <code>code/rope_identity.py</code> shows one convention matching the checkpoint and the
+      other producing garbage from the same weights.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: long-context extension is all the same move — rescale the frequency spectrum</summary><div>
+      <p>Qwen3-8B ships <code>rope_scaling: null</code> [VP] — it is natively 40,960 and needs no trick. But when you
+        <em>do</em> push a model past its trained length, every method is the same idea in different clothing: make the
+        angles seen at position 100k <em>look like</em> angles the model saw in training.</p>
+      <ul>
+        <li><b>Position Interpolation (PI):</b> squash all positions into the trained range — divides every angle by the
+          extension factor. Cheap, but it hurts local resolution (adjacent tokens get closer angles).</li>
+        <li><b>NTK-aware:</b> raise the base instead — stretches the low frequencies, leaves the high ones roughly put,
+          so local detail survives. This is the "just bump <code>rope_theta</code>" folk move, made principled.</li>
+        <li><b>YaRN:</b> do it per band — interpolate the low-frequency pairs, leave the high-frequency pairs, and add a
+          small attention-temperature correction. Reaches ~128k with far less fine-tuning than PI.</li>
+      </ul>
+      <p>None of this changes the mechanism you just learned; it only rescales $\varphi_p$. The unifying sentence:
+        <em>long-context RoPE is spectrum engineering.</em></p>
+    </div></details>
+
+    <!-- ==================== MISCONCEPTIONS ==================== -->
+    <h2>Four traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Positional encoding tells the model the order."</span>
+      It makes order <b>recoverable</b>, not mandatory. Nothing forces a head to use it — some heads are demonstrably
+      position-agnostic and attend purely by content. The encoding supplies the signal; the model decides, per head,
+      whether to listen.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "RoPE is added to the input embeddings."</span>
+      That is sinusoidal/learned — added once, at the bottom. <b>RoPE is applied to $Q$ and $K$ only, inside every
+      attention layer, every forward pass</b>, and never to $V$ or the residual stream. In code it sits <em>between</em>
+      the projection and the score matmul: <code>q, k = apply_rope(q, k, positions)</code>, then
+      <code>scores = q @ k.transpose(-2,-1)</code>. If you're adding it to embeddings, you've built the wrong thing.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "RoPE gives unlimited context."</span>
+      It <em>extrapolates</em> better than a learned table, but it <b>degrades before it fails</b> — attention gets
+      mushy past the trained length well before it breaks outright. That gap between "degrades" and "fails" is the entire
+      reason the PI / NTK / YaRN industry exists. RoPE buys graceful decline, not a free lunch.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "A decoder-only model strictly needs positional encoding." (genuinely interesting)</span>
+      The causal mask alone breaks permutation-equivariance — token $i$ sees exactly $i$ predecessors, so it can
+      <em>count</em>. Reportedly, "NoPE" decoder-only models do learn a workable notion of position from the mask and can
+      function. Everyone ships RoPE anyway, because NoPE is reported to be worse at long context — but "the thing
+      everyone calls necessary isn't strictly necessary" is worth holding: it tells you the mask itself carries order
+      information, which is a real fact about causal attention (page 32).
+    </div>
+
+    <!-- ==================== CODE ==================== -->
+    <div class="box try"><span class="box-title">Try it — <code>code/rope_identity.py</code></span>
+      Build $R_i$ for a random $\mathbf q,\mathbf k$ and assert
+      <code>allclose(⟨R_i q, R_j k⟩, qᵀ R_(j−i) k)</code> across random $i,j$ — RoPE depends only on the relative
+      position. Then apply HF's <code>rotate_half</code> versus the adjacent-pair convention to the <em>same</em>
+      pretrained <code>q_proj</code> slice and watch one match the checkpoint and the other emit garbage. Uses
+      <code>rope_theta = 1e6</code> (constants §1.1).
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch, math</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">rope_angles</span>(d_head, base=<span class="tok-num">1_000_000</span>):        <span class="tok-com"># rope_theta = 1e6 (constants §1.1)</span></span>
+<span class="line">    p = torch.arange(<span class="tok-num">0</span>, d_head, <span class="tok-num">2</span>) / d_head</span>
+<span class="line">    <span class="tok-kw">return</span> base ** (-p)                          <span class="tok-com"># phi_p, shape (d_head/2,) = (64,)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">R_adjacent</span>(v, pos, phi):                     <span class="tok-com"># paper: pair (0,1),(2,3),...</span></span>
+<span class="line">    ang = pos * phi; c, s = torch.cos(ang), torch.sin(ang)</span>
+<span class="line">    x, y = v[..., <span class="tok-num">0</span>::<span class="tok-num">2</span>], v[..., <span class="tok-num">1</span>::<span class="tok-num">2</span>]</span>
+<span class="line">    out = torch.empty_like(v)</span>
+<span class="line">    out[..., <span class="tok-num">0</span>::<span class="tok-num">2</span>], out[..., <span class="tok-num">1</span>::<span class="tok-num">2</span>] = c*x - s*y, s*x + c*y</span>
+<span class="line">    <span class="tok-kw">return</span> out</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">rotate_half</span>(x):                             <span class="tok-com"># HF: split-half, pair (0,64),(1,65),...</span></span>
+<span class="line">    h = x.shape[-<span class="tok-num">1</span>] // <span class="tok-num">2</span>;  <span class="tok-kw">return</span> torch.cat((-x[..., h:], x[..., :h]), dim=-<span class="tok-num">1</span>)</span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">R_hf</span>(v, pos, phi):</span>
+<span class="line">    ang = torch.cat((pos*phi, pos*phi), dim=-<span class="tok-num">1</span>)</span>
+<span class="line">    <span class="tok-kw">return</span> v * torch.cos(ang) + rotate_half(v) * torch.sin(ang)</span>
+<span class="line"></span>
+<span class="line">d_head = <span class="tok-num">128</span>; phi = rope_angles(d_head)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># PART 1 — the identity holds for EITHER convention, on its own</span></span>
+<span class="line">q, k = torch.randn(d_head), torch.randn(d_head); i, j = <span class="tok-num">137</span>, <span class="tok-num">42</span></span>
+<span class="line"><span class="tok-kw">for</span> R <span class="tok-kw">in</span> (R_adjacent, R_hf):</span>
+<span class="line hl">    lhs = (R(q, i, phi) * R(k, j, phi)).<span class="tok-fn">sum</span>()   <span class="tok-com"># ⟨R_i q, R_j k⟩</span></span>
+<span class="line hl">    rhs = (q * R(k, j - i, phi)).<span class="tok-fn">sum</span>()          <span class="tok-com"># qᵀ R_(j−i) k</span></span>
+<span class="line">    <span class="tok-kw">assert</span> torch.allclose(lhs, rhs, atol=<span class="tok-num">1e-4</span>) <span class="tok-com"># the score knew only the gap</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># PART 2 — same weights, two conventions: one matches the checkpoint, one is garbage</span></span>
+<span class="line">X  = torch.randn(<span class="tok-num">24</span>, <span class="tok-num">4096</span>)                       <span class="tok-com"># a token sequence (hidden=4096)</span></span>
+<span class="line">Wq = torch.randn(d_head, <span class="tok-num">4096</span>) / <span class="tok-num">64</span>; Wk = torch.randn(d_head, <span class="tok-num">4096</span>) / <span class="tok-num">64</span></span>
+<span class="line">pos = torch.arange(<span class="tok-num">1</span>, <span class="tok-num">25</span>) * <span class="tok-num">173</span></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">scores</span>(R):                                  <span class="tok-com"># RoPE'd attention score matrix</span></span>
+<span class="line">    Q, K = X @ Wq.T, X @ Wk.T</span>
+<span class="line">    Qr = torch.stack([R(Q[t], <span class="tok-fn">int</span>(pos[t]), phi) <span class="tok-kw">for</span> t <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">24</span>)])</span>
+<span class="line">    Kr = torch.stack([R(K[t], <span class="tok-fn">int</span>(pos[t]), phi) <span class="tok-kw">for</span> t <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">24</span>)])</span>
+<span class="line">    <span class="tok-kw">return</span> (Qr @ Kr.T) / math.sqrt(d_head)</span>
+<span class="line hl">ref = scores(R_hf)                             <span class="tok-com"># the checkpoint was trained under HF's convention</span></span>
+<span class="line hl"><span class="tok-kw">assert</span> torch.allclose(ref, scores(R_hf))       <span class="tok-com"># matching convention → reproduces it exactly</span></span>
+<span class="line hl">flip = (ref.softmax(-<span class="tok-num">1</span>).argmax(-<span class="tok-num">1</span>) != scores(R_adjacent).softmax(-<span class="tok-num">1</span>).argmax(-<span class="tok-num">1</span>))</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"wrong convention flips {flip.float().mean()*100:.0f}% of attended tokens"</span>)  <span class="tok-com"># ~92%</span></span></code></pre>
+    </div>
+
+    <!-- ==================== QUIZ ==================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz33"></div>
+
+    <p style="margin-top:1.4em;color:var(--text-dim);font-size:.9rem">
+      <b>Threads &amp; cross-refs.</b> <b>[THREAD:dot-product beat 5]</b> the score is a rotated dot product depending
+      only on the angle between $\mathbf q,\mathbf k$ — reopens page&nbsp;27's similarity meter.
+      <b>[THREAD:chain-rule]</b> RoPE never <em>computes</em> a difference; the algebra ($R_i^\top R_j = R_{j-i}$)
+      performs it. <b>[THREAD:Qwen3-8B]</b> <code>rope_theta=1e6</code>, 64 pairs, native 40,960 context. Back to
+      page&nbsp;27 (cosine, the dot product); forward to page&nbsp;35 (RoPE's zero params feed the count), and to the
+      diffusion track (53–62), where a <em>different</em> sinusoidal use — the timestep embedding $t$ — reuses this
+      same fast-slow frequency stack (D-14). Previous: page&nbsp;32 (causal masking). Next: page&nbsp;34 (residuals).
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const D_HEAD = 128, N_PAIRS = 64;
+  // per-pair frequency phi_p = base^(-2p/d_head), p = 0..63
+  const phi = (p, base) => Math.pow(base, -2 * p / D_HEAD);
+
+  // small DPR-aware fit for custom canvases (mirrors Plot's logic)
+  function fit(cv) {
+    const dpr = window.devicePixelRatio || 1;
+    if (!cv.dataset.baseH) cv.dataset.baseH = cv.getAttribute("height") || 300;
+    const w = cv.clientWidth || cv.width / dpr || 600, h = +cv.dataset.baseH;
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (cv.width !== bw || cv.height !== bh) { cv.width = bw; cv.height = bh; cv.style.height = h + "px"; }
+    const g = cv.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { g, W: w, H: h };
+  }
+
+  /* ---------- Panel A: sinusoidal zebra (viz.js Heatmap) ---------- */
+  (function () {
+    const canvas = document.getElementById("a-heat");
+    const out = document.getElementById("a-out");
+    const POS = 128; // rows
+    const baseCtrl = makeCtrl(document.getElementById("a-ctrls"),
+      { label: "base b (rope_theta)", min: 3, max: 7, step: 0.05, value: 4,
+        unit: "", fmt: v => "10^" + v.toFixed(2) + " ≈ " + eng(Math.pow(10, v), "") });
+
+    const hm = new Heatmap(canvas, {
+      data: [[0]], colormap: "diverging", domain: [-1, 1],
+      cellText: false, colorbar: true, hover: false, height: 320,
+    });
+
+    function build() {
+      const base = Math.pow(10, baseCtrl.get());
+      const M = [];
+      for (let pos = 0; pos < POS; pos++) {
+        const row = [];
+        for (let p = 0; p < N_PAIRS; p++) row.push(Math.sin(pos * phi(p, base))); // REAL sin(pos*phi_p)
+        M.push(row);
+      }
+      hm.setData(M);
+      // wavelength of slowest pair p=63, and how many full cycles it does over 128 tokens
+      const wl = 2 * Math.PI / phi(63, base);
+      const cyc = POS / wl;
+      out.innerHTML = `slowest pair (p=63) wavelength <b>${eng(wl, "tokens")}</b> · ` +
+        `it completes <b>${cyc.toFixed(4)}</b> of a cycle across these 128 tokens ` +
+        `— <b>${cyc < 0.02 ? "essentially frozen" : "visibly turning"}</b>. Raising b freezes the slow (right) columns.`;
+    }
+    baseCtrl.onInput(build);
+    build();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(build, 0));
+  })();
+
+  /* ---------- Panel B: RoPE unit circle (custom canvas) ---------- */
+  (function () {
+    const canvas = document.getElementById("b-circle");
+    const out = document.getElementById("b-out");
+    // fixed base (un-rotated) unit vectors q, k at these angles
+    const PHI_Q = 20 * Math.PI / 180, PHI_K = 75 * Math.PI / 180;
+    const qBase = [Math.cos(PHI_Q), Math.sin(PHI_Q)];
+    const kBase = [Math.cos(PHI_K), Math.sin(PHI_K)];
+    const rot = (v, a) => [v[0] * Math.cos(a) - v[1] * Math.sin(a), v[0] * Math.sin(a) + v[1] * Math.cos(a)];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1];
+
+    const iCtrl = makeCtrl(document.getElementById("b-ctrls"),
+      { label: "position i (drag me!)", min: 0, max: 200, step: 1, value: 8, fmt: v => v.toFixed(0) });
+    const dCtrl = makeCtrl(document.getElementById("b-ctrls"),
+      { label: "gap Δ = j − i", min: -40, max: 40, step: 1, value: 5, fmt: v => v.toFixed(0) });
+    const pCtrl = makeCtrl(document.getElementById("b-ctrls"),
+      { label: "pair p", min: 0, max: 63, step: 1, value: 3, fmt: v => v.toFixed(0) });
+    const bCtrl = makeCtrl(document.getElementById("b-ctrls"),
+      { label: "base b", min: 3, max: 7, step: 0.05, value: 4, unit: "", fmt: v => "10^" + v.toFixed(2) });
+
+    function draw() {
+      const { g, W, H } = fit(canvas);
+      const i = iCtrl.get(), D = dCtrl.get(), p = pCtrl.get(), base = Math.pow(10, bCtrl.get());
+      const j = i + D, ph = phi(p, base);
+      // REAL rotations & dot products
+      const Rq = rot(qBase, i * ph), Rk = rot(kBase, j * ph);
+      const scoreDirect = dot(Rq, Rk);                 // ⟨R_i q, R_j k⟩
+      const RgapK = rot(kBase, D * ph);
+      const scoreIdentity = dot(qBase, RgapK);         // qᵀ R_Δ k
+
+      const accent = cssVar("--accent", "#b48cff");
+      const kcol = "#e8934a", faint = cssVar("--text-dim", "#8391ab"),
+            border = cssVar("--plot-border", "#3b4a6b"), txt = cssVar("--text", "#dce3f0");
+      const cx = W * 0.5, cy = H * 0.52, r = Math.min(W, H) * 0.38;
+      g.clearRect(0, 0, W, H);
+      // circle + axes
+      g.strokeStyle = border; g.lineWidth = 1;
+      g.beginPath(); g.arc(cx, cy, r, 0, 2 * Math.PI); g.stroke();
+      g.beginPath(); g.moveTo(cx - r - 8, cy); g.lineTo(cx + r + 8, cy);
+      g.moveTo(cx, cy - r - 8); g.lineTo(cx, cy + r + 8); g.stroke();
+      // faint base vectors
+      const arrow = (v, col, wdt, lbl) => {
+        const ex = cx + v[0] * r, ey = cy - v[1] * r;
+        g.strokeStyle = col; g.fillStyle = col; g.lineWidth = wdt;
+        g.beginPath(); g.moveTo(cx, cy); g.lineTo(ex, ey); g.stroke();
+        const ang = Math.atan2(ey - cy, ex - cx);
+        g.beginPath(); g.moveTo(ex, ey);
+        g.lineTo(ex - 9 * Math.cos(ang - 0.4), ey - 9 * Math.sin(ang - 0.4));
+        g.lineTo(ex - 9 * Math.cos(ang + 0.4), ey - 9 * Math.sin(ang + 0.4));
+        g.closePath(); g.fill();
+        if (lbl) { g.font = "12px system-ui"; g.fillText(lbl, ex + 6 * Math.cos(ang), ey + 6 * Math.sin(ang) - 4); }
+      };
+      g.globalAlpha = 0.32; arrow(qBase, accent, 1.5, ""); arrow(kBase, kcol, 1.5, ""); g.globalAlpha = 1;
+      arrow(Rq, accent, 3, "R_i q"); arrow(Rk, kcol, 3, "R_j k");
+
+      const deg = a => (Math.atan2(a[1], a[0]) * 180 / Math.PI).toFixed(1);
+      out.innerHTML =
+        `i = <b>${i}</b>, j = i+Δ = <b>${j}</b>, pair p=${p}, φ<sub>p</sub> = <b>${ph.toExponential(3)}</b> rad/tok<br>` +
+        `⟨R<sub>i</sub>q, R<sub>j</sub>k⟩ &nbsp;= <b>${scoreDirect.toFixed(8)}</b><br>` +
+        `qᵀ R<sub>Δ</sub> k &nbsp;&nbsp;&nbsp;&nbsp;= <b>${scoreIdentity.toFixed(8)}</b><br>` +
+        `<span style="color:${Math.abs(scoreDirect - scoreIdentity) < 1e-9 ? 'var(--good,#5fbf7f)' : 'var(--bad,#e5687a)'}">` +
+        `they agree (identity R<sub>i</sub><sup>⊤</sup>R<sub>j</sub>=R<sub>j−i</sub>) — the score depends only on Δ=${D}.</span>`;
+    }
+    [iCtrl, dCtrl, pCtrl, bCtrl].forEach(c => c.onInput(draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    window.addEventListener("resize", () => setTimeout(draw, 60));
+  })();
+
+  /* ---------- Panel C: aliasing plot (Plot) ---------- */
+  (function () {
+    const canvas = document.getElementById("c-plot");
+    const out = document.getElementById("c-out");
+    const ctxCtrl = makeCtrl(document.getElementById("c-ctrls"),
+      // step 40 makes Qwen3-8B's frozen max_position_embeddings = 40,960 [VP]
+      // exactly reachable (40960 = 1000 + 999·40); grouped-integer readout so the
+      // anchor prints as "40,960", not eng()'s rounded "41 k".
+      { label: "your context length", min: 1000, max: 200000, step: 40, value: 40960,
+        unit: "tokens", fmt: v => Math.round(v).toLocaleString() });
+
+    function draw() {
+      const p = new Plot(canvas, { xmin: 0, xmax: 200000, ymin: -1.15, ymax: 1.15,
+        xlabel: "position i (tokens)", ylabel: "cos(i · φ₆₃)" });
+      p.clear(); p.grid();
+      const phLo = phi(63, 1e4), phHi = phi(63, 1e6);
+      const xs = [], yLo = [], yHi = [];
+      for (let x = 0; x <= 200000; x += 500) { xs.push(x); yLo.push(Math.cos(x * phLo)); yHi.push(Math.cos(x * phHi)); }
+      p.trace(xs, yLo, "#e5687a", 2);                       // b=1e4 wraps
+      p.trace(xs, yHi, cssVar("--accent", "#b48cff"), 2.5); // b=1e6 barely turns
+      p.hline(0, "#555", [3, 3]);
+      const cx = ctxCtrl.get();
+      p.vline(cx, cssVar("--text-dim", "#8391ab"), [5, 4]);
+      const wlLo = 2 * Math.PI / phLo, wlHi = 2 * Math.PI / phHi;
+      const cycLo = cx / wlLo, cycHi = cx / wlHi;
+      out.innerHTML =
+        `<span style="color:#e5687a">■</span> b=10⁴: wavelength <b>${eng(wlLo, "tok")}</b>, ` +
+        `wraps <b>${cycLo.toFixed(2)}×</b> inside your context — <b>${cycLo > 1 ? "ALIASED" : "ok"}</b>. &nbsp; ` +
+        `<span style="color:${cssVar("--accent", "#b48cff")}">■</span> b=10⁶: wavelength <b>${eng(wlHi, "tok")}</b>, ` +
+        `wraps <b>${cycHi.toFixed(3)}×</b> — <b>safe</b>. That is what <code>rope_theta: 1000000</code> buys.`;
+    }
+    ctxCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    window.addEventListener("resize", () => setTimeout(draw, 60));
+  })();
+
+  /* ---------- Quiz ---------- */
+  renderQuiz("quiz33", [
+    {
+      q: "Delete a transformer's positional encoding and shuffle a sentence's words. The output is:",
+      opts: [
+        "unpredictably different",
+        "the same outputs, shuffled the same way (permutation-equivariant)",
+        "identical per token, in original order",
+        "all zeros"
+      ],
+      a: 1,
+      why: "The three-line proof: $A'V' = P(AV)$. Attention + position-wise FFN is permutation-equivariant, so it cannot tell 'dog bites man' from 'man bites dog.'"
+    },
+    {
+      q: "RoPE is applied to:",
+      opts: [
+        "the input embeddings, once at the bottom",
+        "$Q$, $K$, and $V$ inside every layer",
+        "$Q$ and $K$ only, inside every attention layer",
+        "the residual stream between blocks"
+      ],
+      a: 2,
+      why: "RoPE rotates $Q$ and $K$ only — never $V$, never the residual stream — and it happens inside every attention layer, between the projection and the score matmul. Adding it to embeddings (option 1) is the sinusoidal/learned scheme."
+    },
+    {
+      q: "Qwen3-8B's RoPE base (config <code>rope_theta</code>) is:",
+      num: 1000000, tol: 0, unit: "",
+      why: "$b = 1{,}000{,}000 = 10^6$ [VP], constants §1.1 — the value that stretches the slow pair's wavelength to ~5.06M tokens, well past the 40,960 context."
+    },
+    {
+      q: "How many RoPE rotation pairs does a head with $d_{\\text{head}} = 128$ have?",
+      num: 64, tol: 0, unit: "pairs",
+      why: "RoPE rotates consecutive 2-D pairs, so the count is $d_{\\text{head}}/2 = 128/2 = 64$ [DER]."
+    },
+    {
+      q: "The RoPE score $\\langle R_i\\mathbf q, R_j\\mathbf k\\rangle$ depends on:",
+      opts: [
+        "the absolute positions $i$ and $j$ separately",
+        "the relative position $j-i$ only",
+        "neither position — it's position-free",
+        "the product $i \\cdot j$"
+      ],
+      a: 1,
+      why: "$\\langle R_i\\mathbf q, R_j\\mathbf k\\rangle = \\mathbf q^\\top R_i^\\top R_j\\mathbf k = \\mathbf q^\\top R_{j-i}\\mathbf k$ — the rotations compose, so only the gap $j-i$ survives. You never compute the difference; the algebra does."
+    },
+    {
+      q: "Raising <code>rope_theta</code> from $10^4$ to $10^6$:",
+      opts: [
+        "makes the fast pairs rotate faster",
+        "stretches the low-frequency wavelengths so the slow pair doesn't alias inside a long context",
+        "adds learnable parameters to the model",
+        "shortens the maximum usable context"
+      ],
+      a: 1,
+      why: "The base stretches the low-frequency end (slow pairs), leaving the fast pairs put. The slow pair's wavelength goes ~54k → ~5.06M tokens, so two far-apart positions stop aliasing to the same angle. Fast pairs are unchanged; RoPE has zero parameters."
+    },
+    {
+      q: "Your from-scratch RoPE loaded with a HuggingFace checkpoint outputs garbage that looks like a training bug. Most likely:",
+      opts: [
+        "the learning rate is too high",
+        "a <code>rotate_half</code> pairing-convention mismatch (split-half vs adjacent pairs)",
+        "you forgot to apply RoPE to $V$",
+        "the base $b$ is off by one"
+      ],
+      a: 1,
+      why: "HF's <code>rotate_half</code> pairs dimensions across the two halves $(0, d/2), (1, d/2{+}1),\\dots$; the paper pairs them adjacently $(0,1),(2,3),\\dots$. Mixing conventions with pretrained weights produces almost-coherent garbage with no stack-trace clue. (RoPE is never applied to $V$, so option 3 is a different mistake.)"
+    }
+  ], "RoPE self-check");
+
+});
+</script>
+</body>
+</html>

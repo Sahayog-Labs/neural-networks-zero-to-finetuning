@@ -1,0 +1,763 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>57. Flow Matching &amp; Your Scheduler — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tag, compact data tables, shape ribbon, route-map tiles.
+     The PREDICT prompt, the callout boxes and table.ledger all come from the
+     shared components in course.css. Everything here is page-specific. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: center; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .tilewrap { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 12px; }
+  .tilecard { text-align: center; font-size: .78rem; color: var(--text-dim); }
+  .tilecard canvas { display: block; border: 1px solid var(--border); border-radius: 5px; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .tablescroll { overflow-x: auto; margin: .6em 0; }
+  .tablescroll table.data { margin: 0; }
+  .twopanel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 640px) { .twopanel { grid-template-columns: 1fr; } }
+  .panelcap { font-size: .8rem; color: var(--text-dim); text-align: center; margin: 2px 0 6px; }
+</style>
+</head>
+<body data-page="57-flow-matching-your-scheduler.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · Exhibit A: your FLUX.2 scheduler</span>
+    <h1>Flow Matching &amp; Rectified Flow: Your FLUX Scheduler, Decoded</h1>
+    <p class="subtitle">DDPM was the arc; rectified flow is the chord. One route change
+      makes the sampler a single subtraction, kills the terminal-SNR bug structurally, and
+      explains why plain <code>euler</code> is all your FLUX needs. Then you open your own
+      <code>scheduler_config.json</code> and every field has a name.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution rule: this PREDICT is answered in the "What your FLUX
+         actually does" section ("So the predict answer…") and again in the quiz. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You know this from your own bench runs: SD1.5 needs <code>dpmpp_2m</code> (or worse)
+      to look clean at 20 steps, but FLUX looks fine on plain <code>euler</code> at the same
+      step count. <strong>Same sampler budget, different sampler <em>requirement</em>.</strong>
+      Before the page tells you — guess <em>why</em>. Is FLUX (a) just a bigger model that
+      forgives sloppy integration, (b) using a fundamentally different loss, or (c) trained
+      on a path that a first-order solver can integrate almost exactly?
+    </div>
+
+    <!-- ============================ CONSTRUCTION ============================ -->
+    <h2>The construction: a straight line from data to noise</h2>
+
+    <p>Every route we have drawn so far — DDPM, cosine, the score SDE — lived on the
+      <em>circle</em> $a_t^2+b_t^2=1$. Flow matching asks a blunt question: why an arc at
+      all? Connect $\mathbf{x}_0$ (data) to $\boldsymbol\epsilon$ (noise) with the
+      <strong>shortest path there is</strong> — a straight line — and travel it at constant
+      speed:</p>
+
+    <div class="box key"><span class="box-title">🔑 The rectified-flow path and its velocity</span>
+      With the SD3/FLUX time convention <strong>$t=0$ is data, $t=1$ is noise</strong>:
+      $$\mathbf{x}_t = (1-t)\,\mathbf{x}_0 + t\,\boldsymbol\epsilon,\qquad
+        \mathbf{u}_t = \frac{d\mathbf{x}_t}{dt} = \boldsymbol\epsilon - \mathbf{x}_0.$$
+      The velocity is <strong>constant along the whole path</strong> — it does not depend on
+      $t$. Train a network to regress it:
+      $$\mathcal{L}_{\text{FM}} = \mathbb{E}_{\mathbf{x}_0,\,\boldsymbol\epsilon,\,t}
+        \big\|\,v_\theta(\mathbf{x}_t, t) - (\boldsymbol\epsilon - \mathbf{x}_0)\,\big\|_2^2.$$
+      <table class="ledger">
+        <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+        <tr><td>$\mathbf{x}_t$</td><td>the point $t$ of the way from data to noise</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>the straight-line interpolation</td></tr>
+        <tr><td>$t$</td><td>path fraction, <strong>continuous</strong> in $[0,1]$</td><td>scalar</td><td>drawn per sample (see the sampler below)</td></tr>
+        <tr><td>$\mathbf{x}_0$</td><td>the clean latent</td><td>same as $\mathbf{x}_t$</td><td>the VAE encode (p.53)</td></tr>
+        <tr><td>$\boldsymbol\epsilon$</td><td>one standard-normal draw = the noise endpoint</td><td>same</td><td>$\mathcal{N}(0,I)$</td></tr>
+        <tr><td>$\mathbf{u}_t$</td><td>the target velocity, $\boldsymbol\epsilon-\mathbf{x}_0$</td><td>same</td><td>differentiate the path in $t$</td></tr>
+        <tr><td>$v_\theta$</td><td>the network's velocity estimate</td><td>same</td><td>what we train</td></tr>
+      </table>
+    </div>
+
+    <div class="ribbon">x0            (C=32, H_lat=128, W_lat=128)      # a FLUX.2 latent, from p.53
+eps ~ N(0,I)  (32, 128, 128)                    # same shape, the noise endpoint
+t             scalar in [0,1]                   # continuous path fraction
+x_t = (1-t)*x0 + t*eps                          (32, 128, 128)   # elementwise, broadcast scalar t
+target = eps - x0                               (32, 128, 128)   # the constant velocity, same shape</div>
+
+    <p>Now the payoff that the whole reverse-process machinery of p.55 was fighting for.
+      Sampling is Euler integration of the ODE $d\mathbf{x}/dt = v_\theta$, run
+      <em>backward</em> from noise ($t=1$) to data ($t=0$):</p>
+
+    <div class="box rule"><span class="box-title">📐 The flow-matching sampler — one line</span>
+      $$\mathbf{x}_{t-\Delta} = \mathbf{x}_t - \Delta\,v_\theta(\mathbf{x}_t, t).$$
+      <strong>No $\bar\alpha_t$. No posterior mean $\tilde\mu_t$. No re-injected
+      $\sigma_t\mathbf{z}$.</strong> Compare it to the ancestral sampler on p.55 — half a
+      screen of variances and a random kick per step — and then to this: subtract a step of
+      the predicted velocity. That structural simplicity is most of why the 2026 frontier
+      switched.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Translation: "$t=0$ data, $t=1$ noise" is <em>not</em> "opposite to DDPM"</span>
+      A common claim says SD3/FLUX reversed DDPM's time. It did not — <strong>DDPM also puts
+      data at $t=0$</strong> and noise at the large-$t$ end ($t=T=1000$). Nothing is flipped.
+      Two things <em>are</em> genuinely confusing and worth naming so they never trip you:
+      (a) Lipman's original flow-matching paper puts <strong>noise</strong> at $t=0$ — the
+      opposite of the diffusers convention this course uses; and (b) the <code>diffusers</code>
+      <code>sigmas</code> array runs $1\!\to\!0$ during sampling, so the number you watch tick
+      down is $\sigma\equiv t$, not a DDPM timestep. This course holds one convention —
+      $t=0$ data, $t=1$ noise, sampling runs $t$ down — and translates everything else
+      (notation §6).
+    </div>
+
+    <p class="thread"><b>[THREAD: The chain rule · beat]</b> Same verb, newest object. The
+      target $\mathbf{u}_t=\boldsymbol\epsilon-\mathbf{x}_0$ is literally
+      $d\mathbf{x}_t/dt$ — a derivative <em>along the path</em>, the twin of p.55's
+      $v=d\mathbf{x}_t/d\psi_t$ (a derivative along the <em>arc</em>). Velocity is a
+      chain-rule object either way; flow matching just chooses the straight parameterization.</p>
+
+    <!-- ============================ WHY NOT ONE STEP ============================ -->
+    <h2>Why a straight path still is not one step</h2>
+
+    <p>Here is the trap that catches almost everyone who hears "rectified flow is straight."</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "the paths are straight lines, so one Euler step must reach the data"</span>
+      The <em>training</em> paths are straight — each $(\mathbf{x}_0,\boldsymbol\epsilon)$
+      pair rides a line. But $v_\theta$ never sees the pair; it sees only $\mathbf{x}_t$.
+      Many different $(\mathbf{x}_0,\boldsymbol\epsilon)$ pairs pass through the
+      <strong>same</strong> $\mathbf{x}_t$, so the least-squares solution is the
+      <strong>conditional average</strong>
+      $$v_\theta^\star(\mathbf{x}_t,t) = \mathbb{E}\big[\boldsymbol\epsilon - \mathbf{x}_0 \,\big|\, \mathbf{x}_t\big].$$
+      And <strong>averaging a bundle of crossing straight lines gives a curved field.</strong>
+      So "rectified flow is straight" is half true: the marginal field the network actually
+      learns is curved, which is exactly why base FM still needs several Euler steps — see
+      the two-panel demo, and drag $N$ down to watch the curvature bite.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: Reflow — how the field gets straightened for real (schnell / turbo / klein)</summary><div>
+      <p>If crossing lines are the problem, <strong>Reflow</strong> is the fix: sample many
+        $\mathbf{x}_1\sim\mathcal{N}(0,I)$, integrate the trained model down to $\hat{\mathbf{x}}_0$,
+        then <em>re-couple</em> each noise draw to the data point it actually produced and
+        retrain on those straight, non-crossing pairs. After one or two rounds the marginal
+        field is nearly straight, and now one or a few Euler steps really do land — which is
+        the ancestry of every few-step model on your disk (<code>z_image_turbo</code>,
+        FLUX <code>schnell</code>/<code>klein</code>, the "turbo" LoRAs). Distillation
+        (progressive, consistency, LADD) is the other route to the same end; both are
+        covered as production choices on p.59. The base FLUX.2-dev you fine-tune, however,
+        is <em>not</em> reflowed — its field is curved, so it wants ~20 steps.</p>
+    </div></details>
+
+    <!-- ============================ RECONCILIATION ============================ -->
+    <h2>★ The reconciliation: there is no third theory</h2>
+
+    <p>Every path in this track — the DDPM arc of p.54, the cosine schedule, the VE/Karras
+      sigmas of p.56, and now rectified flow — is a single object with two knobs. Write the
+      general path and everything becomes a table, not a set of rival theories:</p>
+
+    <p>$$\mathbf{x}_t = a_t\,\mathbf{x}_0 + b_t\,\boldsymbol\epsilon.$$</p>
+
+    <table class="ledger">
+      <tr><th>Symbol</th><th>Is</th><th>Shape / value</th><th>From</th></tr>
+      <tr><td>$a_t$</td><td>signal coefficient — how much clean latent survives</td><td>scalar function of $t$</td><td>the framework's choice</td></tr>
+      <tr><td>$b_t$</td><td>noise coefficient — how much $\boldsymbol\epsilon$ is mixed in</td><td>scalar function of $t$</td><td>the framework's choice</td></tr>
+      <tr><td>$\mathbf{x}_0,\boldsymbol\epsilon$</td><td>the two endpoints (data, noise)</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>as before</td></tr>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The $(a_t,b_t)$ route map — the whole track on one line</span>
+      <div class="tablescroll"><table class="data">
+        <thead><tr><th>Framework</th><th>$a_t$</th><th>$b_t$</th><th>Constraint</th><th>Endpoint</th></tr></thead>
+        <tbody>
+          <tr><td>DDPM / VP-SDE</td><td>$\sqrt{\bar\alpha_t}$</td><td>$\sqrt{1-\bar\alpha_t}$</td><td>$a_t^2+b_t^2=1$ (circle)</td><td>$a_T\approx0.0063$ (leaky)</td></tr>
+          <tr><td>Rectified flow</td><td>$1-t$</td><td>$t$</td><td>$a_t+b_t=1$ (chord)</td><td>$a_1=0$ exactly</td></tr>
+          <tr><td>VE / Karras</td><td>$1$</td><td>$\sigma_t$</td><td>none</td><td>$\sigma_{\max}\approx80$</td></tr>
+          <tr><td>Cosine</td><td>$\cos\psi_t$</td><td>$\sin\psi_t$</td><td>circle, uniform sweep</td><td>$a_1=0$ exactly</td></tr>
+        </tbody>
+      </table></div>
+      <strong>DDPM is the arc; rectified flow is the chord.</strong> Of course the chord
+      integrates in one Euler step better than an arc — a straight route has no curvature to
+      miss — and of course it hits $a_1=0$ <em>exactly</em>: no residual signal leaks to the
+      endpoint, so the terminal-SNR bug of p.54 is gone <em>structurally</em>, not patched
+      with <code>noise_offset</code>. ($a_T\approx0.0063$ is the same frozen leak
+      <span class="xref">[DER, constants.md §9.6]</span> you met on p.54.)
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 $v$-prediction <em>is</em> flow matching's velocity — on the circle instead of the chord</span>
+      Put the general velocity on the circular path $a_t=\cos\psi_t,\ b_t=\sin\psi_t$ and
+      differentiate with respect to the angle: you recover
+      $v = \cos\psi_t\,\boldsymbol\epsilon - \sin\psi_t\,\mathbf{x}_0$ — exactly p.55's
+      $v$-prediction target. So <strong>$v$-pred was never a DDPM-only trick; it is flow
+      matching's velocity evaluated on the arc.</strong> Rectified flow makes the same move
+      on the straight chord, where the conversions have no square roots and no small division:
+      $$\hat{\mathbf{x}}_0 = \mathbf{x}_t - t\,\hat v,\qquad
+        \hat{\boldsymbol\epsilon} = \mathbf{x}_t + (1-t)\,\hat v.$$
+      Substitute $\mathbf{x}_t=(1-t)\mathbf{x}_0+t\boldsymbol\epsilon$ and
+      $\hat v=\boldsymbol\epsilon-\mathbf{x}_0$ to check both collapse to identities — no
+      $1/\sqrt{\bar\alpha_t}$ pole anywhere.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The summary you keep</span>
+      DDPM and flow matching differ in exactly three places, and <strong>nowhere else</strong>:
+      <strong>(1)</strong> the route $(a_t,b_t)$ — arc vs chord; <strong>(2)</strong> which
+      coordinate of the rigid triangle the network reports — $\epsilon$, $\mathbf{x}_0$, or
+      $v$; <strong>(3)</strong> the loss weighting across $t$. Same endpoints, same rigid
+      triangle, same MSE. <strong>There is no third theory.</strong>
+    </div>
+
+    <!-- ============================ DEMO 1: route map ============================ -->
+    <h2>Demo — the $(a_t,b_t)$ route map</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the path fraction. Three routes leave $(1,0)$ (pure data) for $(0,1)$ (pure noise):
+      DDPM-linear and cosine bow along the unit circle, rectified flow cuts straight across as
+      the chord. The three tiles below show the <em>same</em> picture noised by each route
+      <em>at the same fraction</em>. Land on fraction $0.5$ and read the noise coefficients:
+      DDPM says $b\!\approx\!0.96$ (nearly gone), the chord says $b\!=\!0.5$. Same "half," wildly
+      different pictures — because $t$ means a different thing in each framework.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Three routes from data to noise · same endpoints, different curvature <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-route" height="320"></canvas>
+        <div class="controls" id="d-route-ctrls"></div>
+        <div class="tilewrap" id="d-route-tiles"></div>
+        <div class="readout" id="d-route-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 2: straight vs curved ============================ -->
+    <h2>Demo — why the chord needs fewer steps</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Both panels sample the <em>same</em> 8-Gaussians target from the <em>same</em> noise,
+      by Euler-integrating the <strong>closed-form marginal velocity</strong> (real math, no
+      network) of two routes: the VP/cosine arc (left, the DDPM family) and the rectified-flow
+      chord (right). Drag the step count. At $N=4$ the arc's particles fly off the curve into
+      the empty space between modes — that <em>is</em> a 4-step SD1.5 image — while the chord's
+      particles land almost on the modes. The miss-distance readout is the whole story of why
+      the field switched, in one slider.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Prob-flow ODE, arc vs chord · closed-form velocity, live Euler <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="twopanel">
+          <div><div class="panelcap">DDPM family — VP / cosine <b>arc</b></div><canvas id="d-vp" height="300"></canvas></div>
+          <div><div class="panelcap">Rectified flow — <b>chord</b></div><canvas id="d-rf" height="300"></canvas></div>
+        </div>
+        <div class="controls" id="d-ode-ctrls"></div>
+        <div class="readout" id="d-ode-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ THE CONFIG ============================ -->
+    <h2>What your FLUX actually does — open the config</h2>
+
+    <p>Two design choices turn the clean chord above into the production scheduler in your
+      <code>~/…/FLUX.2-dev/scheduler/scheduler_config.json</code>. Both are answers to "which
+      timesteps deserve the training budget?"</p>
+
+    <p><strong>1. Logit-normal timestep sampling.</strong> Uniform $t$ wastes samples at the
+      easy ends. FLUX draws $z\sim\mathcal{N}(0,1)$ and passes it through the logistic squash
+      $t=\text{logistic}(z)=1/(1+e^{-z})$, which piles the mass near $t=0.5$ — the
+      $\mathrm{SNR}\approx1$ band where composition is decided (p.54, observation 3).</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked number: two-thirds of every batch lands in the hard band</span>
+      The logistic map sends the interval $z\in(-1,1)$ to $t\in(\text{logistic}(-1),\text{logistic}(1))=(0.269,0.731)$.
+      A standard normal puts
+      $$P(-1 < z < 1) = \Phi(1)-\Phi(-1) = 0.8413 - 0.1587 = \mathbf{0.6827} \approx 68\%$$
+      of its mass in $(-1,1)$ <span class="xref">[DER]</span>. So <strong>≈68% of every
+      minibatch has $t\in(0.27,0.73)$</strong> — two-thirds of the compute spent squarely on
+      the composition band. (Uniform sampling would put that same 68% over the much wider,
+      mostly-easy $[0.16,0.84]$.) The histogram demo below lands on this number live.
+    </div>
+
+    <p><strong>2. The <code>shift</code> warp.</strong> Higher resolutions under-noise at a
+      fixed $t$ (p.54's resolution bug: more pixels average the per-pixel noise away). The fix
+      is one scalar that pushes the schedule toward the noisy end:</p>
+
+    <p>$$t' = \frac{\text{shift}\cdot t}{1 + (\text{shift}-1)\,t}.$$</p>
+
+    <div class="box worked"><span class="box-title">✍️ Your two configs, field by field</span>
+      <div class="tablescroll"><table class="data">
+        <thead><tr><th>field</th><th>diffusers default</th><th>your FLUX.2-dev</th><th>what it is</th></tr></thead>
+        <tbody>
+          <tr><td><code>shift</code></td><td>1.0</td><td><b>3.0</b></td><td>the resolution warp above</td></tr>
+          <tr><td><code>use_dynamic_shifting</code></td><td>False</td><td><b>True</b></td><td>pick <code>shift</code> from image seq-len</td></tr>
+          <tr><td><code>base_shift</code></td><td>0.5</td><td>0.5</td><td>the low end of dynamic shift</td></tr>
+          <tr><td><code>num_train_timesteps</code></td><td>1000</td><td>1000</td><td>vestigial — see the warning</td></tr>
+        </tbody>
+      </table></div>
+      Your FLUX.2-dev scheduler is <code>FlowMatchEulerDiscreteScheduler</code> with
+      <strong><code>shift</code> = 3.0 and dynamic shifting on</strong>
+      <span class="xref">[VP, hardware-ground-truth.md §4 — <code>scheduler_config.json</code>]</span>.
+      That is p.54's resolution theory shipped as production code in your own folder — not a
+      hyperparameter someone guessed.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ <code>num_train_timesteps=1000</code> is a fossil, not a chain length</span>
+      Flow matching is <strong>continuous</strong> in $t\in[0,1]$ — there is no 1000-step
+      Markov chain here. The <code>1000</code> is indexing bookkeeping inherited from DDPM
+      tooling: it only quantizes $t$ into 1000 buckets for code that expects integer
+      timesteps. Reading it as "FLUX denoises in 1000 steps" is the mistake; you sample FLUX
+      in ~20. <span class="xref">[VP: it is a real default in
+      <code>FlowMatchEulerDiscreteScheduler</code>, notation §6.]</span>
+    </div>
+
+    <p><strong>So the predict answer is (c).</strong> FLUX is not forgiving because it is big,
+      and it is not using a different loss — it is trained on a <em>straighter path</em>, and
+      a first-order solver like <code>euler</code> is nearly exact on straight lines. SD1.5's
+      DDPM arc has curvature that a plain Euler step overshoots, so it needs a higher-order
+      solver (<code>dpmpp_2m</code>) to fake the missing curvature. Same step budget; the
+      route, not the solver, was the difference.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/flow_matching_2d.py</code> — it is <code>diffusion_2d.py</code> from
+      p.54 with <strong>three lines changed</strong>: the path $(a_t,b_t)$, the regression
+      target, and the sampler. <strong><code>diff diffusion_2d.py flow_matching_2d.py</code>
+      <em>is</em> the reconciliation, in code</strong> — the whole "no third theory" claim as
+      a three-line patch. Then it sweeps $N$ from 1 to 64 for both and plots the W2 distance,
+      reproducing the demo above on the CPU in ~40 s. Also <code>cat</code> your own
+      <code>scheduler_config.json</code> and match <code>shift</code>, <code>use_dynamic_shifting</code>,
+      and <code>num_train_timesteps</code> against the table.
+    </div>
+
+    <!-- ============================ DEMO 3: timestep sampler ============================ -->
+    <h2>Demo — logit-normal timestep sampling, and the <code>shift</code> warp</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Where the training budget lands across $t$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-ts" height="260"></canvas>
+        <div class="controls" id="d-ts-ctrls"></div>
+        <div class="readout" id="d-ts-out"></div>
+      </div>
+    </div>
+
+    <p>At <code>shift</code>$=1$ (no warp) the shaded band $t\in(0.27,0.73)$ holds the frozen
+      <strong>68%</strong> — the worked number, live. Push <code>shift</code> to your
+      FLUX.2-dev value of $3.0$ and watch the mass slide toward the noisy end: that is the
+      resolution correction, moving budget to where high-res images actually need it.</p>
+
+    <!-- ============================ HONEST UNCERTAINTY ============================ -->
+    <div class="box warn"><span class="box-title">⚠️ Genuinely unsettled: is flow matching <em>better</em>, or better-<em>packaged</em>?</span>
+      Honest answer — contested, and you should hold both camps. The <strong>"same thing"</strong>
+      camp: FM is a reparameterization of the same Gaussian-path family (the table above), so
+      any win is cleaner defaults and simpler code, not new capability. The <strong>"genuinely
+      helps"</strong> camp: the chord gives zero terminal SNR for free, scales across
+      resolution with one <code>shift</code> scalar, is first-order-solvable, and distills
+      readily — and the entire 2026 frontier chose it. What is <em>not</em> in dispute: FM's
+      code is dramatically simpler and its results are at least as good. The field largely
+      stopped arguing because the practical answer is settled even while the theoretical one
+      is not.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-57"></div>
+
+    <p class="xref" style="margin-top:2em">← p.55 gave us $v$-prediction (the arc's velocity)
+      and p.56 the ODE/score view; p.54 gave the <code>shift</code> = resolution theory these
+      configs ship. → p.59 opens the full ODE-solver menu and distillation (why
+      <code>z_image_turbo</code> needs 4 steps), and p.62 turns these very knobs —
+      <code>discrete_flow_shift</code>, <code>model_prediction_type=raw</code>,
+      <code>timestep_sampling</code> — when you fine-tune diffusion on your own data.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* Standard-normal CDF via erf (Abramowitz-Stegun 7.1.26) — for the 68% readout. */
+  function erf(x) {
+    const s = x < 0 ? -1 : 1; x = Math.abs(x);
+    const t = 1 / (1 + 0.3275911 * x);
+    const y = 1 - (((((1.061405429 * t - 1.453152027) * t) + 1.421413741) * t - 0.284496736) * t + 0.254829592) * t * Math.exp(-x * x);
+    return s * y;
+  }
+  const Phi = z => 0.5 * (1 + erf(z / Math.SQRT2));
+  const logistic = z => 1 / (1 + Math.exp(-z));
+
+  /* linear-DDPM cumulative product ᾱ_t over t=0..1000 (matches p.54 / constants §9.6). */
+  function linearAbar(T, bmin, bmax) {
+    const abar = [1];
+    let ab = 1;
+    for (let t = 1; t <= T; t++) {
+      const beta = bmin + (bmax - bmin) * (t - 1) / (T - 1);
+      ab *= (1 - beta);
+      abar.push(ab);
+    }
+    return abar;
+  }
+  const ABAR = linearAbar(1000, 1e-4, 2e-2);
+
+  /* paint a small recognizable scene into a canvas of size N (shared by tiles) */
+  function paintScene(ctx, N) {
+    const g = ctx.createLinearGradient(0, 0, 0, N);
+    g.addColorStop(0, "#2a5a9a"); g.addColorStop(1, "#bcd6f0");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, N, N);
+    ctx.fillStyle = "#ffd24a"; ctx.beginPath(); ctx.arc(N * 0.72, N * 0.28, N * 0.12, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = "#31543a"; ctx.beginPath(); ctx.moveTo(0, N); ctx.lineTo(N * 0.42, N * 0.40); ctx.lineTo(N * 0.85, N); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#4a7a52"; ctx.beginPath(); ctx.moveTo(N * 0.45, N); ctx.lineTo(N * 0.78, N * 0.55); ctx.lineTo(N, N); ctx.closePath(); ctx.fill();
+  }
+
+  /* ==================== DEMO 1: the (a_t,b_t) route map ==================== */
+  (function () {
+    const canvas = document.getElementById("d-route");
+    const out = document.getElementById("d-route-out");
+    const tilesHost = document.getElementById("d-route-tiles");
+
+    const tau = makeCtrl(document.getElementById("d-route-ctrls"),
+      { label: "path fraction (0 = data → 1 = noise)", min: 0, max: 1, step: 0.01, value: 0.5, fmt: v => v.toFixed(2) });
+
+    // route (a,b) as a function of fraction f in [0,1]
+    function ddpm(f) { const t = Math.round(f * 1000); const ab = ABAR[t]; return [Math.sqrt(ab), Math.sqrt(Math.max(0, 1 - ab))]; }
+    function cosine(f) { const psi = f * Math.PI / 2; return [Math.cos(psi), Math.sin(psi)]; }
+    function rflow(f) { return [1 - f, f]; }
+
+    const cSig = () => cssVar("--accent", "#b48cff");
+    const cNoise = () => cssVar("--track-diffusion", "#ff9466");
+    const cAbar = () => cssVar("--accent2", "#54d6c4");
+
+    // three offscreen scene tiles noised per route
+    const NT = 96;
+    const scene = document.createElement("canvas"); scene.width = NT; scene.height = NT;
+    paintScene(scene.getContext("2d"), NT);
+    const src = scene.getContext("2d").getImageData(0, 0, NT, NT).data;
+    const noiseField = new Float64Array(NT * NT * 3);           // fixed noise, so only (a,b) changes as you drag
+    (function () { const rng = new NN.RNG(57123); for (let i = 0; i < noiseField.length; i++) noiseField[i] = rng.normal(0, 1); })();
+
+    const routes = [
+      { name: "DDPM-linear", fn: ddpm, color: cNoise },
+      { name: "cosine", fn: cosine, color: cAbar },
+      { name: "rectified flow", fn: rflow, color: cSig },
+    ];
+
+    // build the three tile cards once
+    const tileCanvases = routes.map(r => {
+      const card = document.createElement("div"); card.className = "tilecard";
+      const c = document.createElement("canvas"); c.width = NT; c.height = NT; c.style.width = "108px"; c.style.height = "108px";
+      const cap = document.createElement("div"); cap.innerHTML = r.name;
+      card.appendChild(c); card.appendChild(cap); tilesHost.appendChild(card);
+      return c;
+    });
+
+    function paintTile(c, a, b) {
+      const ctx = c.getContext("2d");
+      const im = ctx.createImageData(NT, NT), d = im.data;
+      for (let p = 0; p < NT * NT; p++) {
+        for (let ch = 0; ch < 3; ch++) {
+          const x0 = (src[p * 4 + ch] / 127.5) - 1;
+          const xt = a * x0 + b * noiseField[p * 3 + ch];
+          d[p * 4 + ch] = Math.max(0, Math.min(255, Math.round((xt + 1) * 127.5)));
+        }
+        d[p * 4 + 3] = 255;
+      }
+      ctx.putImageData(im, 0, 0);
+    }
+
+    function draw() {
+      const f = tau.get();
+      const p = new Plot(canvas, { xmin: -0.05, xmax: 1.08, ymin: -0.05, ymax: 1.08, xlabel: "a_t  (signal coefficient)", ylabel: "b_t  (noise coefficient)" });
+      p.clear(); p.grid();
+      // faint quarter unit circle
+      const cx = [], cy = [];
+      for (let th = 0; th <= 90; th++) { const r = th * Math.PI / 180; cx.push(Math.cos(r)); cy.push(Math.sin(r)); }
+      p.trace(cx, cy, cssVar("--plot-tick", "#8391ab"), 1);
+      // the three full routes
+      routes.forEach(rt => {
+        const xs = [], ys = [];
+        for (let g = 0; g <= 100; g++) { const ab = rt.fn(g / 100); xs.push(ab[0]); ys.push(ab[1]); }
+        p.trace(xs, ys, rt.color(), 2.5);
+      });
+      // endpoints
+      p.label(0.98, 0.02, "data (1,0)", cssVar("--plot-label", "#a8b4cc"));
+      p.label(0.0, 1.03, "noise (0,1)", cssVar("--plot-label", "#a8b4cc"));
+      // labels for routes near their midpoints
+      p.label(0.30, 0.90, "DDPM-linear", cNoise());
+      p.label(0.62, 0.72, "cosine", cAbar());
+      p.label(0.40, 0.46, "rectified flow", cSig());
+      // moving dots at the current fraction
+      const g2 = canvas.getContext("2d");
+      routes.forEach(rt => {
+        const ab = rt.fn(f);
+        const px = p._tx(ab[0]), py = p._ty(ab[1]);
+        g2.save(); g2.fillStyle = rt.color(); g2.beginPath(); g2.arc(px, py, 5, 0, 2 * Math.PI); g2.fill();
+        g2.strokeStyle = cssVar("--bg-panel", "#141c2e"); g2.lineWidth = 1.5; g2.stroke(); g2.restore();
+      });
+
+      // tiles + readout
+      let parts = [];
+      routes.forEach((rt, i) => {
+        const ab = rt.fn(f);
+        paintTile(tileCanvases[i], ab[0], ab[1]);
+        parts.push(`${rt.name}: a=<b>${ab[0].toFixed(3)}</b>, b=<b>${ab[1].toFixed(3)}</b>`);
+      });
+      out.innerHTML = `at fraction <b>${f.toFixed(2)}</b> &nbsp;·&nbsp; ${parts.join(" &nbsp;|&nbsp; ")}<br>` +
+        `same fraction, different noise coefficient <b>b</b> — that is why the timestep t is not comparable across frameworks. Endpoints agree: all three run (1,0)→(0,1).`;
+    }
+    tau.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==================== DEMO 2: straight vs curved trajectories ==================== */
+  (function () {
+    const vpCanvas = document.getElementById("d-vp");
+    const rfCanvas = document.getElementById("d-rf");
+    const out = document.getElementById("d-ode-out");
+
+    // 8-Gaussians target
+    const K = 8, R = 2.0, S2 = 0.12 * 0.12;          // mode radius, mode variance
+    const mu = [];
+    for (let k = 0; k < K; k++) { const a = 2 * Math.PI * k / K; mu.push([R * Math.cos(a), R * Math.sin(a)]); }
+
+    // fixed initial noise (shared across N and both panels) so comparison is fair
+    const NP = 320, NDRAW = 90;
+    const x1 = [];
+    (function () { const rng = new NN.RNG(8642); for (let i = 0; i < NP; i++) x1.push([rng.normal(0, 1), rng.normal(0, 1)]); })();
+
+    // route definitions: a(t), b(t), a'(t), b'(t).  t in [0,1], 0=data 1=noise.
+    // VP = the REAL linear-DDPM schedule (lumpy, stiff near the ends) — the honest
+    // "DDPM prob-flow ODE". Continuous ᾱ(t) by interpolating the frozen ABAR array;
+    // derivatives by central finite difference.
+    function abarAt(t) {
+      const x = Math.min(1000, Math.max(0, t * 1000));
+      const i = Math.floor(x), frac = x - i;
+      const lo = ABAR[i], hi = ABAR[Math.min(1000, i + 1)];
+      return lo + (hi - lo) * frac;
+    }
+    const aVP = t => Math.sqrt(abarAt(t));
+    const bVP = t => Math.sqrt(Math.max(0, 1 - abarAt(t)));
+    function fd(f, t) { const h = 1e-3, hi = Math.min(1, t + h), lo = Math.max(0, t - h); return (f(hi) - f(lo)) / (hi - lo); }
+    const VP = { a: aVP, b: bVP, da: t => fd(aVP, t), db: t => fd(bVP, t) };
+    const RF = { a: t => 1 - t, b: t => t, da: t => -1, db: t => 1 };
+
+    // closed-form marginal velocity  v = a'·E[x0|x_t] + b'·E[eps|x_t]  for the 8-Gaussian mixture
+    function velocity(x, t, R_) {
+      const a = R_.a(t), b = R_.b(t), da = R_.da(t), db = R_.db(t);
+      const Vt = a * a * S2 + b * b;                 // Var(x_t | k), isotropic
+      // responsibilities via log-softmax of -|x - a*mu_k|^2 / (2 Vt)
+      const logw = new Array(K), diff = new Array(K);
+      let mx = -Infinity;
+      for (let k = 0; k < K; k++) {
+        const dx = x[0] - a * mu[k][0], dy = x[1] - a * mu[k][1];
+        diff[k] = [dx, dy];
+        logw[k] = -(dx * dx + dy * dy) / (2 * Vt);
+        if (logw[k] > mx) mx = logw[k];
+      }
+      let Z = 0; for (let k = 0; k < K; k++) { logw[k] = Math.exp(logw[k] - mx); Z += logw[k]; }
+      // E[x0|x_t] = sum r_k ( mu_k + (a S2 / Vt)(x - a mu_k) );  E[eps|x_t] = sum r_k ( (b/Vt)(x - a mu_k) )
+      let ex0 = [0, 0], eps = [0, 0];
+      const cx0 = a * S2 / Vt, ceps = b / Vt;
+      for (let k = 0; k < K; k++) {
+        const r = logw[k] / Z;
+        ex0[0] += r * (mu[k][0] + cx0 * diff[k][0]); ex0[1] += r * (mu[k][1] + cx0 * diff[k][1]);
+        eps[0] += r * (ceps * diff[k][0]);           eps[1] += r * (ceps * diff[k][1]);
+      }
+      return [da * ex0[0] + db * eps[0], da * ex0[1] + db * eps[1]];
+    }
+
+    // Euler-integrate one particle from t=1 down to t=0 in N steps
+    function integrate(x0, N, R_) {
+      let x = [x0[0], x0[1]]; const traj = [[x[0], x[1]]];
+      const dt = 1 / N;
+      for (let i = 0; i < N; i++) {
+        const t = 1 - i * dt;
+        const v = velocity(x, t, R_);
+        x = [x[0] - dt * v[0], x[1] - dt * v[1]];
+        traj.push([x[0], x[1]]);
+      }
+      return traj;
+    }
+
+    function nearestModeDist(x) {
+      let best = Infinity;
+      for (let k = 0; k < K; k++) { const dx = x[0] - mu[k][0], dy = x[1] - mu[k][1]; const d = Math.sqrt(dx * dx + dy * dy); if (d < best) best = d; }
+      return best;
+    }
+
+    function drawPanel(canvas, R_, N) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 320, h = +(canvas.getAttribute("height") || 300);
+      canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.height = h + "px";
+      const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+      const LO = -3.2, HI = 3.2;
+      const X = v => (v - LO) / (HI - LO) * w, Y = v => h - (v - LO) / (HI - LO) * h;
+
+      g.fillStyle = cssVar("--bg-code", "#0e1626"); g.fillRect(0, 0, w, h);
+      // mode centers
+      g.fillStyle = cssVar("--good", "#5fd39a");
+      for (let k = 0; k < K; k++) { g.beginPath(); g.arc(X(mu[k][0]), Y(mu[k][1]), 4, 0, 2 * Math.PI); g.fill(); }
+
+      // trajectories (subset) + final points; metric over all particles
+      let miss = 0;
+      const trajColor = cssVar("--track-diffusion", "#ff9466");
+      const dotColor = cssVar("--accent", "#b48cff");
+      for (let i = 0; i < NP; i++) {
+        const traj = integrate(x1[i], N, R_);
+        const end = traj[traj.length - 1];
+        miss += nearestModeDist(end);
+        if (i < NDRAW) {
+          g.strokeStyle = trajColor; g.globalAlpha = 0.28; g.lineWidth = 1; g.beginPath();
+          g.moveTo(X(traj[0][0]), Y(traj[0][1]));
+          for (let j = 1; j < traj.length; j++) g.lineTo(X(traj[j][0]), Y(traj[j][1]));
+          g.stroke(); g.globalAlpha = 1;
+        }
+      }
+      // final dots
+      for (let i = 0; i < NP; i++) {
+        const end = integrate(x1[i], N, R_)[N];
+        g.fillStyle = dotColor; g.globalAlpha = 0.7; g.beginPath(); g.arc(X(end[0]), Y(end[1]), 1.7, 0, 2 * Math.PI); g.fill(); g.globalAlpha = 1;
+      }
+      return miss / NP;
+    }
+
+    const Nctrl = makeCtrl(document.getElementById("d-ode-ctrls"),
+      { label: "Euler steps N", min: 0, max: 6, step: 1, value: 2, fmt: v => [1, 2, 4, 8, 16, 32, 64][v] });
+    const NVALS = [1, 2, 4, 8, 16, 32, 64];
+
+    function draw() {
+      const N = NVALS[Nctrl.get()];
+      const mVP = drawPanel(vpCanvas, VP, N);
+      const mRF = drawPanel(rfCanvas, RF, N);
+      // reference "truth" miss at very fine N (how close the exact ODE lands)
+      const ref = (function () { let m = 0; for (let i = 0; i < NP; i++) m += nearestModeDist(integrate(x1[i], 400, RF)[400]); return m / NP; })();
+      let msg;
+      if (N <= 2) msg = `At 1–2 steps both routes only reach the blurry data mean (miss ≈ mode radius) — add steps and watch the chord pull ahead first.`;
+      else if (N <= 8) msg = `The DDPM arc still overshoots into the voids between modes; the chord has largely landed on them.`;
+      else msg = `Both have converged — but the chord got there with fewer steps.`;
+      out.innerHTML = `N = <b>${N}</b> Euler steps &nbsp;·&nbsp; mean miss-distance to nearest mode: ` +
+        `arc (DDPM) <b class="${mVP > mRF + 0.02 ? 'flag-bad' : 'flag-ok'}">${mVP.toFixed(3)}</b> &nbsp;|&nbsp; ` +
+        `chord (RF) <b class="${mRF <= mVP + 0.02 ? 'flag-ok' : 'flag-bad'}">${mRF.toFixed(3)}</b> ` +
+        `&nbsp;(N=400 reference: ${ref.toFixed(3)}). ` + msg;
+    }
+    Nctrl.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==================== DEMO 3: logit-normal timestep sampling ==================== */
+  (function () {
+    const canvas = document.getElementById("d-ts");
+    const out = document.getElementById("d-ts-out");
+
+    const shiftC = makeCtrl(document.getElementById("d-ts-ctrls"),
+      { label: "shift", min: 0.5, max: 6, step: 0.1, value: 1.0, fmt: v => v.toFixed(1) });
+
+    const NS = 40000;
+    // fixed z-draws so the histogram is stable; only the shift warp changes as you drag
+    const zs = new Float64Array(NS);
+    (function () { const rng = new NN.RNG(31459); for (let i = 0; i < NS; i++) zs[i] = rng.normal(0, 1); })();
+
+    function draw() {
+      const shift = shiftC.get();
+      const BINS = 50, hist = new Array(BINS).fill(0);
+      let band = 0;
+      for (let i = 0; i < NS; i++) {
+        let t = logistic(zs[i]);
+        t = shift * t / (1 + (shift - 1) * t);       // the resolution warp
+        if (t > 0.27 && t < 0.73) band++;
+        let b = Math.floor(t * BINS); if (b < 0) b = 0; if (b >= BINS) b = BINS - 1;
+        hist[b]++;
+      }
+      const xs = [], ys = [];
+      for (let i = 0; i < BINS; i++) { xs.push((i + 0.5) / BINS); ys.push(hist[i] / NS * BINS); }  // density
+      const ymax = Math.max(...ys, 1.05) * 1.1;
+      const p = new Plot(canvas, { xmin: 0, xmax: 1, ymin: 0, ymax, xlabel: "t  (0 = data, 1 = noise)", ylabel: "density" });
+      p.clear(); p.grid();
+      // shade the (0.27,0.73) band
+      const g = canvas.getContext("2d");
+      g.save(); g.fillStyle = cssVar("--track-diffusion", "#ff9466"); g.globalAlpha = 0.12;
+      const x0 = p._tx(0.27), x1p = p._tx(0.73), yt = p._ty(ymax), yb = p._ty(0);
+      g.fillRect(x0, yt, x1p - x0, yb - yt); g.restore();
+      p.vline(0.27, cssVar("--track-diffusion", "#ff9466"), [4, 4]);
+      p.vline(0.73, cssVar("--track-diffusion", "#ff9466"), [4, 4]);
+      // uniform reference at density 1
+      p.hline(1, cssVar("--plot-tick", "#8391ab"), [3, 3]);
+      p.label(0.02, 1.06, "uniform", cssVar("--plot-tick", "#8391ab"));
+      p.trace(xs, ys, cssVar("--accent", "#b48cff"), 2.5);
+
+      const pct = (band / NS * 100);
+      const flag = (Math.abs(shift - 1.0) < 1e-9) ? ` — matches the frozen worked number <b>68%</b>` : ``;
+      out.innerHTML = `shift = <b>${shift.toFixed(1)}</b> · mass in the composition band t ∈ (0.27, 0.73): <b>${pct.toFixed(1)}%</b>${flag}. ` +
+        `The dashed line at density 1 is uniform sampling. At shift 3.0 (your FLUX.2-dev) the peak slides toward the noisy end — the resolution correction.`;
+    }
+    shiftC.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==================== QUIZ ==================== */
+  renderQuiz("quiz-57", [
+    {
+      q: "FLUX draws its training timestep as $t=\\text{logistic}(z)$ with $z\\sim\\mathcal{N}(0,1)$ and no shift. What fraction of a minibatch lands in the composition band $t\\in(0.27,0.73)$?",
+      num: 68, tol: 3, unit: "%",
+      why: "$(0.27,0.73)$ is the image of $z\\in(-1,1)$ under the logistic map, and $P(-1<z<1)=\\Phi(1)-\\Phi(-1)=0.8413-0.1587\\approx0.6827$ — about 68%. That is the point of logit-normal sampling: concentrate compute on the SNR≈1 band where composition is decided."
+    },
+    {
+      q: "Why does plain <code>euler</code> suffice for FLUX where SD1.5 needed <code>dpmpp_2m</code> at the same step count?",
+      opts: [
+        "FLUX is a larger model, so it tolerates cruder integration",
+        "Flow matching straightened the sampling path, and a first-order solver is nearly exact on a straight line",
+        "FLUX uses an adversarial loss that removes the need for many steps",
+        "<code>euler</code> secretly runs more internal substeps for FLUX"
+      ],
+      a: 1,
+      why: "The rectified-flow route is (close to) a straight chord; Euler overshoots only where there is curvature. SD1.5's DDPM arc is curved, so it needs a higher-order solver to approximate the missing curvature. The route, not the solver or the model size, is the difference. (Distractor a is the 'bigger = more forgiving' misconception; c is the 'different loss' misconception.)"
+    },
+    {
+      q: "\"Rectified-flow paths are straight lines, so a single Euler step should reach the data.\" This is:",
+      opts: [
+        "True — that is the whole point of rectified flow",
+        "False — the network learns the conditional average of crossing lines, so the marginal field is curved",
+        "True only for latent-space models like FLUX",
+        "False — because the paths are actually arcs, not lines"
+      ],
+      a: 1,
+      why: "The training pairs ride straight lines, but $v_\\theta$ sees only $\\mathbf{x}_t$ and regresses $\\mathbb{E}[\\boldsymbol\\epsilon-\\mathbf{x}_0\\mid\\mathbf{x}_t]$ — the average of many crossing lines, which is a curved field. That is why base FM still needs several steps, and why Reflow (re-coupling pairs) exists to straighten it for the turbo/schnell models."
+    },
+    {
+      q: "Your FLUX config has <code>num_train_timesteps: 1000</code>. This means:",
+      opts: [
+        "FLUX denoises your image in 1000 sampling steps",
+        "The forward chain has 1000 Markov steps like DDPM",
+        "Vestigial indexing — flow matching is continuous in $t\\in[0,1]$; the 1000 only buckets $t$ for legacy integer-timestep code",
+        "The maximum number of LoRA training epochs"
+      ],
+      a: 2,
+      why: "Flow matching has no 1000-step chain — it is continuous on $[0,1]$. The 1000 is bookkeeping inherited from DDPM tooling that expects integer timesteps. You sample FLUX in ~20 steps; reading it as a chain length is the named trap."
+    },
+    {
+      q: "In the $(a_t,b_t)$ framework, DDPM and flow matching differ in exactly which set of things?",
+      opts: [
+        "They are fundamentally rival theories with different objectives",
+        "The route $(a_t,b_t)$, which coordinate the network reports ($\\epsilon$/$\\mathbf{x}_0$/$v$), and the loss weighting across $t$ — nothing else",
+        "The neural architecture and the dataset",
+        "DDPM uses MSE; flow matching uses an adversarial game"
+      ],
+      a: 1,
+      why: "Same endpoints, same rigid triangle, same MSE. The only degrees of freedom are the route (arc vs chord), the reported coordinate, and the per-$t$ loss weighting. There is no third theory — that is the reconciliation this page is built to. (Distractor d is the 'different loss' misconception again.)"
+    },
+    {
+      q: "$v$-prediction (from p.55) relates to flow matching how?",
+      opts: [
+        "It is a DDPM-only trick unrelated to flow matching",
+        "It is flow matching's velocity evaluated on the circular (arc) path instead of the straight chord",
+        "It is the score $\\nabla_{\\mathbf{x}}\\log p$ under another name",
+        "It only applies to the VAE, not the denoiser"
+      ],
+      a: 1,
+      why: "On the circle $a_t=\\cos\\psi_t,\\,b_t=\\sin\\psi_t$, differentiating the path gives $v=\\cos\\psi_t\\,\\boldsymbol\\epsilon-\\sin\\psi_t\\,\\mathbf{x}_0$ — exactly the $v$-pred target. $v$-pred is the arc's velocity; rectified flow is the same velocity on the chord. Same object, different route."
+    }
+  ], "Flow matching — self-check");
+
+});
+</script>
+</body>
+</html>

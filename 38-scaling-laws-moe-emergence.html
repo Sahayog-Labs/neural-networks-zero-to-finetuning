@@ -1,0 +1,702 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>38. Scaling Laws, MoE &amp; Emergence — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: the three demo panels share a toggle-row / legend idiom that
+     the shared stylesheet has no opinion about (same pattern as p.44's BPE demo). */
+  .toggle-row { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .toggle-row button {
+    padding: 7px 15px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .85rem;
+    font-family: var(--font);
+  }
+  .toggle-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .legend-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 8px 0 4px; font-size: .85rem; color: var(--text-dim); }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .legend-line { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; }
+</style>
+</head>
+<body data-page="38-scaling-laws-moe-emergence.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV — Adaptation</span>
+    <h1>Scaling Laws, MoE &amp; Emergence</h1>
+    <p class="subtitle">Why the rest of this Part exists: a base model is centuries of compute you will
+      never reproduce, so you don't rebuild one — you adapt one. This page derives the number that makes
+      that literal, then two more things worth knowing before you touch a single weight: how Mixture-of-Experts
+      trades your memory for someone else's compute, and why "emergence" is half optical illusion, half real.</p>
+
+    <div class="box predict"><span class="box-title">🔮 Predict, before you read on</span>
+      You own the DGX Spark that trained none of Qwen3-8B's 8.19 billion parameters. If you tried to
+      pretrain it <em>from scratch</em>, on your own box, starting today — would it take
+      <strong>days, years, or centuries</strong>? Commit to an order of magnitude before you scroll.
+    </div>
+
+    <p>Here's the one-sentence version of the whole page: <strong>you are about to spend five pages
+      (this one plus 39–43) learning to <em>adapt</em> a model instead of <em>build</em> one.</strong>
+      This page is why — building the base model is centuries of compute you don't have; adapting it,
+      as pages 39–43 show, is an afternoon. Everything below either quantifies that claim (scaling laws,
+      the centuries number) or teaches you to read the two loudest 2026-model-card ideas you'll meet
+      while you decide what to adapt (MoE, "emergence").</p>
+
+    <h2>Scaling laws: the most reliable fact in ML, and nobody knows why</h2>
+    <p>Plot pretraining loss against training compute on log-log axes, across ten orders of magnitude of
+      compute, and the points fall on a nearly straight line. Bigger models trained on more data reliably
+      get lower loss, smoothly, with no plateau anyone has found yet. Hoffmann et al. (2022, the
+      "Chinchilla" paper) fit that line with a three-term form:</p>
+    <p>$$L(N,D) = E + \frac{A}{N^{\alpha}} + \frac{B}{D^{\beta}}$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$L(N,D)$</td><td>pretraining cross-entropy loss</td><td>nats</td><td>what the law predicts</td></tr>
+        <tr><td>$N$</td><td>non-embedding parameter count — <strong>here, not dataset size</strong> (notation §4.1 flags $N$ as dual-use; this page always means params)</td><td>scalar, params</td><td>the model side of the budget</td></tr>
+        <tr><td>$D$</td><td>training tokens</td><td>scalar, tokens</td><td>the data side of the budget</td></tr>
+        <tr><td>$E$</td><td>irreducible loss — roughly the entropy of text itself; no model ever beats it</td><td>nats</td><td>fitted constant</td></tr>
+        <tr><td>$A,\alpha$</td><td>how fast loss falls as $N$ grows</td><td>fitted constants</td><td>Hoffmann et al. 2022</td></tr>
+        <tr><td>$B,\beta$</td><td>how fast loss falls as $D$ grows</td><td>fitted constants</td><td>Hoffmann et al. 2022</td></tr>
+      </tbody>
+    </table>
+    <p>The panel-1 demo below uses Hoffmann et al.'s own reported fit — $E\approx1.69$, $A\approx406.4$,
+      $\alpha\approx0.34$, $B\approx410.7$, $\beta\approx0.28$ — to draw the curve live. Treat those five
+      numbers honestly: they are <strong>one paper's fit to one training run's data</strong>, not constants
+      of nature. Different data mixes, tokenizers, and architectures shift them. What survives across every
+      scaling-law paper since is the <em>functional form</em> — a power law in each of $N$ and $D$ plus an
+      irreducible floor — and that is the durable, reusable idea.</p>
+
+    <div class="box rule"><span class="box-title">📐 Deriving the 6 in $C\approx6ND$</span>
+      Training compute is usually quoted as $C\approx6ND$ FLOP. Don't take the 6 on faith — it falls out of
+      counting multiply-adds:
+      <ul style="margin:8px 0 4px">
+        <li><strong>Forward pass:</strong> each parameter does about one multiply and one add per token it
+          touches $\Rightarrow \approx 2N$ FLOP/token.</li>
+        <li><strong>Backward pass:</strong> autograd needs the gradient <em>with respect to the input</em>
+          (to keep propagating backward) <em>and</em> the gradient with respect to the weight (to actually
+          update it) — two more passes of forward-sized work $\Rightarrow \approx 2\times(2N) = 4N$ FLOP/token.</li>
+      </ul>
+      $2N + 4N = 6N$ FLOP/token, and over $D$ tokens, $C \approx 6ND$. The constant isn't magic — it's
+      "one forward, one backward-through-inputs, one backward-through-weights," each costing $2N$.
+    </div>
+
+    <p>Minimize $L(N,D)$ subject to a fixed compute budget $C=6ND$ and Hoffmann et al.'s numbers give the
+      textbook answer: <strong>$D\approx20N$</strong> — for every parameter, about 20 training tokens is
+      compute-optimal. That's "Chinchilla-optimal," and it's the number every 2022-era retrospective quotes.</p>
+
+    <p><strong>Then what actually happened: nobody trains Chinchilla-optimal.</strong> $D=20N$ minimizes
+      <em>training</em> compute only. A model you'll serve billions of times pays inference cost forever,
+      so real labs minimize training <em>plus</em> inference — which pushes toward smaller models trained
+      much longer than 20 tokens/param. Meta's Llama-3-8B trained on roughly 15T tokens, about 1,900
+      tokens/param, <strong>≈95× past Chinchilla-optimal</strong> — and it is a stronger 8B than a
+      Chinchilla-optimal 8B would have been, because the extra tokens keep buying loss even after the
+      "optimal-for-training-FLOPs" point. Chinchilla is the right answer to a question ("how do I minimize
+      training compute for a fixed loss?") that almost nobody is actually asking anymore.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "Chinchilla tells you how to train a model"</span>
+      It tells you how to minimize <em>training</em> FLOPs for a target loss — nothing about inference cost,
+      which is what labs actually optimize for once a model will be served at scale. Every serious 2026 model
+      is trained far past its Chinchilla-optimal token count, on purpose. Quoting "$D=20N$" as a recipe is the
+      misconception; quoting it as "the FLOP-minimal point, which almost nobody targets" is the fact.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Scaling laws guarantee more compute makes a better model"</span>
+      They predict pretraining <em>loss</em> (cross-entropy, in nats) on the training distribution — that's
+      it. The map from "lower loss" to "more useful capability" is empirical, messy, and not part of the law.
+      A model can have lower loss and still be worse at the one task you care about.
+    </div>
+
+    <h2>★ The number that opens Part IV</h2>
+    <p>Now point $C\approx6ND$ at the model this whole course is anchored to. Qwen3-8B: $N=6{,}946{,}071{,}552$
+      non-embedding parameters <strong>[DER, constants §1.2]</strong>, trained on an estimated
+      $D\approx3.6\times10^{13}$ tokens — <strong>[EST — ~36T tokens is unpublished; constants §5 labels it
+      explicitly]</strong>.</p>
+    <div class="box worked"><span class="box-title">✍️ Worked example — how long would that take on your Spark?</span>
+      $$C \approx 6ND = 6\times6.95\times10^{9}\times3.6\times10^{13} = \mathbf{1.5\times10^{24}}\ \text{FLOP}$$
+      <strong>[EST — inherits the [EST] on $D$, constants §5]</strong>
+      Divide by a compute rate to get time. Two honest ways to do that division:
+      <ul style="margin:8px 0 4px">
+        <li><strong>Generous to the machine</strong> — assume the Spark's theoretical FP16-accumulate peak,
+          125 TFLOP/s <strong>[INF, constants §6.3]</strong>, sustained at 100% utilization forever (it never
+          is): $$\frac{1.5\times10^{24}}{1.25\times10^{14}} = 1.2\times10^{10}\ \text{s} = \mathbf{381\ years}$$
+          <strong>[DER, on an EST+INF input]</strong></li>
+        <li><strong>Realistic</strong> — the Spark's actual dense-bf16 training roofline is ~62 TFLOP/s
+          <strong>[INF, constants §6.3]</strong>, and real training runs hit maybe 40% of that, not 100%:
+          $$\frac{1.5\times10^{24}}{0.4\times6.2\times10^{13}} \approx \mathbf{1{,}900\ years}$$
+          <strong>[INF, constants §5]</strong></li>
+      </ul>
+      Notice which number is the <em>lower bound</em>: 381 years assumes the machine performs better than it
+      ever will. That makes "at least four centuries" a floor, not an exaggeration — the honesty strengthens
+      the conclusion rather than softening it.
+    </div>
+    <div class="box key"><span class="box-title">🔑 The predict, resolved</span>
+      <strong>"At least four centuries — and that assumes the machine runs at its theoretical peak, which it
+      will not. Realistically, closer to two millennia."</strong> Not days, not years — centuries, honestly
+      stated as a lower bound. <em>This is why the destination of this course is fine-tuning. You are not
+      going to build the base model — you are going to take someone's four centuries of compute and spend
+      four hours redirecting it at your problem. The next five pages are how you spend those four hours.</em>
+      <code>[THREAD:memory-ledger beat: the centuries number]</code> — every later "does it fit" beat (17.08 GB
+      LoRA, 4.93 GB QLoRA, the roofline on p.43) is downstream of this one fact: rebuilding isn't an option,
+      so the only question left is how cheaply you can redirect what already exists.
+    </div>
+
+    <h2>Mixture of Experts: the FFN, chopped into specialists</h2>
+    <p>You already counted it: the FFN is <strong>78.26% of every transformer block</strong> and
+      <strong>66.4% of the whole model</strong> <code>[THREAD:Qwen3-8B beat: FFN share, p.35/36 callback]</code>
+      — and it does something different for a Python token than for a Portuguese one. MoE's bet: instead of
+      one FFN doing everything, build many smaller FFNs ("experts") and let a tiny learned router send each
+      token to only a few of them.</p>
+    <p>$$\mathbf{y}=\sum_{e\,\in\,\text{TopK}(g(\mathbf{x}))}g_e(\mathbf{x})\,\text{FFN}_e(\mathbf{x}),
+      \qquad g(\mathbf{x})=\text{softmax}(W_r\mathbf{x})$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{x}$</td><td>this layer's input, one token</td><td>$(d_{\text{model}},1)$</td><td>residual stream</td></tr>
+        <tr><td>$W_r$</td><td>the router's weight matrix</td><td>$(N_E,d_{\text{model}})$</td><td>learned</td></tr>
+        <tr><td>$g(\mathbf{x})$</td><td>router probabilities over all experts</td><td>$(N_E,)$</td><td>$\text{softmax}(W_r\mathbf{x})$</td></tr>
+        <tr><td>$g_e(\mathbf{x})$</td><td>the routing weight given to expert $e$</td><td>scalar</td><td>one entry of $g(\mathbf{x})$</td></tr>
+        <tr><td>$\text{TopK}(\cdot)$</td><td>indices of the $K_E$ largest routing weights</td><td>set, size $K_E$</td><td>selects which experts actually run</td></tr>
+        <tr><td>$\text{FFN}_e$</td><td>the $e$-th expert — its own gate/up/down triple, exactly like the trunk's FFN</td><td>$(d_{\text{model}},1)\!\to\!(d_{\text{model}},1)$</td><td>a full FFN, per expert</td></tr>
+        <tr><td>$N_E$ / $K_E$</td><td>total experts / active experts per token</td><td>scalars</td><td>architecture choice</td></tr>
+        <tr><td>$\mathbf{y}$</td><td>this layer's output</td><td>$(d_{\text{model}},1)$</td><td>weighted sum of the selected experts</td></tr>
+      </tbody>
+    </table>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x                          (d_model, 1)</span>
+<span class="line">W_r                       (N_E, d_model)</span>
+<span class="line">g(x) = softmax(W_r x)     (N_E, 1)          # a probability over experts</span>
+<span class="line">TopK(g(x))                K_E indices        # which experts fire</span>
+<span class="line">FFN_e(x)  for e in TopK   (d_model, 1) each  # each expert is a full 3·d·d_ff FFN</span>
+<span class="line">y = Σ g_e(x)·FFN_e(x)     (d_model, 1)       # weighted sum, same shape as x in</span></code></pre>
+    </div>
+    <p><strong>The routing is per-token, per-layer</strong> — not per-sequence, and not per-topic. Say it
+      explicitly, because "expert" wrongly suggests "the French expert" or "the math expert." In practice a
+      single sentence routes its tokens through a shifting, mostly-uninterpretable mix of experts, re-decided
+      at every layer.</p>
+    <p>Most 2026 frontier MoEs also keep one <strong>shared expert</strong> that runs on <em>every</em> token
+      in addition to the routed ones. The reasoning: some processing — basic grammar, syntax, "this is
+      English" — is needed by everything, and making $K_E$ routed experts each independently rediscover it
+      wastes capacity that a single always-on expert can hold instead.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the 2026 MoE landscape — configs, sparsity, and a real disagreement between labs</summary><div>
+      <p>Verified 2026 frontier configurations (total / active parameters, both counted the way model cards
+        report them):</p>
+      <table>
+        <thead><tr><th>Model</th><th>Total</th><th>Active</th><th>Active ratio</th><th>Per-layer experts</th></tr></thead>
+        <tbody>
+          <tr><td>Kimi K2 / K2.5</td><td>1 T</td><td>32 B</td><td>3.2%</td><td>384 (8 routed + 1 shared)</td></tr>
+          <tr><td>GLM-5</td><td>744 B</td><td>40 B</td><td>5.4%</td><td>256</td></tr>
+          <tr><td>Qwen3.5</td><td>397 B</td><td>17 B</td><td>4.3%</td><td>—</td></tr>
+          <tr><td>Trinity Large</td><td>400 B</td><td>13 B</td><td>3.3%</td><td>—</td></tr>
+          <tr><td>Qwen3-Coder-Next</td><td>80 B</td><td>3 B</td><td>3.75%</td><td>—</td></tr>
+        </tbody>
+      </table>
+      <p style="color:var(--text-dim);font-size:.85rem">Reported from a 2026 model survey; treated here as
+        cited fact, not independently re-derived on-device the way the Qwen3-8B numbers are — the active
+        ratios above are this page's own arithmetic (active ÷ total) applied to those reported pairs.</p>
+      <p>The 2026 frontier converged on roughly <strong>3–5% active</strong> without agreeing on <em>how</em>
+        to get there. The clearest disagreement: Llama 4 Maverick uses <strong>2 large experts</strong>
+        per layer, while DeepSeek-V3 uses <strong>9 small experts</strong> (8 routed + 1 shared) — two
+        serious labs, opposite choices on the same axis, at the same time. Neither is obviously wrong.
+        Watching the field disagree on a first-order design parameter is worth more here than a settled
+        answer would be.</p>
+    </div></details>
+
+    <div class="box warn"><span class="box-title">⚠️ The honest MoE costs <code>[THREAD:memory-ledger beat: MoE total-vs-active]</code></span>
+      <strong>Memory is total, not active.</strong> Kimi K2 is 1T parameters — roughly 1 TB even at fp8.
+      You are not running it on a 128 GB box, full stop. MoE trades <em>your</em> memory for <em>someone
+      else's</em> compute savings — a data-center optimization that is, for local inference on a
+      fixed-memory box, actively hostile: at the same parameter <em>footprint</em>, a dense model usually
+      beats an MoE, because none of your memory sits idle waiting to be routed to. Two more honest costs:
+      load balancing is real and only partly solved (routers collapse onto a handful of favorite experts
+      without an auxiliary loss discouraging it), and <strong>fine-tuning an MoE is harder</strong> than
+      fine-tuning a dense model of the same active size — routing itself shifts under gradient updates, and
+      individual experts can starve. Forward pointer to p.40: Hugging Face implements MoE experts as raw
+      <code>nn.Parameter</code> tensors, not <code>nn.Linear</code> layers, so <code>target_modules=
+      "all-linear"</code> (p.40's LoRA default) silently <em>skips every expert</em>. PEFT's
+      <code>target_parameters=[…]</code> is what actually reaches them.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "MoE models are just more efficient"</span>
+      More <em>compute</em>-efficient per active parameter, yes. <strong>Less memory-efficient per unit of
+      capability</strong> — the total parameter count you must keep resident is the real cost, and it's the
+      number MoE architectures inflate on purpose. It's the right trade for a data center serving millions
+      of requests in parallel across many GPUs; it is close to the wrong trade for one box with a fixed,
+      unified memory pool.
+    </div>
+
+    <h2>"Emergence": be honest about which half is real</h2>
+    <p>The popular claim: some capabilities appear <em>abruptly</em> at a scale threshold — useless, then
+      suddenly competent, with no warning in between. Schaeffer et al. (NeurIPS 2023) showed that much of
+      that sharpness is a <strong>metric artifact</strong>, not a property of the model. Discontinuous
+      metrics — exact-match, multiple-choice accuracy — manufacture cliffs: a model that gets 4 of 5 digits
+      of an answer right still scores <em>zero</em>, identical to a model that gets 0 of 5. Swap in a
+      continuous metric (edit distance, per-token log-likelihood) on the <em>same models</em>, and the cliff
+      becomes a smooth, predictable ramp. This is the correction to the popular story, and it's the
+      largely-accepted result — lead with it.</p>
+    <p>Panel 3 below reproduces the actual mechanism, not just the claim: an exact-match score on a task
+      with $n$ independent steps (say, $n$ digits that must <em>all</em> be right) is the per-step accuracy
+      raised to the $n$-th power, $p(x)^n$. Raising a smoothly-rising curve to a large power is exactly what
+      manufactures a cliff out of a slope — no mystery, just an AND over many steps.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: what the metric-artifact correction does <em>not</em> resolve</summary><div>
+      <p>Two things survive the continuous-metric fix, and the honest page says so <strong>[VP]</strong>:</p>
+      <ol>
+        <li><strong>Predictability in advance.</strong> Even granting that curves are smooth in hindsight,
+          nobody reliably predicts <em>which</em> capability will appear at <em>what</em> scale
+          <em>before</em> training the model. Smoothness after the fact is not the same claim as
+          predictability beforehand.</li>
+        <li><strong>Bimodal outcomes persist.</strong> Recent work finds that across random seeds, some
+          training runs land near full competence on a capability and others land near chance — a genuinely
+          bimodal split — even measured with the same continuous metric that dissolves the sharp-cliff
+          illusion. "You picked a bad metric" does not explain a split that survives switching metrics.
+          Panel 3's second toggle reproduces this: identical smooth logistic curves, jittered per seed, with
+          a fraction of seeds capped at a low asymptote no matter which metric you view them through.</li>
+      </ol>
+    </div></details>
+
+    <div class="box key"><span class="box-title">🔑 The honest formulation to ship</span>
+      "Emergence" bundles two separate claims. <strong>"Curves have sharp discontinuities"</strong> is
+      largely a metric artifact — measure continuously and the cliff becomes a slope.
+      <strong>"We cannot predict which capabilities a bigger model will have"</strong> is not an artifact
+      and is still true in 2026. Be skeptical of "emergent" when it means <em>magic</em>; take it seriously
+      when it means <em>we genuinely couldn't have called this in advance</em>. And the field hasn't fully
+      converged — bimodal outcomes survive the continuous-metric fix, and nobody has fully explained them.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Emergent abilities prove something deep about scale"</span>
+      Most of the <em>sharpness</em> is your ruler, not the model — an artifact of scoring an AND over many
+      correct steps with a pass/fail metric. The <em>unpredictability</em> is real and currently unexplained.
+      Keep the two claims apart; conflating them is how "emergence" became a word that means both "obviously
+      a measurement bug" and "possibly the most interesting open question in the field," depending who's
+      talking.
+    </div>
+
+    <h2>So: what the rest of Part IV is for</h2>
+    <p>The base model is fixed, enormous, and out of reach to rebuild — centuries of compute, whichever
+      honest bound you use. Everything left in this Part is how you <em>change what it does</em> without
+      paying to remake it: rank and SVD, the mathematical claim underneath every adaptation method (p.39);
+      LoRA, the method that turns that claim into two trainable matrices (p.40); QLoRA, which compresses the
+      frozen 16.38 GB base itself (p.41); the three things "fine-tuning" actually names (p.42); and whether
+      any of it fits on <em>your</em> box (p.43).</p>
+
+    <h2>Demo — scaling, sparsity, and the calibration lesson, computed live</h2>
+
+    <h3>Panel 1 — the Chinchilla curve, and where Qwen3-8B actually sits</h3>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag $\log_{10}N$ and $\log_{10}D$. Watch the point move relative to the compute-optimal frontier.
+      Set $\log_{10}N$ back to Qwen3-8B's value and push $\log_{10}D$ far past the Chinchilla-optimal
+      marker — loss keeps falling while $C$ balloons. That's why nobody stops at $D=20N$.
+    </div>
+    <div class="demo">
+      <div class="demo-head">The Chinchilla loss surface, one slice at a time <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="p1-plot" height="340"></canvas>
+        <div class="controls" id="p1-ctrls"></div>
+        <div class="legend-row" id="p1-legend"></div>
+        <div class="readout" id="p1-out"></div>
+      </div>
+    </div>
+
+    <h3>Panel 2 — MoE: memory tracks total, compute tracks active</h3>
+    <div class="box try"><span class="box-title">Try it</span>
+      Raise $N_E$ toward Kimi K2's per-layer scale (384) while holding $K_E$ fixed. The memory bar climbs
+      off the chart; the compute bar barely moves. That decoupling is the entire MoE trade.
+    </div>
+    <div class="demo">
+      <div class="demo-head">One MoE layer's expert bank, sized live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="p2-plot" height="300"></canvas>
+        <div class="controls" id="p2-ctrls"></div>
+        <div class="readout" id="p2-out"></div>
+      </div>
+    </div>
+
+    <h3>Panel 3 — the same curve, two metrics, and a split that doesn't go away</h3>
+    <div class="box try"><span class="box-title">Try it</span>
+      Toggle between exact-match and continuous scoring on the <em>identical</em> underlying curve, then
+      flip the per-seed overlay on and watch a real bimodal split survive both metrics.
+    </div>
+    <div class="demo">
+      <div class="demo-head">A synthetic capability curve — illustrative, not measured data
+        <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="toggle-row" id="p3-metric-toggle">
+          <button data-metric="discontinuous" class="active" type="button">Exact-match (discontinuous)</button>
+          <button data-metric="continuous" type="button">Continuous (per-token)</button>
+        </div>
+        <div class="controls" id="p3-ctrls"></div>
+        <div class="toggle-row" id="p3-bimodal-toggle">
+          <button data-bimodal="0" class="active" type="button">Single run</button>
+          <button data-bimodal="1" type="button">8 seeds (bimodal overlay)</button>
+        </div>
+        <canvas id="p3-plot" height="300"></canvas>
+        <div class="legend-row" id="p3-legend"></div>
+        <div class="readout" id="p3-out"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/scaling_and_moe.py</code>
+      Reproduces all three panels' arithmetic on the command line: $C=6ND$ and the ~2-millennia Spark
+      estimate (assumptions and confidence tags printed explicitly), the MoE active-vs-total memory table
+      for the 2026 configs above, and the exact-match-vs-continuous metric-artifact demo on synthetic
+      logits. ~5 s.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-38"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     PANEL 1 — Chinchilla scaling law, live.
+     L(N,D) = E + A/N^alpha + B/D^beta, Hoffmann et al. 2022's own fitted
+     constants. Real arithmetic every slider tick — nothing precomputed.
+     ========================================================================== */
+  (function () {
+    const E = 1.69, A = 406.4, ALPHA = 0.34, B = 410.7, BETA = 0.28;
+    const LN_V = Math.log(151936); // 11.9312... — constants §9.1's frozen 11.93, computed live
+
+    function L(N, D) { return E + A / Math.pow(N, ALPHA) + B / Math.pow(D, BETA); }
+    function optN(C) { return Math.sqrt(C / 120); }   // D=20N & C=6ND=120N^2
+    function optD(C) { return 20 * optN(C); }
+
+    // Qwen3-8B anchors — constants §1.1 (N, [DER]) and §5 (D, [EST]).
+    const N_Q = 6946071552, D_Q = 3.6e13;
+    const C_Q = 6 * N_Q * D_Q;                          // ~1.50e24, constants §5
+    const D_OPT_AT_NQ = 20 * N_Q;                        // 1.389e11 — quiz Q2's answer
+    const C_OPT_AT_NQ = 6 * N_Q * D_OPT_AT_NQ;
+    const TOK_PER_PARAM_Q = D_Q / N_Q;                   // ~5183
+    const OVERSHOOT_Q = TOK_PER_PARAM_Q / 20;             // ~259x — see note below
+
+    const canvas = document.getElementById("p1-plot");
+    const out = document.getElementById("p1-out");
+    const legend = document.getElementById("p1-legend");
+
+    // eng() (course.js) tops out at "T" (1e12) — fine for params/tokens on this
+    // page, but C=6ND lives at 1e18-1e26 FLOP across this panel's own slider
+    // range, so eng() silently overflows its prefix table and prints raw
+    // digits (e.g. "1510000000000 TFLOP" instead of "1.51 YFLOP"). Page-local
+    // extension, same logic as eng(), just with P/E/Z/Y added — course.js is
+    // a shared asset mid-build by other pages, so this stays page-scoped
+    // rather than widening the global contract.
+    function engFlop(v, unit, digits) {
+      if (!isFinite(v)) return "—";
+      if (v === 0) return "0 " + (unit || "");
+      const av = Math.abs(v);
+      const units = [[1e24, "Y"], [1e21, "Z"], [1e18, "E"], [1e15, "P"], [1e12, "T"], [1e9, "G"], [1e6, "M"], [1e3, "k"], [1, ""]];
+      for (const [m, s] of units) if (av >= m * 0.9995) return (v / m).toPrecision(digits || 3) * 1 + " " + s + (unit || "");
+      return v.toExponential(2) + " " + (unit || "");
+    }
+
+    const cN = makeCtrl(document.getElementById("p1-ctrls"), {
+      label: "log₁₀ N (non-embedding params)", min: 8.5, max: 11.5, step: 0.02,
+      value: Math.log10(N_Q), fmt: v => eng(Math.pow(10, v), "", 3)
+    });
+    const cD = makeCtrl(document.getElementById("p1-ctrls"), {
+      label: "log₁₀ D (training tokens)", min: 9.5, max: 14.3, step: 0.02,
+      value: Math.log10(D_Q), fmt: v => eng(Math.pow(10, v), "", 3)
+    });
+
+    const col = () => vizUtils.cssVar("--accent", "#b48cff");
+    const col2 = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    const col3 = () => vizUtils.cssVar("--try", "#ffab5e");
+    const dimC = () => vizUtils.cssVar("--text-dim", "#8391ab");
+
+    function dot(p, x, y, color, label, dy) {
+      const g = p.g, px = p._tx(x), py = p._ty(y);
+      g.save();
+      g.fillStyle = color; g.beginPath(); g.arc(px, py, 5, 0, 2 * Math.PI); g.fill();
+      g.lineWidth = 1.5; g.strokeStyle = vizUtils.cssVar("--bg-panel", "#12121c"); g.stroke();
+      if (label) {
+        g.fillStyle = color; g.font = "11px system-ui"; g.textAlign = "left";
+        g.fillText(label, px + 8, py + (dy || 0));
+      }
+      g.restore();
+    }
+
+    function draw() {
+      const N = Math.pow(10, cN.get()), D = Math.pow(10, cD.get());
+      const C = 6 * N * D;
+      const loss = L(N, D);
+
+      const p = new Plot(canvas, {
+        xmin: 1e19, xmax: 2e25, xlog: true, ymin: 1.5, ymax: 13,
+        xlabel: "training compute C = 6ND (FLOP)", ylabel: "loss L(N,D) (nats)"
+      });
+      p.clear(); p.grid();
+
+      // Compute-optimal envelope: for each C, the N,D split that minimizes L(N,D)
+      // subject to C=6ND (i.e. D=20N). REAL sweep, not a canned curve.
+      const xs = [], ys = [];
+      for (let e = 19; e <= 25.3; e += 0.05) {
+        const c = Math.pow(10, e), No = optN(c), Do = optD(c);
+        xs.push(c); ys.push(L(No, Do));
+      }
+      p.trace(xs, ys, col(), 2.5);
+
+      p.hline(LN_V, dimC(), [3, 3]);
+      p.label(1.3e19, LN_V + 0.35, `random-init reference: ln V = ${LN_V.toFixed(2)}`, dimC());
+
+      dot(p, C_OPT_AT_NQ, L(N_Q, D_OPT_AT_NQ), col2(), "Chinchilla-optimal @ Qwen3's N", 16);
+      dot(p, C_Q, L(N_Q, D_Q), col3(), "Qwen3-8B, actual D", -10);
+      dot(p, C, loss, col(), null);
+
+      legend.innerHTML =
+        `<span><span class="legend-line" style="background:${col()}"></span>compute-optimal frontier (D=20N)</span>
+         <span><span class="legend-dot" style="background:${col2()}"></span>Chinchilla-optimal @ Qwen3's N</span>
+         <span><span class="legend-dot" style="background:${col3()}"></span>Qwen3-8B's actual (N,D)</span>`;
+
+      const ratio = D / N;
+      out.innerHTML =
+        `at your slider: N=<b>${eng(N, "", 3)}</b>, D=<b>${eng(D, "", 3)}</b> → predicted
+         L=<b>${loss.toFixed(2)}</b> nats, C=<b>${engFlop(C, "FLOP", 3)}</b>, D/N=<b>${ratio.toFixed(0)}</b>
+         tokens/param (Chinchilla-optimal is 20) — this is the <em>fitted curve's</em> prediction, not a
+         measured loss (Qwen3-8B's actual training loss isn't published).<br>
+         Qwen3-8B itself trains at <b>${TOK_PER_PARAM_Q.toFixed(0)}</b> tokens/param, ≈<b>${OVERSHOOT_Q.toFixed(0)}×</b>
+         past the Chinchilla-optimal ratio for its size [EST, built on D's estimate] — a different (larger)
+         overshoot than the ≈95× figure quoted above for Llama-3-8B; the two models made different
+         train-long-vs-train-optimal trades.`;
+    }
+    cN.onInput(draw); cD.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==========================================================================
+     PANEL 2 — MoE: one layer's expert bank, sized live.
+     Reuses the trunk's own FFN-per-expert formula, 3·d_model·d_ff (constants
+     §1.2's FFN subtotal), applied N_E times instead of once.
+     ========================================================================== */
+  (function () {
+    const D_MODEL = 4096; // constants §1.1 — the trunk's own d_model, reused verbatim
+    const canvas = document.getElementById("p2-plot");
+    const out = document.getElementById("p2-out");
+    const ctrls = document.getElementById("p2-ctrls");
+
+    const cNE = makeCtrl(ctrls, { label: "N_E (total experts)", min: 1, max: 400, step: 1, value: 8, fmt: v => v.toFixed(0) });
+    const cKE = makeCtrl(ctrls, { label: "K_E (active experts/token)", min: 1, max: 64, step: 1, value: 2, fmt: v => v.toFixed(0) });
+    const cFF = makeCtrl(ctrls, { label: "d_ff per expert", min: 256, max: 8192, step: 256, value: 2048, fmt: v => v.toFixed(0) });
+
+    const col = () => vizUtils.cssVar("--accent", "#b48cff");
+    const col2 = () => vizUtils.cssVar("--accent2", "#45e0b8");
+
+    function draw() {
+      const NE = cNE.get(), dFF = cFF.get();
+      const KE = Math.min(cKE.get(), NE);
+      const perExpert = 3 * D_MODEL * dFF;              // constants §1.2's FFN-subtotal formula, per expert
+      const totalParams = NE * perExpert;
+      const activeParams = KE * perExpert;
+      const ratio = activeParams / totalParams;
+      const memGiB = totalParams * 2 / (2 ** 30);         // bf16, 2 B/param — the memory line
+      const BOX_GIB = 121.6875;                            // [MEA-DEV] measured usable — constants §6.8
+
+      const ymax = Math.max(totalParams * 1.15, 10);
+      const p = new Plot(canvas, { xmin: -1, xmax: 1, ymin: 0, ymax, ylabel: "parameters" });
+      p.clear(); p.grid(null, undefined);
+      const g = p.g;
+      const y0 = p._ty(0);
+      const barW = (p._tx(0.42) - p._tx(-0.42));
+
+      const totTop = p._ty(totalParams), totLeft = p._tx(-0.72) ;
+      g.fillStyle = col(); g.fillRect(p._tx(-0.9), totTop, barW, y0 - totTop);
+      const actTop = p._ty(activeParams);
+      g.fillStyle = col2(); g.fillRect(p._tx(0.08), actTop, barW, y0 - actTop);
+
+      g.save(); g.fillStyle = vizUtils.cssVar("--text", "#e8e6f0"); g.font = "12px system-ui"; g.textAlign = "center";
+      g.fillText("total (∝ memory)", p._tx(-0.48), y0 + 22);
+      g.fillText("active/token (∝ compute)", p._tx(0.5), y0 + 22);
+      g.restore();
+
+      const overflow = memGiB > BOX_GIB;
+      out.innerHTML =
+        `per-expert FFN <b>3×d_model×d_ff = ${eng(perExpert, "", 3)}</b> params (same formula as the trunk's
+         FFN subtotal, constants §1.2) · total <b>${eng(totalParams, "", 3)}</b> params
+         (<b>${memGiB.toFixed(2)} GiB</b> bf16) · active/token <b>${eng(activeParams, "", 3)}</b>
+         · sparsity <b>${(ratio * 100).toFixed(1)}%</b> active
+         ${overflow
+            ? `— <b style="color:${vizUtils.cssVar("--bad", "#ff6b6b")}">exceeds your measured 121.69 GiB box [MEA-DEV, constants §6.8]</b>, before you've loaded a single other tensor.`
+            : `— fits inside your measured 121.69 GiB box [MEA-DEV, constants §6.8], for this layer's experts alone.`}`;
+    }
+    cNE.onInput(draw); cKE.onInput(draw); cFF.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==========================================================================
+     PANEL 3 — the emergence "mirage": a smooth per-step accuracy curve raised
+     to the n-th power (exact-match over n independent steps) manufactures a
+     cliff out of a slope. Real math, seeded RNG for the bimodal overlay so a
+     reload reproduces the identical 8 seeds every time.
+     ========================================================================== */
+  (function () {
+    const X0 = 22, K = 1.15;                 // logistic midpoint/slope, illustrative
+    const LOGC_Q = Math.log10(6 * 6946071552 * 3.6e13); // ties back to Panel 1's C, ~24.18
+
+    function p(x, x0) { return 1 / (1 + Math.exp(-K * (x - x0))); }
+
+    // 8 reproducible seeds: each gets a small midpoint jitter, and a fraction
+    // ("stuck" runs) cap out at a low asymptote instead of reaching 1 — a real
+    // bimodal split, not a decorative one.
+    const rng = new NN.RNG(2026);
+    const seeds = [];
+    for (let i = 0; i < 8; i++) {
+      const dx0 = rng.normal(0, 0.5);
+      const stuck = rng.random() < 0.35;
+      seeds.push({ x0: X0 + dx0, ceiling: stuck ? 0.12 : 1.0, stuck });
+    }
+
+    let metric = "discontinuous", bimodal = false;
+
+    const canvas = document.getElementById("p3-plot");
+    const out = document.getElementById("p3-out");
+    const legend = document.getElementById("p3-legend");
+    const cn = makeCtrl(document.getElementById("p3-ctrls"), {
+      label: "task length n (independent steps that must ALL be right)", min: 1, max: 40, step: 1,
+      value: 20, fmt: v => v.toFixed(0)
+    });
+
+    const colMain = () => vizUtils.cssVar("--accent", "#b48cff");
+    const colSeed = () => vizUtils.cssVar("--track-diffusion", "#ff9466");
+    const dimC = () => vizUtils.cssVar("--text-dim", "#8391ab");
+
+    function score(x, x0, n) {
+      const base = p(x, x0);
+      return metric === "discontinuous" ? Math.pow(base, n) : base;
+    }
+
+    function draw() {
+      const n = cn.get();
+      const plt = new Plot(canvas, { xmin: 18, xmax: 26, ymin: -0.02, ymax: 1.05,
+        xlabel: "log₁₀(training compute) — synthetic, illustrative", ylabel: "score" });
+      plt.clear(); plt.grid();
+      plt.vline(LOGC_Q, dimC(), [2, 4]);
+      plt.label(LOGC_Q + 0.1, 1.0, "Qwen3-8B's log₁₀C (Panel 1)", dimC());
+
+      if (bimodal) {
+        for (const s of seeds) {
+          const xs = [], ys = [];
+          for (let x = 18; x <= 26; x += 0.08) { xs.push(x); ys.push(s.ceiling * score(x, s.x0, n)); }
+          plt.trace(xs, ys, colSeed(), s.stuck ? 1.3 : 1.6);
+        }
+      } else {
+        const xs = [], ys = [];
+        for (let x = 18; x <= 26; x += 0.08) { xs.push(x); ys.push(score(x, X0, n)); }
+        plt.trace(xs, ys, colMain(), 2.8);
+      }
+
+      legend.innerHTML = bimodal
+        ? `<span><span class="legend-line" style="background:${colSeed()}"></span>8 seeded runs (same metric, same n)</span>`
+        : `<span><span class="legend-line" style="background:${colMain()}"></span>single idealized run</span>`;
+
+      const pHalf = Math.pow(0.5, 1 / n);
+      const nStuck = seeds.filter(s => s.stuck).length;
+      out.innerHTML = metric === "discontinuous"
+        ? `exact-match over <b>n=${n}</b> steps crosses 50% only once the <em>per-step</em> accuracy
+           reaches <b>${pHalf.toFixed(3)}</b> — a smooth per-step curve, raised to the ${n}th power,
+           looks like a cliff. Same underlying capability as the continuous view; different ruler.`
+        : `the continuous (per-step) score crosses 50% right at the logistic midpoint — no cliff, because
+           nothing here is an AND over ${n} independent steps.`;
+      if (bimodal) out.innerHTML += ` <b>${nStuck}/8</b> seeded runs plateau near 0.12 instead of 1.0 —
+        toggle the metric buttons above and watch that split survive both of them.`;
+    }
+
+    document.getElementById("p3-metric-toggle").querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        metric = btn.dataset.metric;
+        document.getElementById("p3-metric-toggle").querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+        draw();
+      });
+    });
+    document.getElementById("p3-bimodal-toggle").querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        bimodal = btn.dataset.bimodal === "1";
+        document.getElementById("p3-bimodal-toggle").querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+        draw();
+      });
+    });
+    cn.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ
+     ========================================================================== */
+  renderQuiz("quiz-38", [
+    {
+      q: "Derive it, don't recall it: in $C \\approx kND$, what is $k$?",
+      num: 6, tol: 0,
+      why: "Forward $\\approx 2N$ FLOP/token (one multiply, one add per param); backward needs the gradient w.r.t. inputs AND w.r.t. weights, $\\approx 2\\times$ forward $= 4N$. $2N+4N=6N$ per token, so $C\\approx 6ND$."
+    },
+    {
+      q: "Chinchilla-optimal training tokens for $N=6.95\\times10^{9}$ params (the compute-minimizing $D$, not what Qwen3-8B actually used)?",
+      num: 1.39e11, tol: 0.2e11, unit: "tokens",
+      why: "$D\\approx20N = 20\\times6.95\\times10^9 = 1.39\\times10^{11}$ tokens — the training-FLOP-minimizing point. Qwen3-8B trained on far more (constants §5's [EST] $D\\approx3.6\\times10^{13}$), which is normal: almost nobody trains Chinchilla-optimal."
+    },
+    {
+      q: "Pretraining Qwen3-8B from scratch on your DGX Spark would take —",
+      opts: [
+        "A few weeks",
+        "~380 years, generously assuming sustained peak throughput",
+        "Centuries — at least ~381 years as a lower bound (theoretical peak, never achieved), realistically closer to two millennia",
+        "A few years, using 8-bit Adam"
+      ],
+      a: 2,
+      why: "381 years assumes the machine sustains its theoretical FP16-accumulate peak (125 TFLOP/s [INF]) at 100% utilization forever — that makes it a LOWER bound, not a generous estimate. At the realistic ~62 TFLOP/s roofline and ~40% MFU it's closer to 1,900 years [INF, constants §5]. 'Generously assume sustained' inverts which direction the assumption is generous in — that framing is retired."
+    },
+    {
+      q: "In a Mixture-of-Experts layer, memory footprint scales with —",
+      opts: [
+        "The active experts per token only",
+        "The total expert count; compute scales with the active experts per token",
+        "Neither — MoE uses a fixed memory budget regardless of expert count",
+        "The router's parameter count only"
+      ],
+      a: 1,
+      why: "Every expert's weights must sit resident in memory whether or not a given token routes to it — memory tracks TOTAL. Only the selected experts do FLOPs for a given token — compute tracks ACTIVE. Panel 2's two bars decouple as you raise $N_E$ at fixed $K_E$ precisely because these are different axes."
+    },
+    {
+      q: "Random-init cross-entropy loss for Qwen3-8B, $\\ln V$, in nats?",
+      num: 11.93, tol: 0.02, unit: "nats",
+      why: "$\\ln(151{,}936) = 11.93$ — Qwen3's actual vocabulary size, constants §9.1 [DER]. Not 11.76, which is Llama-3's $V=128{,}256$ — a retired, wrong-model figure."
+    },
+    {
+      q: "The honest 2026 position on 'emergent abilities' is —",
+      opts: [
+        "It's entirely a measurement mirage — there's nothing real there",
+        "Sharpness is largely a metric artifact (exact-match manufactures cliffs out of smooth curves); unpredictability-in-advance is real and still unresolved",
+        "It proves language models have a qualitative phase transition, like a physical system",
+        "It only ever shows up in benchmarks nobody actually uses"
+      ],
+      a: 1,
+      why: "Schaeffer et al. (NeurIPS 2023) show discontinuous metrics create cliffs out of smooth underlying curves — largely correct and the leading correction. But predictability-in-advance is still unsolved, and bimodal outcomes across seeds survive switching to a continuous metric — so 'it's all a mirage' overclaims the correction, and 'it proves something magical' ignores the correction entirely."
+    },
+    {
+      q: "You want to run a capable model locally on a 128 GB box and are choosing between a dense 30B model and an MoE model that's 400B total / 13B active. The right call is —",
+      opts: [
+        "The MoE — 13B active means it runs as fast as a 13B model",
+        "The dense 30B — it fits comfortably; the MoE's 400B total does not, no matter how few experts are active per token",
+        "They're equivalent — active parameter count is what matters for memory too",
+        "The MoE — total parameter count doesn't matter for local inference"
+      ],
+      a: 1,
+      why: "Memory tracks total parameters, not active ones — a 400B-total MoE needs ~400B params resident (hundreds of GB) regardless of how few fire per token. The dense 30B model's entire footprint is ~30B params, comfortably inside a 128 GB (121.69 GiB usable [MEA-DEV]) box. 'It only uses 13B active' is exactly the misconception this page's memory-ledger thread warns about."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

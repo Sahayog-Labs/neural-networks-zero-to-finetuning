@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>45. Pretraining, Base vs Instruct — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions — the base-vs-instruct decode panels. Everything
+     uses the shared CSS custom properties so it stays theme-aware for free. */
+  .bi-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 720px) { .bi-grid { grid-template-columns: 1fr; } }
+  .bi-col {
+    border: 1px solid var(--border); border-radius: var(--radius);
+    background: var(--bg-panel2); padding: 12px 14px;
+  }
+  .bi-col-head { font-weight: 700; margin-bottom: 6px; display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .bi-col-head label { font-weight: 400; font-size: .78rem; color: var(--text-dim); display: flex; align-items: center; gap: 5px; cursor: pointer; }
+  .bi-prompt {
+    font-family: var(--mono); font-size: .78rem; color: var(--text-dim);
+    background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px;
+    padding: 7px 9px; white-space: pre-wrap; margin-bottom: 8px; min-height: 20px;
+  }
+  .bi-text {
+    font-family: var(--mono); font-size: .92rem; min-height: 3.2em;
+    background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px;
+    padding: 9px 11px; margin-bottom: 10px; line-height: 1.6; word-break: break-word;
+  }
+  .bi-text .cursor { color: var(--accent2); animation: blink 1s step-end infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .cand-bars { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 10px; }
+  .cand-row { display: flex; align-items: center; gap: 8px; font-family: var(--mono); font-size: .78rem; }
+  .cand-tok { width: 108px; flex-shrink: 0; white-space: pre; overflow: hidden; text-overflow: ellipsis; color: var(--text-dim); }
+  .cand-track { flex: 1; background: var(--bg-code); border: 1px solid var(--border); border-radius: 4px; height: 13px; position: relative; overflow: hidden; }
+  .cand-fill { height: 100%; background: var(--accent2); }
+  .cand-pct { width: 46px; text-align: right; flex-shrink: 0; color: var(--text-dim); }
+  .cand-row.picked .cand-tok { color: var(--accent); font-weight: 700; }
+  .cand-row.picked .cand-fill { background: var(--accent); }
+  .cand-row.eos .cand-tok { color: var(--bad); }
+  .cand-row.eos .cand-fill { background: var(--bad); }
+  .bi-note { color: var(--text-dim); font-size: .85rem; }
+</style>
+</head>
+<body data-page="45-pretraining-base-instruct.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Pretraining, Base vs Instruct</h1>
+    <p class="subtitle">Next-token prediction is the whole objective — one loss, applied
+      $10^{13}$ times, is where everything Qwen3-8B knows comes from. And it already
+      explains why a "base" model won't stop talking while an "instruct" model answers
+      and hands the microphone back.</p>
+    <!-- BUILDER FLAG — SPEC DEVIATION requiring explicit human sign-off:
+         spec-part5.md line 73 requires this demo to "ship pre-recorded real Qwen3
+         logits." No live Qwen3-8B GPU forward pass is reachable from this build
+         environment, so BASE_AUTHORED/INSTRUCT_STEPS/TEMPLATE_STEPS below are
+         hand-authored, not captured. Disclosed prominently on-page (see the
+         .box warn ahead of the demo and the .bi-note inside it) rather than
+         laundered as real data — consistent with constants.md's anti-laundering
+         policy. Everything downstream of those logits (softmax/argmax/log-prob/
+         PPL) is genuinely live-computed; independently re-verified to reproduce
+         the on-page numbers: base max end-of-turn prob 6.96%≈7.0%, instruct stops
+         at step 11 with 97.17%≈97.2%, template-wrapped base stops at step 17 with
+         58.68%≈58.7%. code/03_base_vs_instruct.py is the path to the real
+         experiment. This divergence from the spec's literal requirement is real
+         and should get an explicit human sign-off before this page ships. -->
+    <div class="box warn"><span class="box-title">⚠️ Builder disclosure — not captured Qwen3 logits</span>
+      spec-part5.md (line 73) calls for this demo to ship <em>pre-recorded real Qwen3
+      logits</em>. This build has no path to a live Qwen3-8B GPU forward pass, so the
+      candidate logits the decode demo below runs on are <strong>hand-authored</strong>
+      — chosen to reproduce the real, well-documented qualitative behavior (base
+      rambles, instruct stops, template-wrapped base partially recovers), not captured
+      from an actual forward pass. Everything downstream of those logits — softmax,
+      argmax, stopping, cumulative log-prob, perplexity — is computed live, never
+      precomputed or looked up. That is a genuine, disclosed divergence from the
+      spec's literal requirement, flagged here for explicit human sign-off rather than
+      quietly shipped. <code>code/03_base_vs_instruct.py</code> runs the identical
+      experiment against the real model on your own box.
+    </div>
+
+    <div class="box predict"><span class="box-title">🔮 Predict, before you read on</span>
+      Before any training, a freshly-initialized Qwen3-8B is asked to predict the next
+      token. What loss (in nats) should it print on step 0 — and what does that number
+      equal <em>exactly</em>?
+    </div>
+
+    <h2>Pretraining installs everything the model knows</h2>
+    <p>Pretraining is next-token prediction, run over roughly $10^{13}$ tokens of raw
+      text. That is the entire mechanism — there is no separate "knowledge module." Every
+      fact, every syntax rule, every association Qwen3-8B has, it acquired by getting
+      slightly better, one gradient step at a time, at guessing the next token in text it
+      had never seen before.</p>
+
+    <h2>The objective, in frozen notation</h2>
+    <p>Per-position cross-entropy, averaged over the batch and the sequence:</p>
+    <p>$$J(\theta) = -\frac{1}{BS}\sum_{b=1}^{B}\sum_{i=1}^{S} \log p_\theta\!\big(x_i \mid x_{&lt;i}\big)$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$J$</td><td>the batch-averaged loss, in <strong>nats</strong></td><td>scalar</td><td>notation §2 — $J$, not $\mathcal L$, because it's already averaged</td></tr>
+        <tr><td>$\theta$</td><td>every learnable parameter, flattened</td><td>$(P,)$, $P=8{,}190{,}735{,}360$</td><td>the trunk's parameter vector</td></tr>
+        <tr><td>$B$, $S$</td><td>batch size, sequence length</td><td>scalars</td><td>the data loader</td></tr>
+        <tr><td>$x_i$</td><td>the true token ID at position $i$</td><td>integer in $[0,V)$</td><td>the training sequence itself</td></tr>
+        <tr><td>$x_{&lt;i}$</td><td>every token before position $i$ — the prefix the model actually sees</td><td>—</td><td>the training sequence itself</td></tr>
+        <tr><td>$p_\theta(\cdot\mid x_{&lt;i})$</td><td>the model's softmax over the vocabulary, given that prefix</td><td>$(V,)$</td><td>the forward pass — page 44's $V=151{,}936$</td></tr>
+      </tbody>
+    </table>
+    <p><strong>Trunk callback:</strong> this is not a new loss. It's the exact
+      cross-entropy-from-maximum-likelihood derivation from page 12, applied at every
+      sequence position instead of once per example — Branch C of a derivation you
+      already own, not a new fact (D-14). The only thing that's new here is scale: $V$
+      classes instead of a handful, and $S$ positions summed per example instead of one.</p>
+    <p><em>Translation note:</em> this course writes $i$ for sequence position (notation
+      §3). Papers and most codebases write $t$ for the same index — and in this course
+      $t$ is reserved for the diffusion timestep, so every LLM-track page that indexes a
+      sequence writes $i$ instead (notation §3.2).</p>
+
+    <h2>Step-0 sanity check: perplexity</h2>
+    <p>Perplexity is just the loss re-exponentiated: $\text{PPL} = e^{\mathcal L}$ — the
+      same number, rescaled so "twice the loss" doesn't feel linear. It has a genuinely
+      useful reading: PPL is <em>the size of the vocabulary the model is, on average,
+      as confused as if it were guessing uniformly among</em> — put plainly, the number
+      of equally-likely options it's effectively choosing from.</p>
+    <div class="box worked"><span class="box-title">✍️ Worked — this is the predict's answer</span>
+      A freshly-initialized network has learned nothing yet, so its softmax over the
+      $V=151{,}936$ possible next tokens is (approximately) <strong>uniform</strong> — every
+      token equally likely, probability $1/V$ each. The cross-entropy loss of a correct
+      answer under a uniform guess is
+      $$\mathcal L = -\ln\!\left(\frac{1}{V}\right) = \ln V = \ln(151{,}936) = \mathbf{11.93}\ \text{nats}$$
+      <strong>[DER, constants §9.1]</strong>, and perplexity at that same point is
+      $$\text{PPL} = e^{\mathcal L} = e^{\ln V} = V = \mathbf{151{,}936}\quad\text{— exactly, by construction.}$$
+      Nothing was estimated here: an untrained softmax being uniform, and $e^{\ln V}=V$,
+      are both exact. The step-0 loss is a hard floor every real Qwen3-8B training run
+      starts just below.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ Not 11.76</span>
+      You'll see <strong>11.76</strong> quoted as "the" random-init LLM loss in a lot of
+      write-ups. That number is $\ln(128{,}256)$ — <strong>Llama-3's</strong> vocabulary
+      size, not Qwen3's. Different tokenizer, different $V$, different floor. It's a
+      retired number for this course (D-01); the two are easy to swap by accident because
+      they differ only in the fourth significant figure.
+    </div>
+    <p>Once training actually runs, a well-trained 8B model on general English web text
+      typically settles around $\mathcal L\approx2.0$ nats, i.e. $\text{PPL}\approx7.4$ —
+      but that number is corpus- and tokenizer-dependent, not a frozen constant, so it
+      ships with a label: <strong>[EST, constants §9.1]</strong>. $\ln V$ itself, by
+      contrast, is exact and worth keeping in your head: plot it as a horizontal
+      "random-guess" line on every training-loss curve you meet from here on — a curve
+      that starts near $\ln V$ and falls is doing exactly what it should.</p>
+
+    <h2>Base vs instruct — two very different products of the same recipe</h2>
+    <p>Both models below started from the identical pretraining run. What changed is
+      what happened <em>after</em>:</p>
+    <table>
+      <thead><tr><th></th><th>Base (<code>Qwen3-8B-Base</code>)</th><th>Instruct (<code>Qwen3-8B</code>)</th></tr></thead>
+      <tbody>
+        <tr><td>Trained with</td><td>pretraining only</td><td>pretraining + SFT (+ usually preference alignment — page 48)</td></tr>
+        <tr><td>Chat template</td><td>usually none — it's a raw continuer</td><td><strong>mandatory</strong> (ChatML for Qwen: <code>&lt;|im_start|&gt;…&lt;|im_end|&gt;</code>)</td></tr>
+        <tr><td>Given "The capital of France is"</td><td>continues plausibly — and keeps going</td><td>answers, then emits its turn-end token and stops</td></tr>
+        <tr><td>What actually changed</td><td>—</td><td>a learned <em>habit</em>: emit end-of-turn after a complete answer</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn"><span class="box-title">⚠️ "Loss is comparable across models"</span>
+      Perplexity is only a fair comparison <strong>within one tokenizer</strong>. A
+      different $V$ changes the random-guess floor ($\ln V$ itself), and a different
+      compression ratio $\rho$ (page 44) changes how much "idea" one token even carries —
+      so nats-per-token from two different tokenizers aren't measuring the same thing,
+      even though both numbers are honestly in nats. People compare cross-tokenizer
+      perplexity constantly in casual benchmarks; it's a category error every time.
+    </div>
+    <p><code>[THREAD:Qwen3-8B beat: pretraining loss]</code> — the same $V=151{,}936$ that
+      set the tokenizer's shape on page 44 now sets the width of this loss's softmax, and
+      $\ln V = 11.93$ joins the reflex-number set. It recurs as the exact loss SFT
+      minimizes on page 48, with a mask bolted on, and as the metric that page 51 argues
+      you should stop trusting once you care about answer quality rather than fluency.</p>
+
+    <h2>Demo — base vs instruct, greedy decode, live</h2>
+    <p>Both columns below run the same mechanism — <strong>real, live-computed</strong>
+      $\text{softmax}$ over each step's candidate logits, then greedy
+      $\text{argmax}$, exactly the way a real decode loop works (the sampling knobs —
+      temperature, top-k, top-p — are page 46's job; this page only needs "always pick
+      the top token"). Drag the slider and the strings are rebuilt from scratch, one
+      argmax at a time, in front of you.</p>
+    <div class="box try"><span class="box-title">Try it</span>
+      Push <em>tokens to generate</em> all the way to 60. Watch the base column's
+      end-of-turn candidate <em>never</em> win. Then tick "wrap prompt in a chat
+      template" on the base column and watch it eventually stop anyway — later, and with
+      much less confidence than the real instruct model.
+    </div>
+    <div class="demo track-llm">
+      <div class="demo-head">Base vs Instruct — greedy decode <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="controls" id="bi-ctrls"></div>
+        <div class="bi-grid">
+          <div class="bi-col">
+            <div class="bi-col-head">Qwen3-8B-<span style="color:var(--track-llm)">Base</span>
+              <label><input type="checkbox" id="bi-tpl-toggle"> wrap prompt in chat template first</label>
+            </div>
+            <div class="bi-prompt" id="bi-base-prompt"></div>
+            <div class="bi-text" id="bi-base-text"></div>
+            <div class="cand-bars" id="bi-base-bars"></div>
+            <div class="readout" id="bi-base-out"></div>
+          </div>
+          <div class="bi-col">
+            <div class="bi-col-head">Qwen3-8B <span style="color:var(--accent)">(Instruct)</span></div>
+            <div class="bi-prompt" id="bi-instruct-prompt"></div>
+            <div class="bi-text" id="bi-instruct-text"></div>
+            <div class="cand-bars" id="bi-instruct-bars"></div>
+            <div class="readout" id="bi-instruct-out"></div>
+          </div>
+        </div>
+        <p class="bi-note">Every bar above is a live $\text{softmax}$ of hand-authored
+          candidate logits, chosen to reproduce the real, well-documented qualitative
+          behavior — base rambles, instruct stops, template-wrapped base partially
+          recovers. This build has no path to a live Qwen3-8B GPU forward pass, so these
+          are <strong>not</strong> literal captured activations; labelling synthetic
+          numbers as "real captured logits" would be exactly the laundered-estimate move
+          constants.md forbids. <code>code/03_base_vs_instruct.py</code> below runs the
+          identical experiment against the real model on your own box.</p>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/03_base_vs_instruct.py</code>
+      Send the same prompt into <code>Qwen3-8B-Base</code> and <code>Qwen3-8B</code>,
+      print token-level probabilities for both, watch the base model not stop, then wrap
+      the base prompt in the real chat template and watch it partially recover. ~10 min.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-pretraining"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — base vs instruct greedy decode. REAL math: NN.softmax over each
+     step's authored candidate logits, real argmax, real cumulative log-prob.
+     The candidate LOGITS are hand-authored (see the on-page disclosure) since
+     this build has no live Qwen3-8B forward pass to capture from; everything
+     downstream of those logits — softmax, argmax, stopping, log-prob, PPL —
+     is computed live, never precomputed or looked up.
+     ========================================================================== */
+  (function () {
+    const EOS = "<|im_end|>";
+
+    /* ---- BASE (raw continuation) — 24 authored steps, then a deterministic
+       procedural tail out to 60 tokens. The end-of-turn candidate's logit
+       stays low (0.3–0.9) at every single step — it is never the argmax. ---- */
+    const BASE_AUTHORED = [
+      [[" Paris",6.0],[" the",2.0],[" a",1.8],[" located",1.5],[" known",1.2],[EOS,0.5]],
+      [[",",4.5],[" is",1.8],[" a",1.6],[" was",1.2],[".",1.0],[EOS,0.4]],
+      [[" the",3.8],[" a",2.0],[" France",1.5],[" one",1.3],[" also",1.0],[EOS,0.3]],
+      [[" largest",3.0],[" capital",2.6],[" most",1.6],[" political",1.4],[" main",1.2],[EOS,0.4]],
+      [[" city",4.2],[" and",1.6],[" metropolitan",1.3],[" urban",1.0],[" economic",0.9],[EOS,0.3]],
+      [[" in",4.0],[" of",2.4],[",",1.6],[" on",1.2],[" within",1.0],[EOS,0.4]],
+      [[" the",4.4],[" all",1.2],[" France",1.0],[" Western",1.0],[" continental",0.8],[EOS,0.3]],
+      [[" country",3.2],[" nation",2.6],[",",2.0],[" republic",1.2],[" region",1.0],[EOS,0.4]],
+      [[",",3.6],[" and",1.6],[".",1.4],[" with",1.2],[" home",1.0],[EOS,0.5]],
+      [[" with",3.0],[" and",2.2],[" home",1.8],[" boasting",1.0],[" whose",0.9],[EOS,0.4]],
+      [[" a",4.0],[" over",1.6],[" roughly",1.4],[" an",1.2],[" more",1.0],[EOS,0.3]],
+      [[" population",4.4],[" metropolitan",1.4],[" history",1.2],[" total",1.0],[" GDP",0.8],[EOS,0.3]],
+      [[" of",4.6],[" around",1.6],[" exceeding",1.4],[" close",1.0],[" nearing",0.9],[EOS,0.3]],
+      [[" over",3.0],[" about",2.6],[" roughly",2.2],[" nearly",1.6],[" some",1.2],[EOS,0.4]],
+      [[" two",3.4],[" 2",1.8],[" eleven",1.4],[" ten",1.2],[" twenty",1.0],[EOS,0.4]],
+      [[" million",4.6],[" thousand",1.4],[" hundred",0.9],[" billion",0.8],[" percent",0.7],[EOS,0.3]],
+      [[" people",3.8],[" residents",2.6],[" inhabitants",2.0],[" Parisians",1.6],[" citizens",1.4],[EOS,0.4]],
+      [[".",3.6],[",",2.0],[" in",1.8],[" as",1.2],[" living",1.0],[EOS,0.5]],
+      [[" It",3.4],[" The",2.6],[" Paris",1.6],[" This",1.4],[" As",1.0],[EOS,0.6]],
+      [[" is",4.0],[" has",2.2],[" sits",1.8],[" serves",1.4],[" was",1.2],[EOS,0.4]],
+      [[" located",3.6],[" situated",3.0],[" the",1.6],[" home",1.4],[" known",1.2],[EOS,0.4]],
+      [[" on",4.2],[" along",2.0],[" in",1.8],[" near",1.4],[" at",1.0],[EOS,0.4]],
+      [[" the",4.6],[" a",1.4],[" both",1.2],[" River",1.0],[" its",0.9],[EOS,0.3]],
+      [[" Seine",4.4],[" river",1.6],[" bank",1.2],[" Loire",1.0],[" water",0.8],[EOS,0.3]],
+    ];
+    const BASE_POOL = [" River"," in"," the"," north","-central"," part"," of"," the",
+      " country","."," Paris"," is"," renowned"," for"," its"," museums",","," architecture",
+      ","," and"," cuisine","."," The"," city"," attracts"," millions"," of"," tourists",
+      " every"," year",","," who"," come"," to"," see"," its"," landmarks"];
+    function buildBaseSteps() {
+      const steps = BASE_AUTHORED.map(cands => cands.slice());
+      let i = 0;
+      while (steps.length < 60) {
+        const w = BASE_POOL[i % BASE_POOL.length];
+        const conf = 2.6 + (i % 5) * 0.3;
+        steps.push([[w, conf], [" and", 1.4], [" the", 1.3], [" a", 1.1], [" its", 1.0], [EOS, 0.5 + (i % 3) * 0.1]]);
+        i++;
+      }
+      return steps;
+    }
+
+    /* ---- INSTRUCT — 11 steps: answers cleanly, then the end-of-turn
+       candidate becomes the argmax with a large margin. ---- */
+    const INSTRUCT_STEPS = [
+      [[" Paris",7.5],[" France's",1.6],[",",1.4],[" The",1.2],[" It",1.0],[EOS,0.6]],
+      [[",",6.0],[" is",1.8],[".",1.4],[" –",1.0],[" (",0.8],[EOS,0.6]],
+      [[" the",5.4],[" a",1.8],[" France's",1.6],[" which",1.2],[" known",1.0],[EOS,0.6]],
+      [[" capital",6.2],[" largest",2.0],[" cultural",1.6],[" most",1.4],[" political",1.2],[EOS,0.6]],
+      [[" and",4.8],[" of",2.2],[",",1.8],[" city",1.4],[".",1.2],[EOS,0.7]],
+      [[" largest",5.0],[" biggest",1.8],[" most",2.0],[" main",1.6],[" economic",1.2],[EOS,0.7]],
+      [[" city",5.6],[" cultural",1.6],[" metropolitan",1.4],[" urban",1.2],[" economic",1.0],[EOS,0.7]],
+      [[" of",5.8],[" in",2.0],[",",1.6],[".",1.4],[" within",1.0],[EOS,0.8]],
+      [[" France",5.2],[" the",1.6],[" Europe",1.4],[" it",1.0],[" the country",0.9],[EOS,1.0]],
+      [[".",5.6],[",",1.8],[" today",1.2],[" –",1.0],[" (",0.8],[EOS,1.6]],
+      [[EOS,6.4],[" It",1.6],[" Paris",1.4],[" The",1.2],[" As",1.0],[" (",0.9]],
+    ];
+
+    /* ---- BASE + CHAT TEMPLATE — 17 steps: the untrained-for format nudges
+       the end-of-turn candidate up, and it eventually wins — but later, and
+       at much lower confidence than the real instruct model above. ---- */
+    const TEMPLATE_STEPS = [
+      [[" Paris",4.0],[" The",2.6],[" France's",2.0],[" It",1.8],[" As",1.4],[EOS,1.0]],
+      [[".",3.0],[",",2.6],[" is",2.0],[" –",1.2],[" (",1.0],[EOS,1.4]],
+      [[" The",2.8],[" It",2.2],[" Paris",1.8],[" This",1.6],[" As",1.4],[EOS,1.6]],
+      [[" capital",2.6],[" city",2.2],[" French",1.8],[" population",1.4],[" nation",1.2],[EOS,1.4]],
+      [[" of",3.4],[" is",2.0],[",",1.6],[" and",1.4],[" has",1.2],[EOS,1.2]],
+      [[" France",3.6],[" the",1.6],[" Europe",1.2],[" this",1.0],[" it",0.9],[EOS,1.0]],
+      [[" is",3.2],[" has",2.0],[" sits",1.4],[" was",1.2],[" serves",1.0],[EOS,1.0]],
+      [[" a",3.0],[" known",2.2],[" home",1.8],[" the",1.4],[" also",1.2],[EOS,1.0]],
+      [[" city",3.4],[" center",1.8],[" place",1.6],[" hub",1.4],[" metropolis",1.2],[EOS,1.1]],
+      [[" known",2.8],[" famous",2.6],[" renowned",2.0],[" celebrated",1.4],[" recognized",1.2],[EOS,1.3]],
+      [[" for",3.6],[" worldwide",1.6],[" as",1.6],[" throughout",1.2],[" internationally",1.0],[EOS,1.2]],
+      [[" its",3.4],[" the",1.6],[" many",1.4],[" numerous",1.2],[" several",1.0],[EOS,1.3]],
+      [[" museums",2.6],[" landmarks",2.4],[" architecture",2.2],[" culture",1.8],[" history",1.6],[EOS,1.4]],
+      [[" and",3.0],[",",2.2],[".",2.0],[" as well",1.2],[" ,",1.0],[EOS,1.6]],
+      [[" architecture",2.6],[" cuisine",2.4],[" landmarks",2.0],[" art",1.8],[" history",1.6],[EOS,1.6]],
+      [[".",3.0],[",",1.8],[" among other things",1.2],[" –",1.0],[" (",0.9],[EOS,2.2]],
+      [[EOS,3.4],[" It",1.8],[" Paris",1.6],[" The",1.4],[" As",1.2],[" Additionally",1.0]],
+    ];
+
+    /* ---- decode: real softmax, real argmax, real cumulative log-prob ---- */
+    function decode(steps, n) {
+      const N = Math.min(n, steps.length);
+      let text = "", cum = 0, stoppedAt = null, lastBars = null, maxEos = 0;
+      for (let k = 0; k < N; k++) {
+        const cands = steps[k];
+        const logits = cands.map(c => c[1]);
+        const probs = NN.softmax(logits);               // REAL softmax, live
+        const idx = NN.argmax(logits);                  // REAL argmax, live
+        const eosIdx = cands.findIndex(c => c[0] === EOS);
+        if (probs[eosIdx] > maxEos) maxEos = probs[eosIdx];
+        cum += Math.log(probs[idx]);                     // REAL log-prob accumulation
+        lastBars = cands.map((c, i) => ({ tok: c[0], prob: probs[i], eos: c[0] === EOS, picked: i === idx }));
+        if (cands[idx][0] === EOS) { stoppedAt = k + 1; break; }
+        text += cands[idx][0];
+      }
+      const stepsTaken = stoppedAt || N;
+      const ppl = stepsTaken > 0 ? Math.exp(-cum / stepsTaken) : NaN;
+      return { text, cum, ppl, stoppedAt, lastBars, maxEos, stepsTaken, N };
+    }
+
+    function renderBars(hostId, bars) {
+      const host = document.getElementById(hostId);
+      const top5 = bars.slice().sort((a, b) => b.prob - a.prob).slice(0, 5);
+      host.innerHTML = top5.map(b => `
+        <div class="cand-row ${b.picked ? "picked" : ""} ${b.eos ? "eos" : ""}">
+          <span class="cand-tok">${b.eos ? "⟨end-of-turn⟩" : b.tok.replace(/ /g, "·")}</span>
+          <span class="cand-track"><span class="cand-fill" style="width:${(b.prob * 100).toFixed(1)}%"></span></span>
+          <span class="cand-pct">${(b.prob * 100).toFixed(1)}%</span>
+        </div>`).join("");
+    }
+
+    const basePromptEl = document.getElementById("bi-base-prompt");
+    const instructPromptEl = document.getElementById("bi-instruct-prompt");
+    const baseTextEl = document.getElementById("bi-base-text");
+    const instructTextEl = document.getElementById("bi-instruct-text");
+    const baseOutEl = document.getElementById("bi-base-out");
+    const instructOutEl = document.getElementById("bi-instruct-out");
+    const tplToggle = document.getElementById("bi-tpl-toggle");
+
+    const RAW_PROMPT = "The capital of France is";
+    const CHATML_PROMPT = "<|im_start|>user\nWhat is the capital of France?<|im_end|>\n<|im_start|>assistant\n";
+
+    const nSteps = makeCtrl(document.getElementById("bi-ctrls"),
+      { label: "tokens to generate (max_new_tokens)", min: 1, max: 60, step: 1, value: 20, fmt: v => v.toFixed(0) });
+
+    function fmtReadout(r, label) {
+      const genPart = `sequence log-prob <b>${r.cum.toFixed(2)}</b> nats over ${r.stepsTaken} step${r.stepsTaken === 1 ? "" : "s"} &rarr; running $\\text{PPL}=e^{-\\log p/n}\\approx$ <b>${r.ppl.toFixed(2)}</b>`;
+      if (r.stoppedAt != null) {
+        const eosBar = r.lastBars.find(b => b.eos);
+        return `${label} <strong>stopped</strong> after <b>${r.stoppedAt}</b> tokens — chose ⟨end-of-turn⟩ with p=<b>${(eosBar.prob * 100).toFixed(1)}%</b>. ${genPart}. Dragging the slider further does nothing — exactly like real inference.`;
+      }
+      return `${label} still generating at token <b>${r.N}</b> of ${nSteps.get()} requested. Max ⟨end-of-turn⟩ probability seen so far: <b>${(r.maxEos * 100).toFixed(1)}%</b> — never remotely close to winning. ${genPart}.`;
+    }
+
+    function redraw() {
+      const n = nSteps.get();
+      const wrapBase = tplToggle.checked;
+
+      basePromptEl.textContent = wrapBase ? CHATML_PROMPT : RAW_PROMPT;
+      instructPromptEl.textContent = CHATML_PROMPT;
+
+      const baseSteps = wrapBase ? TEMPLATE_STEPS : buildBaseSteps();
+      const baseR = decode(baseSteps, n);
+      baseTextEl.innerHTML = (wrapBase ? "" : RAW_PROMPT) + escapeHtml(baseR.text) + `<span class="cursor">▍</span>`;
+      renderBars("bi-base-bars", baseR.lastBars);
+      baseOutEl.innerHTML = fmtReadout(baseR, wrapBase ? "Template-wrapped base" : "Raw base");
+
+      const instrR = decode(INSTRUCT_STEPS, n);
+      instructTextEl.innerHTML = escapeHtml(instrR.text) + `<span class="cursor">▍</span>`;
+      renderBars("bi-instruct-bars", instrR.lastBars);
+      instructOutEl.innerHTML = fmtReadout(instrR, "Instruct");
+
+      if (window.renderMathInElement) {
+        renderMathInElement(baseOutEl, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+        renderMathInElement(instructOutEl, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+      }
+    }
+    function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+    nSteps.onInput(redraw);
+    tplToggle.addEventListener("change", redraw);
+    redraw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redraw, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ
+     ========================================================================== */
+  renderQuiz("quiz-pretraining", [
+    {
+      q: "A freshly initialized Qwen3-8B, before a single gradient step, is fed one token and asked to predict the next. What is its cross-entropy loss on that first prediction, in nats?",
+      num: 11.93, tol: 0.05, unit: "nats",
+      why: "With every parameter untouched, the softmax over $V=151{,}936$ classes is (approximately) uniform, so the loss is exactly $-\\ln(1/V)=\\ln V=\\ln(151{,}936)=11.93$ nats [DER, constants §9.1]. 11.76 is a different, retired number — it's $\\ln(128{,}256)$, Llama-3's vocabulary, not Qwen3's."
+    },
+    {
+      q: "What is the model's perplexity at that same step-0 point?",
+      num: 151936, tol: 0, unit: "PPL",
+      why: "$\\text{PPL}=e^{\\mathcal L}=e^{\\ln V}=V=151{,}936$ exactly, by construction — perplexity at random init always equals the vocabulary size [DER, constants §9.1]."
+    },
+    {
+      q: "Supervised fine-tuning (SFT), compared to pretraining, mostly changes:",
+      opts: [
+        "What the model does — its behavior, format, and stopping habits",
+        "What the model knows — new facts about the world",
+        "The vocabulary size $V$",
+        "The number of attention heads"
+      ],
+      a: 0,
+      why: "SFT reuses the exact same cross-entropy objective on curated data; it reshapes behavior (format, willingness to answer, when to stop), not the store of facts learned during the ~$10^{13}$-token pretraining run. Believing it teaches new facts is the same misconception page 47 spends a whole page correcting."
+    },
+    {
+      q: "What's the defining, observable behavior of a raw base model (no chat template, no SFT) given a prompt?",
+      opts: [
+        "It refuses to answer questions it doesn't know",
+        "It keeps generating plausible continuations and doesn't reliably stop",
+        "It always responds in a numbered list",
+        "It requires 8-bit quantization to run at all"
+      ],
+      a: 1,
+      why: "A base model was only ever trained to continue text — it never acquired the habit of emitting an end-of-turn token after 'answering.' The demo above shows this directly: across 60 tokens the raw-base column's end-of-turn probability never comes close to winning."
+    },
+    {
+      q: "Comparing perplexity 7.4 from Model A (tokenizer $V_A$) against perplexity 9.1 from Model B (tokenizer $V_B \\ne V_A$) to decide which model is “better” is:",
+      opts: [
+        "Valid — perplexity is a universal quality score",
+        "Invalid — a different tokenizer changes both the random-guess floor $\\ln V$ and the tokens-per-idea ratio $\\rho$, so nats-per-token isn't the same unit across models",
+        "Valid only if both models are the same parameter count",
+        "Invalid only if the two models were trained on different amounts of data"
+      ],
+      a: 1,
+      why: "Perplexity is comparable only within one tokenizer. A bigger $V$ or a different $\\rho$ (chars/token, page 44) changes what a single token even costs, so nats-per-token from two different tokenizers aren't on the same scale — even though both numbers are honestly denominated in nats."
+    },
+    {
+      q: "$\\ln V$ — the step-0 loss — is, precisely, the loss achieved by:",
+      opts: [
+        "A perfectly-trained model",
+        "A model that always predicts the single most common token",
+        "A uniform random guesser, picking uniformly among all $V$ possible tokens",
+        "A model that has memorized the entire training set"
+      ],
+      a: 2,
+      why: "Untrained weights produce an (approximately) uniform softmax over all $V$ classes, and the cross-entropy loss of a uniform guess over $V$ options is exactly $\\ln V$ — the textbook random-guess floor, worth plotting as a horizontal line on every training-loss curve you'll meet from here on."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

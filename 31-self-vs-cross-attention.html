@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>31. Attention III: Self vs Cross — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The demo is a real softmax(QKᵀ/√d_head)V computed live over a
+   fixed image-patch strip and a fixed text strip — self mode makes A square
+   (image↔image), cross mode makes it rectangular (image→text). Wide artifacts
+   scroll inside their own box so the page body never scrolls sideways. */
+.ribbon { font-family: var(--mono, monospace); font-size: .8rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); margin: 14px 0; }
+.ribbon b { color: var(--text); font-weight: 700; }
+table.cmp { border-collapse: collapse; width: 100%; margin: 16px 0; font-size: .92rem; }
+table.cmp th, table.cmp td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+table.cmp thead th { background: var(--bg-code); }
+table.cmp td:first-child { color: var(--text-dim); font-family: var(--mono, monospace); font-size: .85rem; white-space: nowrap; }
+.att-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 8px 0; }
+.att-row label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: .92rem; cursor: pointer; }
+.att-btn { background: var(--bg-code); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: .85rem; }
+.att-btn:hover { background: var(--accent); color: #fff; }
+.att-btn[aria-pressed="true"] { background: var(--accent); color: #fff; }
+.stat { font-family: var(--mono, monospace); }
+.stat.good { color: var(--good, #6cc57a); font-weight: 700; }
+.tiny { color: var(--text-dim); font-size: .86rem; }
+@media (max-width: 780px) { .inner table.ledger, .inner table.cmp { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="31-self-vs-cross-attention.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Attention III: Self vs Cross — The Diffusion Hinge</h1>
+    <p class="subtitle">Pages 29–30 built the soft lookup and its $\sqrt{d_{\text{head}}}$ thermostat, all with
+      $K$ and $V$ coming from the same sequence the queries do. Change <em>only that one thing</em> — where $K,V$
+      come from — and self-attention becomes cross-attention. That single edit is the whole mechanism behind
+      typing "a red car" into ComfyUI and getting a red car. You have watched this work a thousand times and never
+      been shown the matmul that does it. Here it is.</p>
+
+    <!-- ===================== THREADS ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD: the dot product — beat 6]</b>. <em>Same atom as page 27's similarity meter, page 29's
+      $QK^\top$ table, page 30's per-head directions.</em> <em>What is new:</em> the score matrix is no longer
+      forced square. When the keys come from a <b>different</b> sequence, $QK^\top$ is a table of dot products
+      between two <em>different</em> sets of vectors — image patches down the rows, words across the columns.
+      <em>Reopen later:</em> the diffusion track (pages 53–62) drives exactly this rectangular matrix when it
+      conditions on your prompt.
+    </div>
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD: the memory budget — seed]</b>. <em>The reality-check thread from p.18.</em> <em>What is new:</em>
+      two numbers land here that you have felt physically — the <b>77-token</b> CLIP limit you have hit when a
+      prompt got long, and <b>FLUX.2 at 32B</b>, whose unoptimized footprint your unified memory swallows and a
+      24&nbsp;GB card cannot. <em>Reopen later:</em> page 36 does the measured-budget arithmetic on your actual box.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in prose right after the comparison table
+         (cross-attn: image is the query), and again at the 2026/MMDiT box
+         (concatenated joint attention is the FLUX answer). -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      When you type "a red car" and the car comes out red, the prompt reaches the image through attention. Is the
+      <b>image attending to the text</b>, the <b>text attending to the image</b>, or are they <b>concatenated and
+      attending jointly</b>? Commit to one before you scroll — you have the deepest hook on this page, because you
+      have run the thing.
+    </div>
+    <p>Hold that guess. The honest answer is <em>"all three are right, for different model families"</em> — and the
+      reason that is not a cop-out is the whole point of this page. The classic (SD1.5/SDXL) answer is the first
+      one: <b>the image attends to the text</b>. The 2026 (FLUX) answer is the third: <b>concatenate and let
+      self-attention sort it out</b>. We build the first, then show the third is the same mechanism with the
+      arguments glued together.</p>
+
+    <!-- ===================== F4: SELF vs CROSS ===================== -->
+    <h2>The only difference is where $K$ and $V$ come from</h2>
+    <p>Self-attention, from page 29: every token makes its own query, key, and value from its own vector
+      $\mathbf{x}_i$, and each token attends over the <em>same</em> set of tokens. Now hold the machinery fixed and
+      ask a different question — <em>let the queries come from one sequence and the keys/values from another.</em>
+      Nothing else changes. That is cross-attention.</p>
+
+    <table class="cmp">
+      <thead><tr><th></th><th>Self-attention</th><th>Cross-attention</th></tr></thead>
+      <tbody>
+        <tr><td>$Q$ from</td><td>$X$ (the sequence itself)</td><td>$X$ (the sequence itself)</td></tr>
+        <tr><td>$K, V$ from</td><td>$X$ — <em>same</em> sequence</td><td>$Y$ — a <b>second</b> sequence</td></tr>
+        <tr><td>$K,V$ shape</td><td>$(S,\,d_{\text{head}})$</td><td>$(S_{\text{txt}},\,d_{\text{head}})$, with $S_{\text{txt}}\ne S$ allowed</td></tr>
+        <tr><td>score matrix</td><td>$(S,\,S)$ — square</td><td>$(S,\,S_{\text{txt}})$ — <b>rectangular</b></td></tr>
+        <tr><td>output</td><td>$(S,\,d_{\text{head}})$</td><td>$(S,\,d_{\text{head}})$ — <b>same</b> (one row per query)</td></tr>
+        <tr><td>in the wild</td><td>every transformer block; a diffusion U-Net's spatial mixing</td><td>text→image conditioning; encoder–decoder translation</td></tr>
+      </tbody>
+    </table>
+
+    <p>Write it once, in frozen row-batched notation ($W$ is $(d_{\text{out}}, d_{\text{in}})$, all attention is
+      row-batched — notation §1.3):</p>
+
+    <p>$$\text{CrossAttn}(X, Y) = \text{softmax}\!\left(\frac{(XW_Q^\top)\,(YW_K^\top)^\top}{\sqrt{d_{\text{head}}}}\right)\,(YW_V^\top).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$X$</td><td>the query sequence (e.g. image patches)</td><td>$(S, d)$</td><td>the thing being denoised / generated</td></tr>
+        <tr><td>$Y$</td><td>the key/value sequence (e.g. text tokens)</td><td>$(S_{\text{txt}}, d_c)$</td><td>the condition — a <em>different</em> sequence, any length, any width</td></tr>
+        <tr><td>$W_Q$</td><td>query projection</td><td>$(d_{\text{head}}, d)$</td><td>learned; reads $X$'s width $d$</td></tr>
+        <tr><td>$W_K, W_V$</td><td>key / value projections</td><td>$(d_{\text{head}}, d_c)$</td><td>learned; <b>absorb $Y$'s width $d_c$</b> — the load-bearing fact</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head dimension (the thermostat's $\sqrt{d_{\text{head}}}$, page 30)</td><td>scalar $=128$ in Qwen3-8B [VP]</td><td>page 30</td></tr>
+        <tr><td>$\text{softmax}$</td><td>row-wise over the $S_{\text{txt}}$ keys</td><td>$(S, S_{\text{txt}})\!\to\!(S, S_{\text{txt}})$</td><td>rows sum to 1; columns do not (page 29 fact #2)</td></tr>
+      </tbody>
+    </table>
+
+    <p>Set $Y = X$ (so $S_{\text{txt}} = S$, $d_c = d$) and you are back to self-attention exactly — self is the
+      special case of cross where the two sequences are the same one. Watch the shapes flow, and notice what stays
+      fixed no matter how long the text is:</p>
+
+    <div class="ribbon">X            (S,      d)          <b># query sequence — image patches</b>
+Y            (S_txt,  d_c)        <b># key/value sequence — text tokens (S_txt ≠ S, d_c ≠ d both fine)</b>
+W_Q          (d_head, d)          # (out, in) — ALWAYS
+W_K, W_V     (d_head, d_c)        <b># these two absorb Y's width d_c</b>
+Q = X @ W_Qᵀ                      (S,      d_head)
+K = Y @ W_Kᵀ                      (S_txt,  d_head)
+V = Y @ W_Vᵀ                      (S_txt,  d_head)
+scores = Q @ Kᵀ / sqrt(d_head)    (S,      <b>S_txt</b>)     <b># RECTANGULAR — one row per patch, one col per word</b>
+A = softmax_row(scores)           (S,      S_txt)     # each patch's row sums to 1 over the words
+out = A @ V                       (S,      <b>d_head</b>)    <b># S rows — one per query, ALWAYS (page 29 fact #1)</b></div>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      In a text-to-image diffusion model, <b>the image is the query and the text is the key/value.</b> Every image
+      patch asks "which words are about me?"; the word embeddings answer; the patch pulls a blend of their values.
+      When you type "a red car" and the car comes out red, <em>this matmul is why</em> — and it resolves the
+      prediction: the image attends to the text, not the reverse.
+    </div>
+
+    <p class="tiny">Translation note: papers write the query position as $t$, $i$, $n$, or $j$; the sequence length
+      $S$ as $T$, $L$, $N$, or <code>seq_len</code>; the text length as $S_{\text{txt}}$, <code>context_len</code>,
+      or <code>encoder_seq_len</code>; and $d_{\text{head}}$ as $d_k$, $d_v$, or <code>head_dim</code>. Same object
+      each time — only the letter changes.</p>
+
+    <!-- ===================== WORKED ===================== -->
+    <div class="box worked"><span class="box-title">✍️ Worked example — one patch reads three words</span>
+      Take one image-patch query $\mathbf{q}=(1.0,\,0.5)$ (so $d_{\text{head}}=2$, $\sqrt{d_{\text{head}}}=1.4142$)
+      and three text keys $\mathbf{k}_{\text{red}}=(1.2,\,0.1)$, $\mathbf{k}_{\text{car}}=(0.3,\,0.9)$,
+      $\mathbf{k}_{\text{sky}}=(-0.8,\,0.2)$. Raw dot products: $\mathbf{q}\!\cdot\!\mathbf{k}_{\text{red}}=1.25$,
+      $\mathbf{q}\!\cdot\!\mathbf{k}_{\text{car}}=0.75$, $\mathbf{q}\!\cdot\!\mathbf{k}_{\text{sky}}=-0.70$. Scale by
+      $\sqrt2$: $[0.8839,\,0.5303,\,-0.4950]$. Softmax → exponentials $[2.4203,\,1.6995,\,0.6096]$, sum $4.7294$,
+      so the patch's attention row is
+      $$A = [\,\mathbf{0.5118},\ \mathbf{0.3593},\ \mathbf{0.1289}\,]\quad(\text{sums to }1.0000).$$
+      This patch pulls <b>51.2%</b> of its output from "red", <b>35.9%</b> from "car", <b>12.9%</b> from "sky" —
+      a real, differentiable blend, the same softmax(QKᵀ/√d_head)V the demo below runs live per patch (there over
+      its own wider $d_{\text{head}}=16$ and its own seeded keys, so its numbers differ — the operation is identical).
+    </div>
+
+    <!-- ===================== CONCRETE SHAPES ===================== -->
+    <h2>The shapes in a system you have actually run</h2>
+    <p>A representative SDXL-class conditioning path (verify the exact widths against your <code>diffusers</code>
+      build — they vary by model, so read these as the <em>shape of the shapes</em>, not frozen constants):</p>
+    <ul>
+      <li>$Y$ = CLIP text embeddings, $(S_{\text{txt}}{=}\mathbf{77},\ 2048)$. That <b>77</b> is the CLIP context
+        length every ComfyUI user has bumped into; the $2048$ is a concatenation of two CLIP encoders
+        (CLIP-L $768$ + CLIP-G $1280$).</li>
+      <li>$X$ = flattened U-Net feature map, e.g. $(1024,\ 640)$ — $1024$ spatial positions of width $640$.</li>
+      <li>cross-attention score matrix $A$: $(1024,\ 77)$ — <b>1024 image positions × 77 text tokens</b>, and each
+        entry $A_{ij}$ is literally "how much does image-patch $i$ care about word $j$."</li>
+    </ul>
+    <p>That $(1024, 77)$ matrix <em>is</em> the object your cross-attention-map, prompt-editing, and
+      regional-prompting nodes reach in and rewrite. You have used those nodes; now you know they are writing
+      into $A$.</p>
+
+    <!-- ===================== 2026 / MMDiT ===================== -->
+    <div class="track-banner track-diffusion"><span class="track-label">→ Diffusion · this is the hinge the whole track swings on</span></div>
+
+    <h2>Where $K,V$ enter decides everything downstream</h2>
+    <p>Once you see that the condition enters only through $K$ and $V$, a pile of things you have used stop being
+      magic and become consequences:</p>
+    <ul>
+      <li><b>Classifier-free guidance (CFG).</b> Its target is this $Y$-path: run the denoiser twice, once with
+        $Y=$ your prompt and once with $Y=\varnothing$ (the empty condition), then extrapolate away from the
+        unconditioned direction. CFG only <em>means</em> anything once you know $Y$ enters through $K,V$. (Sized
+        and derived in the diffusion track, pages 53–62.)</li>
+      <li><b>IP-Adapter / ControlNet.</b> Add a <em>second</em> cross-attention over image (or map) embeddings —
+        "condition on anything you can embed" is just "give the patches a second set of keys to query."</li>
+      <li><b>The 77-token wall.</b> A direct consequence of the old design: CLIP's context is 77, so $S_{\text{txt}}$
+        caps at 77 and long prompts get truncated or chunked. Not a law of attention — a property of that one
+        encoder.</li>
+    </ul>
+
+    <div class="box key"><span class="box-title">🔑 Key idea — the 2026 twist (resolves the prediction's third option)</span>
+      FLUX.1 and FLUX.2 use <b>no separate cross-attention.</b> Their <b>MMDiT / joint attention</b> concatenates
+      the text tokens and the image tokens into <em>one</em> sequence and runs plain <b>self</b>-attention over it —
+      so image↔image, image↔text, text↔image, and text↔text all live in one score matrix. <em>Cross-attention is a
+      special case of self-attention over a concatenated sequence.</em> Teach cross first; reveal MMDiT as
+      "just glue the two sequences together and let self-attention sort it out."
+    </div>
+
+    <p>The concrete 2026 numbers, because the memory thread lands here:</p>
+    <ul>
+      <li><b>FLUX.1-dev</b>: ~12B params, MMDiT, dual text encoders (T5-XXL 4.7B + CLIP-L) [VP].</li>
+      <li><b>FLUX.2-dev</b>: <b>32B</b> params, a single <b>Mistral-3</b> text encoder (context $\le 512$ tokens —
+        so the 77-wall is gone), a <b>32-channel VAE</b> at spatial factor $f=8$ [VP]. At bf16 the transformer
+        weights alone are $32\times10^9\times 2 = \mathbf{64\ GB}$ [DER]; with the text encoder and working state
+        the unoptimized pipeline runs well past 80 GB.</li>
+    </ul>
+    <p>That is the motivating collision: FLUX.2 at &gt;80 GB <em>does not fit</em> on a 24 GB card, but slots into
+      your box's 128 GB unified memory with room to work. (The <em>measured</em> usable figure — it is not the full
+      128 — is page 36's story; don't quote 128 as usable yet.) The 77-token limit you have cursed at is a fossil
+      of the old cross-attention design; FLUX removing it is a fossil of the new joint-attention one.</p>
+
+    <!-- ===================== BRIDGE TO 32 ===================== -->
+    <div class="track-banner track-llm"><span class="track-label">→ LLM · the other way to route K,V is by time-order — that is page 32</span></div>
+
+    <p>There are exactly two interesting things you can do to "where attention looks," and you have now seen one.
+      Cross-attention routes $K,V$ from a <em>different sequence</em>. The other story routes attention
+      <em>within one sequence by time-order</em>: position $i$ may see only positions $\le i$. That is <b>causal
+      masking</b>, the hinge for the LLM track, and it gets its own page next (page 32) — the additive
+      $-\infty$ mask, the "4096 training signals from one forward pass" economics, and the KV-cache payoff all live
+      there.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The fork contrast — draw this seam explicitly</span>
+      A diffusion U-Net's image self-attention is <b>bidirectional / unmasked</b>. Causality is a property of
+      time-ordered <em>generation</em> — text is generated left to right, so an LLM masks the future — but an image
+      is not time-ordered, so there is nothing to mask. The same <code>attn()</code> primitive is <em>masked</em>
+      for an LLM and <em>unmasked</em> for a U-Net. <b>The mask, not the mechanism, is what differs between the two
+      tracks.</b> Both inherit the identical function you built on page 29.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Cross-attention is a different mechanism."</span>
+      Same function, different arguments. Self is <code>attn(Q=x, K=x, V=x)</code>; cross is
+      <code>attn(Q=x, K=y, V=y)</code>. The <em>code is identical</em> — only the $K,V$ arguments (and therefore the
+      column count of $A$) change. The demo and the code artifact show both call sites side by side.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "The prompt is injected / mixed into the image."</span>
+      Backwards. The image <em>queries</em> the prompt — it is a <b>pull</b>, content-addressed by each patch,
+      not a push. This is precisely why prompts are unreliable: <em>you don't control the query.</em> The patch
+      decides what to ask for; the prompt only decides what is available to be asked.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "$K,V$ must match $Q$'s width."</span>
+      No. $K$ must match $Q$ in $d_{\text{head}}$ (they are dotted together); $V$ must match $K$ in <em>length</em>
+      $S_{\text{txt}}$ (one value per key). $Y$'s native width $d_c$ (2048 for CLIP, 4096 for T5, whatever Mistral
+      uses) is <b>free</b> — $W_K, W_V$ project it down to $d_{\text{head}}$. <b>That is exactly why you can bolt a
+      T5, a Mistral, or a CLIP onto the same U-Net.</b>
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Diffusion U-Nets use causal masks like LLMs do."</span>
+      No — image self-attention is bidirectional / unmasked (the fork contrast above). Causality is about
+      time-ordered generation, and images aren't time-ordered. Causal masking itself is dissected on page 32.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Drive it: one function, two argument sets</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Flip between <b>self</b> (image↔image, a square matrix) and <b>cross</b> (image→text, a rectangular one). In
+      cross mode, drag the "prompt length" slider to drop words from the end and watch a <em>column</em> vanish
+      while the number of <em>rows</em> never moves. The heatmap is a real
+      $\text{softmax}(QK^\top/\sqrt{d_{\text{head}}})V$ over seeded embeddings — hover any patch to read its row.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Self vs cross-attention over 8 image patches <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="att-row">
+          <button class="att-btn" id="d-mode-self" aria-pressed="false" type="button">self · Q=K=V=image</button>
+          <button class="att-btn" id="d-mode-cross" aria-pressed="true" type="button">cross · Q=image, K=V=text</button>
+          <label class="chk" id="d-patch-lbl">inspect patch: <b id="d-patch">0</b></label>
+        </div>
+        <canvas id="d-heat" height="320"></canvas>
+        <div class="controls" id="d-heat-ctrls"></div>
+        <div class="readout" id="d-heat-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <h2>The code that proves the mechanism is identical</h2>
+    <div class="box try"><span class="box-title">Try it — <code>code/self_and_cross.py</code></span>
+      Calls <b>one</b> function — <code>F.scaled_dot_product_attention</code> — two ways: self (Q=K=V=x) and cross
+      (Q=image, K=V=text of a <em>different</em> length). Prints both shape ribbons so you see the code is the same
+      and only the $K,V$ arguments (and the column count of $A$) change.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line">B, H, d_head = <span class="tok-num">1</span>, <span class="tok-num">8</span>, <span class="tok-num">64</span></span>
+<span class="line">S_img, S_txt = <span class="tok-num">1024</span>, <span class="tok-num">77</span>          <span class="tok-com"># image positions vs CLIP text tokens</span></span>
+<span class="line"></span>
+<span class="line">img = torch.<span class="tok-fn">randn</span>(B, H, S_img, d_head)   <span class="tok-com"># already projected + reshaped to heads</span></span>
+<span class="line">txt = torch.<span class="tok-fn">randn</span>(B, H, S_txt, d_head)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># SELF: keys and values are the image itself</span></span>
+<span class="line">o_self = F.<span class="tok-fn">scaled_dot_product_attention</span>(img, img, img)   <span class="tok-com"># Q=K=V=img</span></span>
+<span class="line"><span class="tok-kw">assert</span> o_self.shape == (B, H, S_img, d_head)              <span class="tok-com"># (1, 8, 1024, 64)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># CROSS: same function — keys and values are the TEXT (a different length)</span></span>
+<span class="line">o_cross = F.<span class="tok-fn">scaled_dot_product_attention</span>(img, txt, txt)  <span class="tok-com"># Q=img, K=V=txt</span></span>
+<span class="line"><span class="tok-kw">assert</span> o_cross.shape == (B, H, S_img, d_head)             <span class="tok-com"># (1, 8, 1024, 64) — SAME rows</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># the score matrix is where the difference shows: (S_img, S_img) vs (S_img, S_txt)</span></span>
+<span class="line">scale = d_head ** -<span class="tok-num">0.5</span></span>
+<span class="line">A_self  = (img @ img.<span class="tok-fn">transpose</span>(-<span class="tok-num">2</span>, -<span class="tok-num">1</span>) * scale).<span class="tok-fn">softmax</span>(-<span class="tok-num">1</span>)   <span class="tok-com"># (1,8,1024,1024) square</span></span>
+<span class="line">A_cross = (img @ txt.<span class="tok-fn">transpose</span>(-<span class="tok-num">2</span>, -<span class="tok-num">1</span>) * scale).<span class="tok-fn">softmax</span>(-<span class="tok-num">1</span>)   <span class="tok-com"># (1,8,1024,77) rectangular</span></span>
+<span class="line"><span class="tok-kw">assert</span> torch.<span class="tok-fn">allclose</span>(A_cross.<span class="tok-fn">sum</span>(-<span class="tok-num">1</span>), torch.<span class="tok-fn">ones_like</span>(A_cross.<span class="tok-fn">sum</span>(-<span class="tok-num">1</span>)))  <span class="tok-com"># rows sum to 1</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-31"></div>
+
+    <!-- ===================== CROSS-REFS ===================== -->
+    <div class="box key"><span class="box-title">↪ Where this goes</span>
+      <b>[THREAD: the dot product]</b> the score matrix — now rectangular — is the same atom from pages 27/29/30.
+      <b>[THREAD: the memory budget]</b> the 77-token wall and FLUX.2's 64&nbsp;GB of weights are paid off on
+      <b>page 36</b> (your box, measured). Next: <b>page 32</b> gives the <em>other</em> $K,V$-routing story — causal
+      masking, the LLM hinge; <b>page 35</b> uses "where does the condition enter?" to explain why decoder-only won
+      and encoder–decoder migrated to diffusion; the diffusion track (<b>pages 53–62</b>) drives this exact
+      rectangular $A$ for conditioning, CFG, and IP-Adapter. Reopen <b>page 30</b>'s heatmap whenever the
+      temperature knob comes back.
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: self vs cross-attention, real softmax(QKᵀ/√d_head)V ---- */
+  (function () {
+    const { Mat, attention, RNG } = NN;
+
+    // Fixed strips with real, seeded embeddings so the demo reproduces exactly.
+    // d_head = 16 -> default scale sqrt(16) = 4, the true √d_head thermostat.
+    const D_HEAD = 16, N_IMG = 8, N_TXT = 5;
+    const PATCHES = ["img₀", "img₁", "img₂", "img₃", "img₄", "img₅", "img₆", "img₇"];
+    const WORDS = ["a", "red", "car", "on", "road"];   // dropped from the end
+    const rng = new RNG(31);
+
+    // Image-patch embeddings (N_IMG x D_HEAD) and full text embeddings (N_TXT x D_HEAD).
+    const XIMG = Mat.randn(N_IMG, D_HEAD, rng, 1);
+    const YTXT = Mat.randn(N_TXT, D_HEAD, rng, 1);
+
+    let mode = "cross";           // "self" | "cross"
+    let inspect = 0;              // which image patch (row) to read out
+
+    const canvas = document.getElementById("d-heat");
+    const out = document.getElementById("d-heat-out");
+    const selfBtn = document.getElementById("d-mode-self");
+    const crossBtn = document.getElementById("d-mode-cross");
+    const patchLbl = document.getElementById("d-patch");
+
+    const hm = new Heatmap(canvas, {
+      data: [[0]], rowLabels: PATCHES, colLabels: WORDS.slice(0, N_TXT),
+      colormap: "sequential", cellText: true, colorbar: true, hover: true,
+      cellText: (v) => v >= 0.005 ? v.toFixed(2) : "",
+      onHover: (i) => { if (i != null && i !== inspect) { inspect = i; patchLbl.textContent = String(i); draw(); } },
+    });
+
+    // "prompt length" slider — only meaningful in cross mode.
+    const nCtrl = makeCtrl(document.getElementById("d-heat-ctrls"), {
+      label: "prompt length S_txt (cross mode — drop words from the end)",
+      min: 2, max: 5, step: 1, value: 5, fmt: v => v.toFixed(0) + " words"
+    });
+
+    function draw() {
+      let A, cols, shapeStr, outShape, note;
+      if (mode === "self") {
+        // Q = K = V = image  ->  square (8 x 8)
+        const res = attention(XIMG, XIMG, XIMG);   // default temperature = sqrt(d_head) = 4
+        A = res.A; cols = PATCHES;
+        shapeStr = "(8, 8)"; outShape = "(8, 16)";
+        note = "self: keys are the image itself — square matrix, patch↔patch.";
+      } else {
+        // Q = image, K = V = text[:n]  ->  rectangular (8 x n)
+        const n = Math.round(nCtrl.get());
+        const Ysub = n === N_TXT ? YTXT : Mat.from(YTXT.toArray().slice(0, n));
+        const res = attention(XIMG, Ysub, Ysub);   // SAME function, text as K,V
+        A = res.A; cols = WORDS.slice(0, n);
+        shapeStr = "(8, " + n + ")"; outShape = "(8, 16)";
+        note = "cross: keys are the text — " + n + " word" + (n === 1 ? "" : "s") + ", so the matrix is 8×" + n + ".";
+      }
+      hm.o.colLabels = cols;
+      hm.setData(A.toArray());
+
+      // Read out the inspected patch's row: its top-attended key.
+      const row = A.row(inspect);
+      let top = 0; for (let j = 1; j < row.length; j++) if (row[j] > row[top]) top = j;
+      const rowSum = row.reduce((a, b) => a + b, 0);
+
+      out.innerHTML =
+        `mode <b>${mode}</b> · score matrix <span class="stat">A = ${shapeStr}</span> · ` +
+        `output <span class="stat">${outShape}</span> ` +
+        `<span class="stat good">— always 8 rows, one per image query</span>` +
+        `<br><b>patch ${inspect}</b> attends most to <b>"${cols[top]}"</b> ` +
+        `(weight <span class="stat">${row[top].toFixed(3)}</span>); its row sums to ` +
+        `<span class="stat">${rowSum.toFixed(3)}</span>.` +
+        `<br><span class="tiny">softmax(QKᵀ/√d_head)V, d_head=16 → scale √16=4. ${note} ` +
+        `Change the mode or drop a word: columns move, rows never do.</span>`;
+    }
+
+    function setMode(m) {
+      mode = m;
+      selfBtn.setAttribute("aria-pressed", m === "self");
+      crossBtn.setAttribute("aria-pressed", m === "cross");
+      if (inspect >= N_IMG) inspect = 0;
+      draw();
+    }
+    selfBtn.addEventListener("click", () => setMode("self"));
+    crossBtn.addEventListener("click", () => setMode("cross"));
+    nCtrl.onInput(draw);
+    setMode("cross");
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-31", [
+    {
+      q: "The <em>only</em> difference between self- and cross-attention is:",
+      opts: [
+        "where $K$ and $V$ come from",
+        "whether a softmax is used",
+        "the value of $\\sqrt{d_{\\text{head}}}$",
+        "whether the output has one row per query"
+      ],
+      a: 0,
+      why: "Same function; self takes $K,V$ from the query sequence $X$, cross takes them from a second sequence $Y$. Everything else — softmax, the scale, one-row-per-query — is identical."
+    },
+    {
+      q: "In text-to-image cross-attention, the query is:",
+      opts: [
+        "the image; the text is key/value",
+        "the text; the image is key/value",
+        "both, concatenated",
+        "neither — they are added"
+      ],
+      a: 0,
+      why: "The image patches query the text. \"The prompt is injected into the image\" is the misconception (b): it is a pull, content-addressed by each patch, not a push."
+    },
+    {
+      q: "You can attach a T5 (width 4096) or a CLIP (width 2048) to the same U-Net because:",
+      opts: [
+        "$W_K, W_V$ project $Y$'s width $d_c$ down to $d_{\\text{head}}$",
+        "$K$ and $V$ must match $Q$'s width, so you pad",
+        "the U-Net is retrained for each encoder",
+        "attention ignores the value width"
+      ],
+      a: 0,
+      why: "$Y$'s native width $d_c$ is free — the key/value projections absorb it. $K$ only needs to match $Q$ in $d_{\\text{head}}$; $V$ only needs to match $K$ in length. Distractor (b) is misconception (c)."
+    },
+    {
+      q: "An image query strip of length 8 cross-attends to a text key strip of length 5. How many <b>rows</b> does the attention matrix $A$ have?",
+      num: 8, tol: 0, unit: "",
+      why: "One row per query: rows = number of image queries = 8. The column count (5) tracks the text length; drop a word and columns fall to 4, but rows stay at 8."
+    },
+    {
+      q: "FLUX's MMDiT / joint attention relates to cross-attention how?",
+      opts: [
+        "cross-attention is a special case of self-attention over a concatenated sequence",
+        "MMDiT removes attention entirely",
+        "they are unrelated mechanisms",
+        "MMDiT is cross-attention run twice"
+      ],
+      a: 0,
+      why: "Concatenate text + image tokens into one sequence and run self-attention: image↔text is then just one quadrant of the joint score matrix. Cross-attention is that quadrant, computed separately."
+    },
+    {
+      q: "A colleague insists \"the diffusion U-Net must use a causal mask like the LLM does.\" This is:",
+      opts: [
+        "false — image self-attention is bidirectional/unmasked; images aren't time-ordered",
+        "true — all transformers are causal",
+        "true — otherwise the image would leak future patches",
+        "false — U-Nets have no attention at all"
+      ],
+      a: 0,
+      why: "Causality is a property of time-ordered generation. Images are not time-ordered, so image self-attention is unmasked. Causal masking (page 32) is the LLM-only routing story; distractor (b) is misconception (d)."
+    }
+  ], "Self vs cross-attention");
+
+});
+</script>
+</body>
+</html>

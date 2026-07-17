@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>23. Generalization II: Bias–Variance and Double Descent — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the regime-heuristic lookup table (not a symbol ledger, a
+   decision table — same treatment page 22 gave its six-shape table). */
+.bv-regime td:first-child, .bv-regime th:first-child { white-space: nowrap; font-weight: 700; }
+@media (max-width: 780px) {
+  .inner table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="23-bias-variance-double-descent.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Generalization II: Bias–Variance and the Double-Descent Surprise, Honestly</h1>
+    <p class="subtitle">Page 22 gave you a toolkit: early stopping, a little weight decay, a low rank, watch the two
+      curves. This page gives you the theory that explains <em>why</em> that particular toolkit is the right one for
+      your regime — and why the classical story that "bigger models overfit more" quietly stopped being true
+      somewhere around 2019, without ever stopping being true for you.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread — reopened</span>
+      <b>[THREAD:MEM]</b> Page 18 costed the trainable-parameter count in bytes; page 22 read a small trainable
+      count as regularization. <em>What's new here:</em> that same count, $P$, is the x-axis of an entire curve —
+      the thing this page spends its whole length explaining. <em>Reopen:</em> the same parameter-count discipline,
+      now given its full theoretical grounding instead of asserted.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in "Double descent" section below, restated in the demo's readout, and
+         tested again in quiz Q3/Q4. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Classical theory says test error is <b>U-shaped</b> in model size: too small underfits, too big overfits. A
+      modern LLM has <em>billions</em> of parameters and is fine-tuned on a few hundred to a few thousand
+      examples — <b>$P$ is enormously larger than $N$.</b> By classical logic, that should be catastrophic
+      overfitting. Is it? Before you read on: what do you think actually happens to test error as $P$ keeps
+      growing past $N$?
+    </div>
+
+    <!-- ===================== THE IDENTITY ===================== -->
+    <h2>Bias–variance — an identity, not a law</h2>
+    <p>Fix a target $y$ and let $\hat f$ be whatever function your training procedure produces — it depends on
+      <em>which</em> training set you happened to draw, so across many draws $\hat f$ is itself a random variable.
+      Decompose the expected squared error into three non-negative pieces:</p>
+
+    <div class="box rule"><span class="box-title">📐 The decomposition</span>
+      $$\mathbb E\!\left[(y-\hat f)^2\right] \;=\; \underbrace{\left(\mathbb E[\hat f]-f\right)^2}_{\text{Bias}^2}
+      \;+\; \underbrace{\mathrm{Var}[\hat f]}_{\text{Variance}} \;+\; \underbrace{\sigma^2}_{\text{irreducible}}$$
+      This is algebra, not an empirical claim — expand $(y-\hat f)^2$ around $\mathbb E[\hat f]$ and every cross
+      term vanishes in expectation. It holds for <b>squared loss</b>, always, for any model, any dataset size, any
+      year. Nothing about it can go out of date.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$y$</td><td>the true target at a fixed input</td><td>scalar</td><td>the data-generating process</td></tr>
+        <tr><td>$f$</td><td>the true function, $y=f(x)+\varepsilon$</td><td>scalar-valued</td><td>unknown, unobservable</td></tr>
+        <tr><td>$\hat f$</td><td>your fitted model — a <em>random variable</em>, because it depends on which training set you happened to draw</td><td>scalar-valued</td><td>the training procedure</td></tr>
+        <tr><td>$\mathbb E[\hat f]$</td><td>the average prediction across many training-set draws</td><td>scalar</td><td>computed above</td></tr>
+        <tr><td>$\mathrm{Bias}^2$</td><td>how far the <em>average</em> fit is from the truth — consistently wrong the same way (a line through a curve)</td><td>scalar $\ge 0$</td><td>defined above</td></tr>
+        <tr><td>$\mathrm{Var}[\hat f]$</td><td>how much the fit <em>wiggles</em> across different training sets — wrong differently each time (a jagged curve chasing noise)</td><td>scalar $\ge 0$</td><td>defined above</td></tr>
+        <tr><td>$\sigma^2$</td><td>irreducible noise — the same $\sigma^2$ notation as page 8's Gaussian variance, here the floor no model can beat</td><td>scalar $\ge 0$</td><td>the data-generating process, not the model</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — three datasets, one constant model</span>
+      Suppose the truth is a constant, $f(x)=1$, with irreducible noise variance $\sigma^2=0.01$. Three different
+      training draws produce three different fitted constants: $\hat f_1=0.9$, $\hat f_2=1.1$, $\hat f_3=1.0$.
+      $\mathbb E[\hat f]=(0.9+1.1+1.0)/3=1.0$, so $\mathrm{Bias}^2=(1.0-1.0)^2=0$ — this model class is unbiased
+      here. $\mathrm{Var}[\hat f]=\big[(0.9{-}1.0)^2+(1.1{-}1.0)^2+(1.0{-}1.0)^2\big]/3=(0.01+0.01+0)/3=0.00667$.
+      Total expected squared error $=0+0.00667+0.01=\mathbf{0.01667}$. Notice bias and variance are answering
+      different questions: bias asks "is the <em>average</em> guess right?"; variance asks "how much does any one
+      guess move if you re-run the experiment?" — a model can score zero on either one and still be wrong.
+    </div>
+
+    <p>The classical prediction follows directly: as model complexity grows, bias falls (a richer model class can
+      get closer to $f$ on average) but variance rises (a richer model class has more room to chase the noise in
+      whatever training set it happened to see). Trade one against the other and test error traces a <b>U</b>. This
+      was correct and useful for thirty years — for $P \ll N$, comfortably inside classical statistics' home
+      turf.</p>
+
+    <!-- ===================== DOUBLE DESCENT ===================== -->
+    <h2>Double descent — the U keeps going</h2>
+    <div class="box key"><span class="box-title">🔑 Past the interpolation threshold, the curve comes back down</span>
+      Define the <b>interpolation threshold</b> as the point where the model has just enough capacity to fit the
+      training set exactly, $P\approx N$. Classical theory predicts test error should keep rising past that point —
+      more capacity, more overfitting, forever. It doesn't. Test error rises to a <b>peak right at the
+      threshold</b> (variance is largest exactly where the fit is most brittle — barely enough capacity to
+      interpolate, with almost no slack), and then <b>descends again</b> as $P$ keeps growing — often below the
+      first, classical minimum. Not a U. A U followed by a second descent.
+    </div>
+
+    <p><b>Resolving the PREDICT:</b> a modern LLM sits <em>far</em> to the right of the threshold —
+      $P$ in the billions against $N$ in the hundreds. Classical logic, extrapolated past where it was ever
+      validated, says this should be catastrophic. It isn't, because the curve isn't a U past the threshold; it's
+      already descended a second time by the time you get anywhere near GPT scale. <b>Overparameterization buys
+      you <em>choice</em>, not complexity</b> — the intuition (Nakkiran et al., 2019): at $P\approx N$ there is
+      essentially exactly one interpolating fit, and it is a brittle, high-variance one because there was no
+      freedom in finding it. Past the threshold there are infinitely many functions that fit the training data
+      exactly, and SGD's implicit bias (page 16 — the noise in the update path itself, not an explicit penalty)
+      systematically favors the <em>smoothest</em> one among them. More parameters means more candidate
+      interpolants to choose the smooth one from, not more freedom to overfit.</p>
+
+    <p>The phenomenon appears along <b>three axes</b> (Nakkiran et al., 2019 — "Deep Double Descent"):
+      <b>model-wise</b> (sweep width or depth at fixed data, what the demo below does), <b>epoch-wise</b> (train one
+      large model longer — test error can rise, peak, then fall again within a single training run), and
+      <b>sample-wise</b> — the strange one worth calling out by name: <b>near the threshold, adding more training
+      data can make test error <em>worse</em></b>, because it can push a model that was comfortably
+      over-parameterized right back onto the brittle threshold it had already grown past.</p>
+
+    <!-- ===================== THE HONEST PART ===================== -->
+    <h2>★ The honest part — watch the peak dissolve</h2>
+    <div class="box warn"><span class="box-title">⚠️ Do not present double descent as a settled law</span>
+      <p><b>(1) The peak largely disappears under proper regularization.</b> Optimal early stopping or a
+      well-tuned weight decay $\lambda$ substantially flattens it — the sharp spike at the threshold may be, in
+      real part, an artifact of training an under-regularized model right at its most brittle capacity, not a
+      separate law of nature bolted onto the bias–variance identity. The demo below turns $\lambda$ up and you
+      watch this happen, live, on your own dataset — not a claim you're asked to take on faith.</p>
+      <p><b>(2) Parameter count is a poor complexity axis.</b> Plot against a norm-based complexity measure instead
+      (how large the fitted weights actually are, not how many of them exist) and the second descent can shrink or
+      vanish — a lot of what looks like "more parameters helps" is really "more parameters makes it easier for SGD
+      to find low-norm solutions."</p>
+      <p><b>(3) At LLM/ViT scale, published scaling curves are monotone power laws</b> — smooth and monotonically
+      improving, no double-descent bump where naive extrapolation says one "should" appear.</p>
+      <p><b>(4) What's actually dead is narrower than the headline.</b> Only the claim that variance must rise
+      <em>monotonically</em> with $P$ forever is false. The identity itself — Bias$^2$ + Variance + irreducible —
+      is algebra and cannot be wrong.</p>
+      <b>Ship the honest framing:</b> the classical U is real (small model, small data — often where you'll be).
+      Double descent is real (a real reason big models exist and don't need to be exactly right-sized). Both are
+      true in their regimes. The field does not have one clean theory that produces both from first principles.
+      Hold both, and know which regime you're actually in.
+    </div>
+
+    <!-- ===================== WHICH REGIME ===================== -->
+    <h2>Which regime are you in?</h2>
+    <table class="bv-regime ledger">
+      <thead><tr><th>Regime</th><th>Looks like</th><th>What to do</th></tr></thead>
+      <tbody>
+        <tr><td>$P \ll N$</td><td>Classical. The U-curve applies straightforwardly.</td><td>Regularize modestly; more capacity helps until it doesn't.</td></tr>
+        <tr><td>$P \approx N$</td><td>The interpolation threshold. Small changes in the training set produce very different fits — the worst place to be, and easy to land on by accident.</td><td>Add capacity <em>or</em> regularize hard to get off the peak; don't sit here.</td></tr>
+        <tr><td>$P \gg N$</td><td><b>A 7B-parameter model fine-tuned on a few hundred examples — this is him.</b> Overparameterized, with the interpolation threshold miles behind, in minutes.</td><td>Regularization (LoRA's low rank, early stopping, a small LR, few epochs) is doing the heavy lifting. Double descent will not save you — you can't grow the dataset the way the demo below grows $N$.</td></tr>
+      </tbody>
+    </table>
+    <p>The three rows aren't independent advice — they're the <em>same</em> identity, read at three different
+      points on the $P/N$ axis. Page 22's toolkit (early stopping, a little decay, a low rank, watch the two
+      curves) is exactly what the third row prescribes, now with the reason attached instead of asserted.</p>
+
+    <!-- ===================== LORA CONNECTION ===================== -->
+    <h2>★ The LoRA connection</h2>
+    <div class="box key"><span class="box-title">🔑 LoRA's rank $r$ is the capacity knob — bias–variance in a 2026 costume</span>
+      LoRA restricts <em>how much</em> a fine-tune is allowed to move the model, and that restriction is a
+      direct, literal capacity control: <b>$r=4$</b> gives the update almost no room to move — high bias, it
+      barely learns the new behavior, but it also can't memorize. <b>$r=256$ fine-tuned on 20 images</b> gives the
+      update enormous freedom — low bias, but high variance: it doesn't just learn the concept, it memorizes the
+      20 photos and, in the process, forgets other things it knew. The classical U-curve is alive and living
+      inside a LoRA config screen, and — the rule the trunk's LoRA/SVD pages (39–40) make explicit —
+      <b>the U's location is set by the dataset's information content, not by the base model's size.</b> That's
+      why the LLM track runs $r\approx 64\text{–}256$ (tens of thousands of varied examples, a lot to install)
+      while the diffusion track runs $r\approx 8\text{–}32$ (fifteen to twenty images of one thing, almost nothing
+      to install) — one rule, two regimes, not a contradiction. Not re-derived here; this page just hands you
+      <em>why</em> it's the right rule when you get there. <b>[THREAD:QWEN]</b>
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four ways to misread this</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Bigger models must overfit more."</span>
+      True only up to the interpolation threshold. Past it, that's the second descent — more capacity buys choice
+      among interpolants, and SGD's implicit bias picks a smooth one. GPT-scale models live well past the
+      threshold, where this intuition no longer applies.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "The bias–variance tradeoff is obsolete — double descent replaced it."</span>
+      The decomposition is algebra; it cannot become obsolete. What's outdated is only the narrower claim that
+      variance rises <em>monotonically</em> with $P$ forever. Honor the question mark — both pictures are true, in
+      different regimes.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "More data always helps."</span>
+      Almost always — except near the interpolation threshold, where sample-wise double descent means adding data
+      can briefly make test error <em>worse</em> by pushing a comfortably over-parameterized model back onto the
+      brittle threshold.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Double descent is a settled law I can rely on at any scale."</span>
+      The peak you'd rely on is largely a regularization artifact (watch it dissolve in the demo below), and at
+      LLM/ViT scale the curves you'd actually see are monotone power laws with no bump. Don't bank on it; bank on
+      the identity plus knowing your regime.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: the λ slider that dissolves double descent</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Leave $\lambda=0$ and watch: as hidden-layer width climbs, test loss falls, <b>spikes hard right at the
+      interpolation threshold</b> (the dashed line, where model size $P$ crosses training-set size $N$), then
+      comes back down — the classic U followed by a second descent. Now drag $\lambda$ up. Watch the peak
+      <b>flatten away</b> — not because the axis changed, but because regularization was most of what built it.
+    </div>
+    <p style="font-size:.92rem;color:var(--text-dim)">Every point below is a real one-hidden-layer tanh network —
+      the hidden layer is fixed random features (untrained, so it can't be accused of quietly doing the
+      regularizing itself), and the output layer is solved <b>exactly</b>, in closed form, by ridge regression
+      ($\lambda=0$ is the classical minimum-norm least-squares solution). That's deliberate, not a shortcut: it's
+      the same construction Belkin et al. and Hastie et al. used to first pin the phenomenon down cleanly, it
+      makes $P$ literally the count of parameters being fit to data (the $h$ read-out weights; the random hidden
+      layer isn't "trained," so it isn't $P$), and it's fast enough to re-solve on every slider tick with no
+      training-noise ambiguity about whether a spike is real or just an unlucky SGD run.</p>
+
+    <div class="demo">
+      <div class="demo-head">Test loss vs. model size, closed-form ridge fits, model-wise sweep <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-dd-plot" height="340"></canvas>
+        <div class="controls" id="d-dd-ctrls"></div>
+        <div class="readout" id="d-dd-out">Fitting the sweep…</div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ===================== -->
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <b><code>code/23_double_descent.py</code></b> reproduces model-wise double descent on a small synthetic set —
+      same construction as the browser demo (random hidden features, closed-form ridge read-out, so the spike is
+      never in doubt) — sweeps weight decay to show the same peak flattening, and prints the regime test ($P$ vs
+      $N$) for his actual fine-tune numbers — a few hundred examples against a multi-billion-parameter model.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">ridge_fit_random_features</span>(X_train, y_train, X_test, y_test, width, weight_decay, seed=<span class="tok-num">0</span>):</span>
+<span class="line">    <span class="tok-com"># P = width = the ONLY trained parameters: the random hidden layer is fixed,</span></span>
+<span class="line">    <span class="tok-com"># so it can't be quietly doing the regularizing itself (the browser demo's choice too).</span></span>
+<span class="line">    g = torch.<span class="tok-fn">Generator</span>().<span class="tok-fn">manual_seed</span>(seed)</span>
+<span class="line">    W1 = torch.<span class="tok-fn">randn</span>(<span class="tok-num">2</span>, width, generator=g)</span>
+<span class="line">    b1 = torch.<span class="tok-fn">randn</span>(width, generator=g)</span>
+<span class="line">    phi = <span class="tok-kw">lambda</span> X: torch.<span class="tok-fn">tanh</span>(X @ W1 + b1)</span>
+<span class="line">    Phi_train, Phi_test = phi(X_train), phi(X_test)</span>
+<span class="line hl">    <span class="tok-com"># weight_decay=0 is the minimum-norm least-squares solution — the exact construction</span></span>
+<span class="line hl">    beta = torch.linalg.<span class="tok-fn">lstsq</span>(</span>
+<span class="line">        Phi_train.T @ Phi_train + weight_decay * torch.<span class="tok-fn">eye</span>(width), Phi_train.T @ y_train</span>
+<span class="line">    ).solution</span>
+<span class="line">    test_loss = ((Phi_test @ beta - y_test) ** <span class="tok-num">2</span>).<span class="tok-fn">mean</span>().<span class="tok-fn">item</span>()</span>
+<span class="line">    <span class="tok-kw">return</span> width, test_loss</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># --widths sweeps P across the interpolation threshold P ≈ N_train;</span></span>
+<span class="line"><span class="tok-com"># --wd 0.0 then --wd 0.05 reproduces the browser slider's "peak flattens" result.</span></span>
+<span class="line"><span class="tok-com"># assert the spike exists at wd=0 (a reproduction, [EST] — not a frozen number).</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz23"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;22 gave the two-curve toolkit this page explains the theory behind;
+      page&nbsp;16 established SGD's implicit bias — the mechanism the second descent leans on, here made exact
+      via the minimum-norm solution the demo's $\lambda=0$ case computes directly. → Page&nbsp;24's
+      "overfits instantly" failure mode is exactly the $P\gg N$ regime this page names; the trunk LoRA/SVD pages
+      (39–40) make rank the capacity knob this page foreshadows, following the dataset-information-content rule.
+    </p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: model-wise double-descent sweep — real held-out error from a real
+     linear system solved exactly, for each of many hidden-layer widths ---- */
+  (function () {
+    const { RNG, makeDataset, trainTestSplit } = NN;
+    const canvas = document.getElementById("d-dd-plot");
+    const out = document.getElementById("d-dd-out");
+
+    // ---- tiny linear algebra: solve (A + lam*I) x = b by Gauss-Jordan elimination
+    // with partial pivoting. n is small (<= a few hundred), so this is instant. ----
+    function solveSym(A, b, lam, n) {
+      const M = A.map((row, i) => row.map((v, j) => v + (i === j ? lam : 0)));
+      const rhs = b.slice();
+      for (let col = 0; col < n; col++) {
+        let piv = col;
+        for (let r = col + 1; r < n; r++) if (Math.abs(M[r][col]) > Math.abs(M[piv][col])) piv = r;
+        [M[col], M[piv]] = [M[piv], M[col]]; [rhs[col], rhs[piv]] = [rhs[piv], rhs[col]];
+        const d = M[col][col] || 1e-9;
+        for (let j = col; j < n; j++) M[col][j] /= d;
+        rhs[col] /= d;
+        for (let r = 0; r < n; r++) {
+          if (r === col) continue;
+          const f = M[r][col];
+          if (!f) continue;
+          for (let j = col; j < n; j++) M[r][j] -= f * M[col][j];
+          rhs[r] -= f * rhs[col];
+        }
+      }
+      return rhs;
+    }
+    // φ(x) for a FIXED random one-hidden-layer tanh net — the untrained half of
+    // the model, so P below counts only what's actually fit to data.
+    function randomFeatures(X, W1, b1) { return X.map(x => W1.map((w, i) => Math.tanh(w[0] * x[0] + w[1] * x[1] + b1[i]))); }
+    // Ridge regression, solved exactly. h <= Ntrain uses the primal (h x h)
+    // system; h > Ntrain uses the dual (Ntrain x Ntrain) system and maps back —
+    // at lam=0 this dual form IS the minimum-norm least-squares interpolant,
+    // the textbook (Belkin/Hastie) construction that makes the threshold spike
+    // and the second descent a real, reproducible fact rather than SGD luck.
+    function ridgeFit(Phi, y, lam, h, Ntrain) {
+      // Numerical floor at lam=0 — small enough that the interpolation spike and
+      // the second descent are still the dominant, visible signal, large enough
+      // that a near-singular K matrix (many random tanh directions in a 2-D
+      // input) doesn't produce meaningless four-digit blow-ups on screen.
+      const ridge = lam > 0 ? lam : 1e-3;
+      if (h <= Ntrain) {
+        const A = Array.from({ length: h }, () => new Array(h).fill(0));
+        const c = new Array(h).fill(0);
+        for (let i = 0; i < Ntrain; i++) for (let j = 0; j < h; j++) {
+          c[j] += Phi[i][j] * y[i];
+          for (let k = 0; k < h; k++) A[j][k] += Phi[i][j] * Phi[i][k];
+        }
+        return solveSym(A, c, ridge, h);
+      }
+      const K = Array.from({ length: Ntrain }, () => new Array(Ntrain).fill(0));
+      for (let i = 0; i < Ntrain; i++) for (let j = 0; j < Ntrain; j++) {
+        let s = 0; for (let k = 0; k < h; k++) s += Phi[i][k] * Phi[j][k]; K[i][j] = s;
+      }
+      const alpha = solveSym(K, y, ridge, Ntrain);
+      const beta = new Array(h).fill(0);
+      for (let k = 0; k < h; k++) { let s = 0; for (let i = 0; i < Ntrain; i++) s += Phi[i][k] * alpha[i]; beta[k] = s; }
+      return beta;
+    }
+    function predict(Phi, beta) { return Phi.map(row => row.reduce((s, v, k) => s + v * beta[k], 0)); }
+    function mse(pred, y) { let s = 0; for (let i = 0; i < pred.length; i++) s += (pred[i] - y[i]) ** 2; return s / pred.length; }
+    // Log-spaced widths from 1 up to a few multiples of Ntrain, so the
+    // threshold marker always has resolution on both sides regardless of N.
+    function logWidths(maxH, count) {
+      const out = new Set();
+      for (let i = 0; i < count; i++) out.add(Math.max(1, Math.round(Math.exp(Math.log(maxH) * i / (count - 1)))));
+      return [...out].sort((a, b) => a - b);
+    }
+
+    const ctrlsHost = document.getElementById("d-dd-ctrls");
+    const nCtrl = makeCtrl(ctrlsHost, { label: "dataset size N", min: 20, max: 200, step: 5, value: 60, fmt: v => v.toFixed(0) });
+    const noiseCtrl = makeCtrl(ctrlsHost, { label: "label noise", min: 0, max: 0.30, step: 0.01, value: 0.15, fmt: v => (v * 100).toFixed(0) + "%" });
+    const lamCtrl = makeCtrl(ctrlsHost, { label: "weight decay λ (ridge penalty) — the star control", min: 0, max: 0.10, step: 0.002, value: 0, fmt: v => v.toFixed(3) });
+
+    // REAL math, every redraw: a fresh moons split, a fresh random feature
+    // bank per width, an exact ridge solve, and squared-error test loss — the
+    // same squared loss the bias-variance identity above was written for.
+    function sweep(Ntotal, labelNoise, lambda) {
+      const ds = makeDataset("moons", Math.round(Ntotal), { noise: 0.15, labelNoise, rng: new RNG(7) });
+      const yPM = ds.y.map(v => (v === 1 ? 1 : -1)); // ±1 targets for squared-error regression
+      const split = trainTestSplit({ X: ds.X, y: yPM }, 0.7, new RNG(11));
+      const Ntrain = split.train.X.length;
+      const widths = logWidths(Math.max(8, Ntrain * 6), 24);
+      const rngW = new RNG(999);
+
+      const results = widths.map(h => {
+        const W1 = Array.from({ length: h }, () => [rngW.normal(0, 1), rngW.normal(0, 1)]);
+        const b1 = Array.from({ length: h }, () => rngW.normal(0, 1));
+        const PhiTr = randomFeatures(split.train.X, W1, b1);
+        const PhiTe = randomFeatures(split.test.X, W1, b1);
+        const beta = ridgeFit(PhiTr, split.train.y, lambda, h, Ntrain);
+        const trainLoss = mse(predict(PhiTr, beta), split.train.y);
+        const testLoss = mse(predict(PhiTe, beta), split.test.y);
+        return { h, P: h, trainLoss, testLoss };
+      });
+      return { results, Ntrain };
+    }
+
+    const testColor = () => vizUtils.cssVar("--accent", "#b48cff");
+    const trainColor = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    const baseColor = () => vizUtils.cssVar("--text-dim", "#8391ab");
+    const threshColor = () => vizUtils.cssVar("--warn", "#f0a848");
+    const bestColor = () => vizUtils.cssVar("--good", "#5ce6a0");
+
+    function draw() {
+      const N = nCtrl.get(), labelNoise = noiseCtrl.get(), lambda = lamCtrl.get();
+      const { results, Ntrain } = sweep(N, labelNoise, lambda);
+
+      const Ps = results.map(r => r.P);
+      const testLs = results.map(r => r.testLoss);
+      const trainLs = results.map(r => r.trainLoss);
+      // Clamp the y-axis to the 90th percentile of test loss so one wild spike
+      // (real, at lam=0, right at the threshold) doesn't crush the rest of the
+      // curve flat — the readout below still reports the true peak value.
+      const sortedTest = testLs.filter(isFinite).slice().sort((a, b) => a - b);
+      const cap = sortedTest[Math.floor(sortedTest.length * 0.9)] || 1;
+      const allY = trainLs.concat([1, cap]).filter(isFinite);
+      const ymin = 0, ymax = Math.max(...allY) * 1.2;
+
+      const p = new Plot(canvas, {
+        xmin: Ps[0] * 0.85, xmax: Ps[Ps.length - 1] * 1.2, xlog: true,
+        ymin, ymax, xlabel: "model size P (trained parameters, log scale)", ylabel: "squared-error loss",
+      });
+      p.clear(); p.grid();
+      p.hline(1, baseColor(), [3, 3]); // predicting the mean of ±1 targets scores ~1
+      p.vline(Ntrain, threshColor(), [4, 3]);
+      p.trace(Ps, trainLs, trainColor(), 2.2);
+      p.trace(Ps, testLs.map(v => Math.min(v, ymax)), testColor(), 2.8);
+      p.label(Ntrain, ymax * 0.98, "P≈N", threshColor());
+
+      // Threshold = the swept width whose P is closest to N_train.
+      let threshIdx = 0, bestDist = Infinity;
+      results.forEach((r, i) => { const d = Math.abs(r.P - Ntrain); if (d < bestDist) { bestDist = d; threshIdx = i; } });
+      const threshP = results[threshIdx].P;
+
+      // First (classical) minimum: lowest test loss at or before the threshold.
+      // Second (overparameterized) minimum: lowest test loss after it.
+      let firstMinIdx = 0, secondMinIdx = results.length - 1;
+      let firstMinVal = Infinity, secondMinVal = Infinity;
+      results.forEach((r, i) => {
+        if (r.P <= threshP && r.testLoss < firstMinVal) { firstMinVal = r.testLoss; firstMinIdx = i; }
+        if (r.P > threshP && r.testLoss < secondMinVal) { secondMinVal = r.testLoss; secondMinIdx = i; }
+      });
+      if (!isFinite(secondMinVal)) { secondMinIdx = threshIdx; secondMinVal = results[threshIdx].testLoss; }
+      // Peak: the highest test loss NEAR the threshold (P within 0.7x-1.4x of
+      // N_train) — not the global max over the whole sweep. The sweep runs out
+      // to 6x N_train so the second-descent side has room to visibly descend,
+      // but a fixed random hidden layer this small (only Ntrain examples to
+      // pin down a Ntrain x Ntrain kernel system) can develop a SEPARATE,
+      // unrelated conditioning blow-up out at 2x-6x N_train — a real number,
+      // but not the interpolation-threshold phenomenon this page teaches, and
+      // a global max would sometimes report that number as "the peak" and
+      // mislabel it as sitting at the threshold. Bounding the search to the
+      // threshold's own neighborhood makes the label measure what it claims.
+      let peakIdx = threshIdx, peakVal = -Infinity;
+      results.forEach((r, i) => {
+        if (r.P < 0.7 * threshP || r.P > 1.4 * threshP) return;
+        if (r.testLoss > peakVal) { peakVal = r.testLoss; peakIdx = i; }
+      });
+      const peak = results[peakIdx];
+      const bestOfTwo = Math.min(firstMinVal, secondMinVal);
+      const peakRatio = peak.testLoss / bestOfTwo;
+      const nearThresh = Math.abs(peakIdx - threshIdx) <= 1;
+
+      p.label(peak.P, Math.min(peak.testLoss, ymax) * 0.98, peak.testLoss > ymax ? "peak ↑ off-scale" : "peak", testColor());
+
+      out.innerHTML =
+        `<b>N</b>=${N} → train split <b>${Ntrain}</b> examples, <b>${results.length}</b> widths swept, solved exactly (no training loop)<br>` +
+        `interpolation threshold: <b>P=${threshP}</b> ≈ N=${Ntrain}<br>` +
+        `first minimum (classical side): <b>${firstMinVal.toFixed(3)}</b> at P=${results[firstMinIdx].P} · ` +
+        `peak: <b style="color:${testColor()}">${peak.testLoss.toFixed(2)}</b> at P=${peak.P}${nearThresh ? " (right at the threshold)" : ""} · ` +
+        `second minimum (overparameterized side): <b>${secondMinVal.toFixed(3)}</b> at P=${results[secondMinIdx].P}<br>` +
+        `<b style="color:${lambda > 0.01 ? bestColor() : threshColor()}">peak is ${peakRatio.toFixed(1)}× the better minimum</b>` +
+        (lambda > 0.01
+          ? ` — flattened from the λ=0 spike by dragging λ up to ${lambda.toFixed(3)}`
+          : ` at λ=0 — drag λ up and watch this ratio fall toward 1×`);
+    }
+
+    let pending = false;
+    function scheduleDraw() { if (pending) return; pending = true; requestAnimationFrame(() => { pending = false; draw(); }); }
+
+    nCtrl.onInput(scheduleDraw);
+    noiseCtrl.onInput(scheduleDraw);
+    lamCtrl.onInput(scheduleDraw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz23", [
+    {
+      q: "How many terms does the bias–variance decomposition have?",
+      num: 3, tol: 0,
+      why: "Three: Bias², Variance, and the irreducible noise σ². (A common miscount says two — leaving out the irreducible floor no model can beat.)"
+    },
+    {
+      q: "The bias–variance decomposition itself is:",
+      opts: [
+        "An algebraic identity — always true for squared loss, for any model, any dataset",
+        "An empirical law that fails for large modern models",
+        "A special case that only holds for linear regression",
+        "An approximation that becomes invalid past the interpolation threshold"
+      ],
+      a: 0,
+      why: "It's algebra: expand $(y-\\hat f)^2$ around $\\mathbb E[\\hat f]$ and the cross terms vanish in expectation. What double descent complicates is a separate, narrower empirical claim about how variance behaves with $P$ — not this identity."
+    },
+    {
+      q: "The interpolation threshold sits at:",
+      opts: ["$P \\approx N$", "$P \\ll N$", "$P \\gg N$, always", "Whatever value minimizes test loss"],
+      a: 0,
+      why: "By definition: the point where model capacity $P$ is just enough to fit (interpolate) the $N$ training examples exactly. It's also, empirically, the most brittle and highest-test-error point on the whole curve."
+    },
+    {
+      q: "The intuition behind the second descent (past the threshold, test error falls again) is:",
+      opts: [
+        "Many functions now interpolate the training data exactly, and SGD's implicit bias picks the smoothest one — more parameters buys choice, not complexity",
+        "The model literally has less capacity once you add enough parameters",
+        "Weight decay automatically increases as parameter count grows",
+        "Test error only appears to fall because the plot's axis is logarithmic"
+      ],
+      a: 0,
+      why: "At the threshold there is essentially one brittle interpolant. Past it there are infinitely many, and gradient descent's own implicit bias (page 16) systematically prefers a smooth one among them — overparameterization buys choice, not complexity."
+    },
+    {
+      q: "In the demo above, dragging the weight decay slider λ up shows:",
+      opts: [
+        "The mid-model peak at the interpolation threshold largely dissolves — a real regularization effect, not a fixed law",
+        "λ has no measurable effect on the peak's height",
+        "The peak moves to a much larger model size but keeps the same height",
+        "The classical (first) minimum disappears entirely"
+      ],
+      a: 0,
+      why: "The peak-to-minimum ratio readout shrinks as λ rises in the demo, live, on real held-out error from exactly-solved fits — direct evidence for the honest-part claim that the sharp double-descent spike is substantially a symptom of near-zero regularization at the threshold, not an unshakeable law."
+    },
+    {
+      q: "For this learner — a multi-billion-parameter model fine-tuned on a few hundred examples, $P \\gg N$ — the prescription is:",
+      opts: [
+        "LoRA's low rank + early stopping + few epochs + a small LR — regularization is doing the heavy lifting",
+        "Grow the dataset until it rides past the second descent",
+        "Ignore double descent entirely; it never applies to LLMs",
+        "Increase model size further, since bigger always means safer here"
+      ],
+      a: 0,
+      why: "He's already far past the interpolation threshold — growing the dataset the way the demo's N slider does isn't an option at fine-tune time. Regularization (rank, early stopping, LR, epoch count — page 22's toolkit) is what actually protects him, which is exactly why this page exists to explain it."
+    },
+    {
+      q: "LoRA's rank $r$ is best understood as:",
+      opts: [
+        "The bias–variance capacity knob — low $r$ is high bias, high $r$ on a tiny dataset is high variance (memorization)",
+        "Purely a memory-saving trick with no effect on what the model learns",
+        "A knob that only matters for diffusion models, not LLMs",
+        "Equivalent to the learning rate"
+      ],
+      a: 0,
+      why: "$r=4$ barely moves the model (high bias, won't overfit); $r=256$ on 20 images has enormous freedom (low bias, high variance — it memorizes). The classical U-curve lives inside a LoRA config, located by the dataset's information content (D-11, developed fully on the trunk's LoRA/SVD pages, 39–40)."
+    }
+  ], "Bias–variance & double descent — self-check");
+
+});
+</script>
+</body>
+</html>

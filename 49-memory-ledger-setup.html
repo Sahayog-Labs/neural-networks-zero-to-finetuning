@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>49. Does It Fit? The Ledger & Setup — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions — the ledger bar's legend, the toggle rows, and the
+     editable memory-line field. Everything uses the shared CSS custom
+     properties so it stays theme-aware for free. */
+  .toggle-row { display: flex; gap: 8px; margin: 6px 0 4px; flex-wrap: wrap; align-items: center; }
+  .toggle-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 4px; min-width: 92px; }
+  .toggle-row button {
+    padding: 6px 13px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .82rem;
+    font-family: var(--font);
+  }
+  .toggle-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .toggle-row button:disabled { opacity: .35; cursor: not-allowed; }
+  .mem-field { font-size: .82rem; color: var(--text-dim); display: inline-flex; align-items: center; gap: 6px; margin: 6px 0; }
+  .mem-field input {
+    width: 84px; font-family: var(--mono); font-size: .85rem; padding: 4px 7px;
+    border-radius: 6px; border: 1px solid var(--border); background: var(--bg-code); color: var(--text);
+  }
+  .seg-legend { display: flex; flex-wrap: wrap; gap: 12px 18px; margin: 10px 0 2px; font-size: .8rem; color: var(--text-dim); }
+  .seg-legend span { display: inline-flex; align-items: center; }
+  .seg-swatch { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; }
+  .three-numbers { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: .92rem; }
+  .three-numbers td { padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .three-numbers td:first-child { font-family: var(--mono); white-space: nowrap; }
+  .three-numbers td:nth-child(2) { font-weight: 700; text-align: right; white-space: nowrap; font-family: var(--mono); }
+</style>
+</head>
+<body data-page="49-memory-ledger-setup.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Does It Fit? The Ledger, the Escape Ladder &amp; Setting Up Your Box</h1>
+    <p class="subtitle">Five lines of a table decide whether a full fine-tune of Qwen3-8B
+      lives on your Spark. It misses. By a hair. And you are going to watch it miss on
+      hardware you own, rather than take my word for it.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>This is the page where the whole track stops being abstract. You have the tokenizer
+      (p.44), the loss (p.45), the decode roofline and the KV cache (p.46), the FORM-vs-FACTS
+      decision (p.47) and what SFT actually does (p.48). Now: does the thing physically fit,
+      and what do you have to install to run it?</p>
+
+    <!-- on-page-resolution rule: this PREDICT is answered by the "Measure, don't assert"
+         section and, live, by the demo's Full/AdamW bar landing at 122.05 vs 121.69. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you compute anything</span>
+      Full fine-tuning Qwen3-8B needs <strong>122.05 GiB</strong> of state — weights, gradients,
+      an fp32 master copy, and Adam's two moment buffers. Your Spark's box says
+      <strong>&ldquo;128 GB.&rdquo;</strong> Commit to an answer now: does it fit, with room to
+      spare, or not? And &mdash; the part that decides it &mdash; <em>how much of that 128 do you
+      think you actually get?</em>
+    </div>
+
+    <h2>The ledger recurs: 16 bytes per parameter</h2>
+    <div class="track-banner track-llm"><span class="track-label">Trunk callback · the memory ledger</span></div>
+    <p><code>[THREAD:memory ledger — the reality check]</code> You derived
+      this table on <strong>p.18</strong>. Nothing here is new; we are only pointing it at
+      Qwen3-8B. Standard bf16 mixed-precision training with AdamW keeps, for <em>every</em>
+      trainable parameter, five copies:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Item</th><th>Precision</th><th>B / param</th><th>Why it has to exist</th></tr></thead>
+      <tbody>
+        <tr><td>weights</td><td>bf16</td><td>2</td><td>what the GPU computes the forward/backward with</td></tr>
+        <tr><td>gradients</td><td>bf16</td><td>2</td><td>one per weight, filled by <code>.backward()</code></td></tr>
+        <tr><td>fp32 master weights</td><td>fp32</td><td>4</td><td>bf16 has 7 mantissa bits &mdash; see the box below</td></tr>
+        <tr><td>Adam $m$ (1st moment)</td><td>fp32</td><td>4</td><td>the running mean of the gradient</td></tr>
+        <tr><td>Adam $v$ (2nd moment)</td><td>fp32</td><td>4</td><td>the running mean of the gradient <em>squared</em></td></tr>
+        <tr><td><strong>total</strong></td><td></td><td><strong>16</strong></td><td>memorize <strong>$16P$</strong> &mdash; [DER, constants §2.1]</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 Both framings are true &mdash; state both, or you will hit a contradiction</span>
+      A learner who reads two blog posts finds one saying &ldquo;optimizer state is $4\times$ the
+      model&rdquo; and another saying &ldquo;$8\times$&rdquo;. Both are right. $16$ B/param is
+      <strong>$4\times$ the fp32 weight size</strong> (a fp32 weight is 4 B) <em>and</em>
+      <strong>$8\times$ the bf16 weight size</strong> (a bf16 weight is 2 B). Same sixteen
+      bytes, two denominators.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ &ldquo;The fp32 master copy is wasteful &mdash; drop it&rdquo;</span>
+      It is the line that makes training <em>work</em>. bf16 carries only 7 mantissa bits. A
+      typical AdamW update to an $O(1)$ weight is around $2\times10^{-5}$; added to a bf16
+      value of order 1, it falls below the last representable bit and <strong>rounds to
+      exactly zero</strong>. The weight never moves; training silently stalls. The fp32 master
+      is a full-precision accumulator the tiny updates <em>can</em> land in. Drop it (the
+      &ldquo;8-bit Adam, no master&rdquo; row below) and you court stalled updates.
+    </div>
+
+    <h2>The number</h2>
+    <p>Qwen3-8B has exactly $P = 8{,}190{,}735{,}360$ parameters
+      <strong>[VP, constants §1.2]</strong> &mdash; the count you reconciled to the byte back on
+      p.36. Multiply:</p>
+    <p>$$P \times 16\ \text{B} \;=\; 8{,}190{,}735{,}360 \times 16 \;=\; 131{,}051{,}765{,}760\ \text{B}$$</p>
+
+    <p>Now the unit rule (constants §0) earns its keep. The <em>same</em> byte count reads two
+      ways, and mixing them is the single most expensive error in this whole corpus:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Presentation</th><th>Value</th><th>When you use it</th></tr></thead>
+      <tbody>
+        <tr><td>decimal (state quoted on its own)</td><td><strong>131.05 GB</strong> ($10^9$ B)</td><td>matches every model card &amp; the bytes&times;params arithmetic</td></tr>
+        <tr><td>binary (compared to hardware)</td><td><strong>122.05 GiB</strong> ($2^{30}$ B)</td><td>the <em>only</em> form you may compare to the box's capacity</td></tr>
+      </tbody>
+    </table>
+
+    <p>Per component, in decimal GB [DER, constants §2.2]: weights <strong>16.38</strong> &middot;
+      gradients <strong>16.38</strong> &middot; master <strong>32.76</strong> &middot;
+      $m$ <strong>32.76</strong> &middot; $v$ <strong>32.76</strong>.</p>
+
+    <div class="box rule"><span class="box-title">📐 This line is STATE ONLY</span>
+      122.05 GiB is weights + grads + master + $m$ + $v$. <strong>Activations are a separate,
+      separately-labelled line, always.</strong> At $B=1$, $S=2048$ with gradient checkpointing
+      they are roughly <strong>2&ndash;6 GB [EST, constants §2.2]</strong> &mdash; and the course
+      <em>measures</em> them on your box, it does not assert them. Never fold activations into
+      the 122.05; the two are different kinds of number.
+    </div>
+
+    <h2>Measure, do not assert</h2>
+    <p>Here is where a course written for someone who owns the machine has to be honest. Three
+      of the source drafts asserted three <em>different</em> usable-memory budgets &mdash;
+      128 GB, 119.2 GiB, &ldquo;~110 GB usable.&rdquo; You are about to be dared to reproduce an
+      out-of-memory error on hardware you can inspect. So step 1 is not a claim. It is a
+      measurement:</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line">free, total = torch.cuda.<span class="tok-fn">mem_get_info</span>()          <span class="tok-com"># bytes, on the unified pool</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"usable now: {free/2**30:.2f} GiB of {total/2**30:.2f} GiB"</span>)</span>
+<span class="line"></span>
+<span class="line">state_gib = <span class="tok-num">8_190_735_360</span> * <span class="tok-num">16</span> / <span class="tok-num">2</span>**<span class="tok-num">30</span>       <span class="tok-com"># 122.05</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"full-FT state needs {state_gib:.2f} GiB"</span>)</span></code></pre>
+    </div>
+
+    <p>On <em>his</em> box, this session, that first line printed
+      $\text{total} = \mathbf{121.6875}$ GiB &mdash; <strong>not 128</strong>
+      <strong>[MEA-DEV, hardware-ground-truth §2]</strong>. The firmware/driver carveout eats
+      <strong>6.3125 GiB (4.9%)</strong> of the physical 128 GiB before you allocate a single
+      byte. So the comparison that actually governs your run is:</p>
+
+    <p>$$\underbrace{122.05\ \text{GiB}}_{\text{full-FT state}} \;\;\text{vs}\;\; \underbrace{121.6875\ \text{GiB}}_{\text{measured } \texttt{MemTotal}} \;=\; \mathbf{-0.36\ \text{GiB}}$$</p>
+
+    <div class="box key"><span class="box-title">🔑 It does not fit &mdash; by 0.3%, before activations</span>
+      The predict resolves here: <strong>no</strong>, and by a razor. You do not get 128. You get
+      121.69, and the state overshoots it by 0.36 GiB &mdash; then activations (2&ndash;6 GB) push
+      the real shortfall to <strong>2.4&ndash;6.4 GiB</strong>. This is now
+      <strong>measured fact</strong>, not a cliffhanger: full fine-tuning an 8B model does not
+      fit on a Spark. The villain generalizes &mdash; <em>published capacity is never usable
+      capacity; the spec sheet is off by 4.9% before you start.</em>
+    </div>
+
+    <p>Distinguish three numbers you will otherwise conflate. The first is marketing; the second
+      is the ceiling that actually exists; the third is what you can grab right now &mdash; and
+      with his ComfyUI running (its normal state) the third is brutal:</p>
+
+    <table class="three-numbers">
+      <tbody>
+        <tr><td>Published (the sticker)</td><td>128 GB</td><td>marketing &mdash; that memory does not exist for you</td></tr>
+        <tr><td><code>MemTotal</code> (the real ceiling)</td><td>121.69 GiB</td><td>after the 6.31 GiB firmware carveout</td></tr>
+        <tr><td><code>mem_get_info</code> free, ComfyUI up</td><td>19.41 GiB</td><td>a 3.4 GB ComfyUI process + ~73 GiB page cache; <code>MemAvailable</code> reads 93.84 GiB but only 19.41 is truly free [MEA-DEV, §2.2]</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The escape ladder</h2>
+    <p>131 GB does not fit &mdash; so you climb down. Each rung trades a little training quality
+      or a little precision for a lot of memory. Measured against <em>his</em> 121.69 GiB
+      [MEA-DEV], recomputed live below:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Method</th><th>B / param</th><th>State</th><th>vs 121.69 GiB</th></tr></thead>
+      <tbody>
+        <tr><td>Full, AdamW mixed</td><td>16</td><td>131.05 GB / 122.05 GiB</td><td><strong>&minus;0.36 &mdash; does not fit</strong></td></tr>
+        <tr><td>Full, 8-bit Adam</td><td>10</td><td>81.91 GB / 76.28 GiB</td><td>fits</td></tr>
+        <tr><td>Full, 8-bit Adam, no master</td><td>6</td><td>49.14 GB / 45.77 GiB</td><td>fits &mdash; ⚠️ stalled-update risk</td></tr>
+        <tr><td>SGD + momentum</td><td>~12</td><td>98.29 GB / 91.54 GiB</td><td>fits &mdash; converges badly on transformers</td></tr>
+        <tr><td><strong>LoRA r=16, all-linear</strong></td><td>see p.50</td><td>17.08 GB / 15.91 GiB</td><td><strong>fits, 7.7&times;</strong></td></tr>
+        <tr><td><strong>QLoRA r=16 (NF4 base)</strong></td><td>see p.50</td><td>~4.93 GB / 4.59 GiB</td><td><strong>fits, ~26&times;</strong></td></tr>
+      </tbody>
+    </table>
+
+    <p>Read the arc top to bottom: 131 GB doesn't fit &rarr; 8-bit Adam fits but eats most of the
+      box on a mere 8B &rarr; <strong>LoRA drops it to 17 GB, QLoRA to 5 GB, and suddenly a 70B is
+      on the table.</strong> You will <em>earn</em> LoRA on p.50, not be handed it.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Below is the ledger as a live bar. Put it on <em>Qwen3-8B / Full / AdamW</em> and read the
+      total against the red line &mdash; the &minus;0.36 GiB gut-punch. Then flip to LoRA and watch
+      four of the five state segments collapse. Then drag rank 16&rarr;512 and notice the bar
+      barely moves. Then switch the model to the 70B under QLoRA &mdash; still under the line.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">The memory ledger, computed live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-ledger" height="340"></canvas>
+        <div class="seg-legend" id="d-ledger-legend"></div>
+        <div class="toggle-row"><span class="grp-label">model</span><span id="d-model"></span></div>
+        <div class="toggle-row"><span class="grp-label">method</span><span id="d-method"></span></div>
+        <div class="toggle-row"><span class="grp-label">optimizer</span><span id="d-opt"></span></div>
+        <div class="toggle-row"><span class="grp-label">LoRA target</span><span id="d-target"></span></div>
+        <div class="toggle-row"><span class="grp-label">extras</span><span id="d-extras"></span></div>
+        <div class="controls" id="d-ledger-ctrls"></div>
+        <label class="mem-field">usable memory line (GiB):
+          <input type="number" id="d-mem" value="121.69" step="0.01" min="1" max="1200"></label>
+        <div class="readout" id="d-ledger-out"></div>
+      </div>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ LoRA does <em>not</em> reduce activation memory</span>
+      When you switch to LoRA the bar's activation segment does not shrink &mdash; LoRA freezes the
+      weights but you still backprop through the <em>full</em> network, so activations are
+      unchanged at the same $B$ and $S$. Every LoRA-vs-Full comparison in this course is
+      state-to-state, with activations named identically on both sides (constants §2.4). A learner
+      who measures LoRA's real footprint finds it above 17.08 GB by exactly the activation term
+      &mdash; and the course told him so first.
+    </div>
+
+    <h2>Set up the box &mdash; the setup page is not a formality</h2>
+    <p>Here is the trap almost every tutorial walks you into. Your Spark <strong>has no
+      <code>peft</code>, no <code>trl</code>, no <code>accelerate</code>, no
+      <code>bitsandbytes</code>, and no system-wide PyTorch at all</strong> [MEA-DEV,
+      hardware-ground-truth §3]. The only torch on the machine lives inside ComfyUI's venv
+      (<code>2.12.1+cu130</code>), which is <em>working</em> and which you must not break. So the
+      whole LLM stack goes into a <strong>fresh venv &mdash; mandatory, never ComfyUI's</strong>
+      (you have 2.5 TB free):</p>
+
+    <div class="codeblock" data-lang="bash">
+      <div class="codeblock-head"><span class="lang-tag">bash</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-com"># a NEW venv — never touch ~/ComfyUI/.venv</span></span>
+<span class="line">uv venv --python <span class="tok-num">3.12</span> ~/llm-ft && <span class="tok-kw">source</span> ~/llm-ft/bin/activate</span>
+<span class="line">uv pip install <span class="tok-str">"transformers==5.14.1"</span> <span class="tok-str">"trl>=1.8,<2"</span> <span class="tok-str">"peft==0.19.1"</span> \</span>
+<span class="line">               <span class="tok-str">"bitsandbytes==0.49.2"</span> datasets accelerate     <span class="tok-com"># constants §7</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">export</span> HF_HOME=/mnt/nvme/hf                <span class="tok-com"># the cache hits 100s of GB — keep it on the NVMe</span></span>
+<span class="line"><span class="tok-kw">export</span> PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True</span></code></pre>
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The real aarch64 trap is narrower and sharper than folklore</span>
+      It is not &ldquo;aarch64 is painful.&rdquo; It is this: <strong>any package pinning
+      <code>libcudart.so.12</code> fails at <em>import</em></strong> on the Spark's CUDA-13-only
+      DGX OS &mdash; before kernel compatibility is even evaluated. Conversely, the good news the
+      briefs got backwards: <strong><code>bitsandbytes</code> ships a <em>native</em> sm_121 build
+      for ARM64 + CUDA-13</strong> (x86 does not get it) &mdash; so on this axis the Spark is
+      <em>better</em> served than an x86 box, and your 70B QLoRA path (p.50) depends on it
+      [VP, constants §6.9].
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The two-library dtype trap</span>
+      Two libraries, one script, opposite defaults. In transformers v5,
+      <code>from_pretrained</code> now loads a model in its saved dtype (bf16 for Qwen3). But
+      <code>SFTTrainer</code>, handed a model <em>as a string</em> with <code>model_init_kwargs</code>
+      omitting <code>dtype</code>, <strong>still defaults to fp32</strong> &mdash; silently doubling
+      your weight memory and halving your speed. Always pass it explicitly [VP, constants §7.3]:
+      <div class="codeblock" data-lang="python" style="margin-top:10px">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">cfg = <span class="tok-fn">SFTConfig</span>(model_init_kwargs={<span class="tok-str">"dtype"</span>: torch.bfloat16})  <span class="tok-com"># or it's fp32</span></span></code></pre>
+      </div>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ <code>SFTConfig</code>'s surprising defaults &mdash; know them before you run</span>
+      <ul style="margin:6px 0 0 0; padding-left:1.15em">
+        <li><code>gradient_checkpointing=True</code> is <strong>already on</strong> &mdash; do not
+          &ldquo;discover&rdquo; it as a memory win you added.</li>
+        <li><code>learning_rate=2e-5</code> is a <strong>full-FT default</strong> &mdash; for LoRA,
+          raise it ~10&times; (p.50).</li>
+        <li><code>max_length=1024</code> <strong>silently truncates</strong> anything longer &mdash;
+          the most common silent bug in the stack.</li>
+        <li><code>loss_type="chunked_nll"</code>, <code>logging_steps=10</code>,
+          <code>bf16=True</code>.</li>
+      </ul>
+      <p style="margin:8px 0 0">Why <code>chunked_nll</code> exists: the logits tensor at $B=1$,
+      $S=2048$ is $2048 \times 151936 \times 2 = \mathbf{622\ MB}$ for <em>one</em> tensor
+      (constants §9.5) &mdash; fp32 cross-entropy doubles it and you need its gradient too.
+      <code>chunked_nll</code> drops the <code>-100</code> (masked) positions <em>before</em> the
+      <code>lm_head</code> matmul.</p>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it &mdash; and make it OOM</span>
+      Run <code>code/00_verify_env.py</code> first &mdash; it asserts torch, CUDA 13, device
+      capability <code>(12, 1)</code>, bf16, and a working <code>bitsandbytes</code> import.
+      Then <code>code/measure_your_box.py</code> + <code>code/05_memory_ledger.py</code>: compute
+      the ledger for any HuggingFace model id straight from its <code>config.json</code>
+      (reproduce this Qwen3-8B table programmatically), then <strong>actually allocate the 8B
+      full-FT state and watch it OOM.</strong> Make yourself run the OOM &mdash; it is the emotional
+      core of the track.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-49"></div>
+
+    <p style="margin-top:2rem; font-size:.86rem; color:var(--text-dim)">
+      <strong>Threads.</strong> <code>[THREAD:memory ledger]</code> this is the
+      beat the whole thread was built for &mdash; $16$ B/param (p.18) &rarr; activations &rarr; the
+      KV line (p.46) &rarr; <em>the wall</em>. <code>[THREAD:Qwen3-8B]</code>
+      $122.05$ GiB joins the reflex set. <strong>Next:</strong> p.50, where LoRA is the escape you
+      just read off the ladder, and the 187&times; that puts a 70B on your desk.</p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ============================================================
+     THE MEMORY LEDGER — every byte computed live from real config
+     shapes and the frozen bytes/param table. Nothing precomputed.
+     ============================================================ */
+  (function () {
+    const GiB = 2 ** 30, GB = 1e9;
+
+    // Real, frozen configs. computeP() derives P from the shapes so the
+    // Qwen3-8B bar reproduces 8,190,735,360 to the byte (constants §1.2).
+    const MODELS = {
+      qwen8:  { name: "Qwen3-8B",       d: 4096, L: 36, H: 32, Hkv: 8, dhead: 128, dff: 12288, V: 151936, tie: false, qkNorm: true  },
+      llama70:{ name: "Llama-3.3-70B",  d: 8192, L: 80, H: 64, Hkv: 8, dhead: 128, dff: 28672, V: 128256, tie: false, qkNorm: false },
+    };
+    // NF4 double-quant effective bytes/param [VP, constants §3]
+    const NF4_B = 0.515869;
+
+    function computeP(c) {
+      const attn = 2 * c.d * c.dhead * (c.H + c.Hkv);       // q,k,v,o
+      const mlp  = 3 * c.d * c.dff;                          // gate,up,down
+      const norms = 2 * c.d + (c.qkNorm ? 2 * c.dhead : 0);  // in/post (+qk)
+      const perLayer = attn + mlp + norms;
+      const emb = c.V * c.d;
+      const embTotal = c.tie ? emb : 2 * emb;               // embed + lm_head
+      return perLayer * c.L + embTotal + c.d;               // + final norm
+    }
+    // targeted-matrix (out+in) sums per layer, for the LoRA count
+    function loraPerLayerSum(c, allLinear) {
+      const attn = [
+        [c.H * c.dhead, c.d],   // q_proj
+        [c.Hkv * c.dhead, c.d], // k_proj
+        [c.Hkv * c.dhead, c.d], // v_proj
+        [c.d, c.H * c.dhead],   // o_proj
+      ];
+      const mlp = [
+        [c.dff, c.d], [c.dff, c.d], [c.d, c.dff], // gate, up, down
+      ];
+      const mats = allLinear ? attn.concat(mlp) : attn;
+      return mats.reduce((s, m) => s + (m[0] + m[1]), 0);
+    }
+    function loraTrainable(c, r, allLinear) {
+      return c.L * r * loraPerLayerSum(c, allLinear);
+    }
+
+    // Segment palette — mid-tone, legible in both themes.
+    const COLORS = {
+      weights:     "#6c8cff",
+      adapter:     "#33c4c4",
+      grads:       "#f2a541",
+      master:      "#b06cf0",
+      m:           "#e56b8c",
+      v:           "#e88f42",
+      activations: "#7a8aa8",
+    };
+    const LABELS = {
+      weights: "base weights", adapter: "adapter weights", grads: "gradients",
+      master: "fp32 master", m: "Adam m", v: "Adam v", activations: "activations [est]",
+    };
+
+    // ---- state ----
+    let model = "qwen8", method = "full", opt = "adamw", target = "all", gc = true, showKV = false;
+
+    const canvas = document.getElementById("d-ledger");
+    const legend = document.getElementById("d-ledger-legend");
+    const out = document.getElementById("d-ledger-out");
+    const memInput = document.getElementById("d-mem");
+
+    // sliders
+    const rankCtrl = makeCtrl(document.getElementById("d-ledger-ctrls"),
+      { label: "LoRA rank r", min: 1, max: 512, step: 1, value: 16, fmt: v => v.toFixed(0) });
+    const batchCtrl = makeCtrl(document.getElementById("d-ledger-ctrls"),
+      { label: "batch B", min: 1, max: 16, step: 1, value: 1, fmt: v => v.toFixed(0) });
+    const seqCtrl = makeCtrl(document.getElementById("d-ledger-ctrls"),
+      { label: "sequence length S", min: 512, max: 8192, step: 512, value: 2048, fmt: v => v.toFixed(0) });
+
+    // ---- toggle-button groups ----
+    function makeGroup(hostId, opts, getSel, setSel) {
+      const host = document.getElementById(hostId);
+      const btns = opts.map(o => {
+        const b = document.createElement("button");
+        b.textContent = o.label; b.dataset.val = o.val;
+        b.addEventListener("click", () => { setSel(o.val); sync(); draw(); });
+        host.appendChild(b);
+        return b;
+      });
+      return () => btns.forEach(b => b.classList.toggle("active", b.dataset.val === getSel()));
+    }
+    const syncModel  = makeGroup("d-model",  [{label:"Qwen3-8B",val:"qwen8"},{label:"Llama-3.3-70B",val:"llama70"}], () => model, v => model = v);
+    const syncMethod = makeGroup("d-method", [{label:"Full",val:"full"},{label:"LoRA",val:"lora"},{label:"QLoRA",val:"qlora"}], () => method, v => method = v);
+    const syncOpt    = makeGroup("d-opt",    [{label:"AdamW",val:"adamw"},{label:"8-bit Adam",val:"adam8"},{label:"SGD+mom",val:"sgd"}], () => opt, v => opt = v);
+    const syncTarget = makeGroup("d-target", [{label:"all-linear",val:"all"},{label:"attn-only",val:"attn"}], () => target, v => target = v);
+    const syncExtras = (function () {
+      const host = document.getElementById("d-extras");
+      const gcBtn = document.createElement("button"); gcBtn.textContent = "grad-checkpointing";
+      gcBtn.addEventListener("click", () => { gc = !gc; sync(); draw(); });
+      const kvBtn = document.createElement("button"); kvBtn.textContent = "+ inference KV cache";
+      kvBtn.addEventListener("click", () => { showKV = !showKV; sync(); draw(); });
+      host.appendChild(gcBtn); host.appendChild(kvBtn);
+      return () => { gcBtn.classList.toggle("active", gc); kvBtn.classList.toggle("active", showKV); };
+    })();
+
+    function sync() {
+      syncModel(); syncMethod(); syncOpt(); syncTarget(); syncExtras();
+      // optimizer + target only apply to their methods
+      const optBtns = document.getElementById("d-opt").querySelectorAll("button");
+      optBtns.forEach(b => b.disabled = (method !== "full"));
+      const tgtBtns = document.getElementById("d-target").querySelectorAll("button");
+      tgtBtns.forEach(b => b.disabled = (method === "full"));
+      rankCtrl.input.disabled = (method === "full");
+    }
+
+    // ---- the live ledger computation (bytes) ----
+    function ledger() {
+      const c = MODELS[model];
+      const P = computeP(c);
+      const r = Math.round(rankCtrl.get());
+      const B = Math.round(batchCtrl.get());
+      const S = Math.round(seqCtrl.get());
+      const segs = [];
+
+      if (method === "full") {
+        segs.push(["weights", 2 * P]);
+        segs.push(["grads", 2 * P]);
+        if (opt === "adamw")      { segs.push(["master", 4 * P]); segs.push(["m", 4 * P]); segs.push(["v", 4 * P]); }
+        else if (opt === "adam8") { segs.push(["master", 4 * P]); segs.push(["m", 1 * P]); segs.push(["v", 1 * P]); }
+        else /* sgd */            { segs.push(["master", 4 * P]); segs.push(["m", 4 * P]); } // one momentum buffer
+      } else {
+        const tr = loraTrainable(c, r, target === "all");
+        const baseB = (method === "qlora") ? NF4_B * P : 2 * P;
+        segs.push(["weights", baseB]);   // frozen base
+        segs.push(["adapter", 2 * tr]);  // the trainable adapter, bf16
+        segs.push(["grads", 2 * tr]);
+        segs.push(["master", 4 * tr]);
+        segs.push(["m", 4 * tr]);
+        segs.push(["v", 4 * tr]);
+      }
+
+      // activations — a labelled ESTIMATE (2–6 GB midpoint at B=1,S=2048,gc)
+      const actBase = 4e9;                      // ~4 GB midpoint [EST, constants §2.2]
+      let act = actBase * B * (S / 2048) * (gc ? 1 : 3.5);
+      segs.push(["activations", act]);
+
+      // optional inference KV (2·L·Hkv·dhead·b·S·B), labelled — training doesn't use it
+      let kv = 0;
+      if (showKV) { kv = 2 * c.L * c.Hkv * c.dhead * 2 * S * B; segs.push(["kv", kv]); }
+
+      const stateBytes = segs.filter(s => s[0] !== "activations" && s[0] !== "kv")
+                             .reduce((a, s) => a + s[1], 0);
+      const totalBytes = segs.reduce((a, s) => a + s[1], 0);
+      return { c, P, r, B, S, segs, stateBytes, totalBytes };
+    }
+
+    // KV gets its own color/label lazily
+    COLORS.kv = "#4a9d6b"; LABELS.kv = "KV cache (inference)";
+
+    function draw() {
+      const L = ledger();
+      const memLine = parseFloat(memInput.value) || 121.69;   // GiB
+      const totalGiB = L.totalBytes / GiB;
+      const ymax = Math.max(totalGiB, memLine) * 1.1;
+
+      const p = new Plot(canvas, { xmin: 0, xmax: 1, ymin: 0, ymax, ylabel: "memory (GiB)" });
+      p.clear(); p.grid();
+
+      // draw the stacked bar in the middle third
+      const g = p.g;
+      const bx0 = p._tx(0.34), bx1 = p._tx(0.66), bw = bx1 - bx0;
+      let acc = 0;
+      for (const [key, bytes] of L.segs) {
+        const gib = bytes / GiB;
+        const y0 = p._ty(acc), y1 = p._ty(acc + gib);
+        g.save();
+        g.fillStyle = COLORS[key] || "#888";
+        g.globalAlpha = (key === "activations" || key === "kv") ? 0.55 : 0.92;
+        g.fillRect(bx0, y1, bw, y0 - y1);
+        g.restore();
+        acc += gib;
+      }
+      // bar outline
+      g.save(); g.strokeStyle = cssVar("--plot-border", "#3b4a6b"); g.lineWidth = 1;
+      g.strokeRect(bx0, p._ty(acc), bw, p._ty(0) - p._ty(acc)); g.restore();
+
+      // the two reference lines
+      p.hline(memLine, "#e5484d", [6, 4]);
+      p.label(0.015, memLine + ymax * 0.012, "measured usable " + memLine.toFixed(2) + " GiB", "#e5484d");
+      const gpu4090 = 24;
+      if (ymax > gpu4090 * 1.05) {
+        p.hline(gpu4090, cssVar("--text-dim", "#8391ab"), [3, 3]);
+        p.label(0.66, gpu4090 + ymax * 0.012, "RTX 4090 (24 GiB)", cssVar("--text-dim", "#8391ab"));
+      }
+
+      // legend (only segments present)
+      legend.innerHTML = L.segs.map(([k]) =>
+        `<span><span class="seg-swatch" style="background:${COLORS[k]}"></span>${LABELS[k]}</span>`).join("");
+
+      // readout — display state total in GiB at frozen precision (2 dp) so the
+      // live value cannot contradict the frozen 122.05 / 15.91 / 4.59 by a last digit.
+      const stateGiB = L.stateBytes / GiB, stateGB = L.stateBytes / GB;
+      const fits = totalGiB <= memLine;
+      const margin = (memLine - totalGiB);
+      const method_lbl = method === "full" ? ("Full · " + ({adamw:"AdamW", adam8:"8-bit Adam", sgd:"SGD+mom"}[opt]))
+                        : (method.toUpperCase() + " r=" + L.r + " · " + (target === "all" ? "all-linear" : "attn-only"));
+      let trLine = "";
+      if (method !== "full") {
+        const tr = loraTrainable(L.c, L.r, target === "all");
+        trLine = ` · trainable <b>${tr.toLocaleString()}</b> (${(100 * tr / L.P).toFixed(3)}% of P)`;
+      }
+      const stateMargin = memLine - stateGiB;
+      const stateLine = stateMargin >= 0
+        ? `<b style="color:#2e9e5b">${stateMargin.toFixed(2)} GiB under the line</b>`
+        : `<b style="color:#e5484d">over the line by ${(-stateMargin).toFixed(2)} GiB</b>`;
+      out.innerHTML =
+        `<b>${L.c.name}</b> · ${method_lbl}${trLine}<br>` +
+        `state = <b>${stateGiB.toFixed(2)} GiB</b> (${stateGB.toFixed(2)} GB) vs line ${memLine.toFixed(2)} GiB → ${stateLine}<br>` +
+        `+ activations ~${(L.segs.find(s=>s[0]==="activations")[1]/GB).toFixed(1)} GB [est]` +
+        (showKV ? ` · + KV ${(L.segs.find(s=>s[0]==="kv")[1]/GB).toFixed(2)} GB` : "") +
+        ` ⟹ total <b>${totalGiB.toFixed(2)} GiB</b> → ` +
+        (fits ? `<b style="color:#2e9e5b">fits, ${margin.toFixed(2)} GiB to spare</b>`
+              : `<b style="color:#e5484d">does NOT fit by ${(-margin).toFixed(2)} GiB</b>`);
+    }
+
+    rankCtrl.onInput(draw); batchCtrl.onInput(draw); seqCtrl.onInput(draw);
+    memInput.addEventListener("input", draw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    sync(); draw();
+  })();
+
+  /* ============================================================ QUIZ ========= */
+  renderQuiz("quiz-49", [
+    {
+      q: "The full fine-tune state for Qwen3-8B, in the unit you may compare to the box's capacity (GiB):",
+      num: 122.05, tol: 0.1, unit: "GiB",
+      why: "$8{,}190{,}735{,}360 \\times 16\\,\\text{B} = 131{,}051{,}765{,}760\\,\\text{B}$; divided by $2^{30}$ that is $122.05$ GiB [DER, constants §2.2]. This is state only."
+    },
+    {
+      q: "That same state quoted on its own, in decimal GB:",
+      num: 131.05, tol: 0.2, unit: "GB",
+      why: "$131{,}051{,}765{,}760\\,\\text{B} / 10^9 = 131.05$ GB. Same bytes, different denominator — mixing GB and GiB in one comparison is the corpus's single most expensive error."
+    },
+    {
+      q: "His measured usable MemTotal on the Spark — the ceiling that actually exists:",
+      num: 121.69, tol: 0.05, unit: "GiB",
+      why: "$121.6875$ GiB [MEA-DEV, hardware-ground-truth §2] — NOT 128. A firmware/driver carveout eats 6.31 GiB (4.9%) before you allocate a byte. So 122.05 misses by 0.36 GiB: full FT of an 8B does not fit."
+    },
+    {
+      q: "Why does mixed-precision training keep an fp32 master copy of every weight?",
+      opts: [
+        "To make the model more accurate at inference",
+        "Because a tiny bf16 update rounds to exactly zero without it",
+        "Because Adam requires fp32 gradients",
+        "To speed up the backward pass"
+      ],
+      a: 1,
+      why: "bf16 has 7 mantissa bits; a ~$2\\times10^{-5}$ update added to an $O(1)$ bf16 weight falls below the last representable bit and rounds to zero — the weight never moves. The fp32 master is the full-precision accumulator the update can land in."
+    },
+    {
+      q: "Where does the LLM fine-tuning stack (peft/trl/bitsandbytes) get installed on his box?",
+      opts: [
+        "Into ComfyUI's existing venv, to reuse its torch",
+        "System-wide with sudo pip",
+        "Into a fresh, separate venv — never ComfyUI's",
+        "It's already installed on DGX OS"
+      ],
+      a: 2,
+      why: "The box has NO system torch and none of peft/trl/accelerate/bitsandbytes [MEA-DEV, §3]. The only torch lives in ComfyUI's working venv, which must not be broken. Install into a NEW venv (he has 2.5 TB free)."
+    },
+    {
+      q: "You pass a model to SFTTrainer as a string and omit dtype in model_init_kwargs. What dtype does it use?",
+      opts: [
+        "bf16, inferred from the config like from_pretrained",
+        "fp32 — SFTTrainer's default differs from from_pretrained",
+        "fp16 always",
+        "It raises an error and refuses to run"
+      ],
+      a: 1,
+      why: "Two libraries, one script, opposite defaults: from_pretrained (transformers v5) infers dtype-as-saved, but SFTTrainer still defaults to fp32 [VP, constants §7.3]. Always pass model_init_kwargs={'dtype': torch.bfloat16}."
+    },
+    {
+      q: "SFTConfig's max_length defaults to 1024. What does that do to a 3000-token training example?",
+      opts: [
+        "Raises a length error",
+        "Pads it to 1024 then to 3000",
+        "Silently truncates it to 1024 tokens",
+        "Splits it into three examples"
+      ],
+      a: 2,
+      why: "max_length=1024 silently truncates — the most common silent bug in the stack. Anything past 1024 tokens is dropped with no warning [VP, constants §7.3]."
+    }
+  ], "Self-check — 7 questions");
+
+});
+</script>
+</body>
+</html>

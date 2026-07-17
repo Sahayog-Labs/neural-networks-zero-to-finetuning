@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>11. Activations &amp; the MLP's Limits — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: let wide ledger tables scroll inside their own box on small
+   screens so the page body never scrolls horizontally; stack the two-panel
+   demo below 760px. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; }
+}
+.act-two-panel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .act-two-panel { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="11-activations-and-limits.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · ⚡ Activations</span>
+    <h1>Activations, Why ReLU Won, and the MLP's Honest Limits</h1>
+    <p class="subtitle">Page&nbsp;10 proved you <em>need</em> a bend and left the need standing. Here is the menu,
+      the real reason one of them (ReLU) quietly took over the 2010s, the layer that is <em>not</em> an activation
+      at all, and the four things the field's founding theorem does not promise you.</p>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Two hidden-layer choices, everything else identical: one network uses sigmoid, one uses ReLU, both 32 layers
+      deep. At the very start of training, layer&nbsp;1's gradient in the sigmoid net compared to the ReLU net is
+      about <b>(a) the same</b> · <b>(b) a million times smaller</b> · <b>(c) so small it is a practical zero in
+      float32</b>. Commit to one, then run the gradient-flow demo below and see for yourself.
+    </div>
+
+    <!-- ===================== THE HONEST SUMMARY ===================== -->
+    <h2>The honest summary, first</h2>
+    <p><b>In 2026: SwiGLU inside LLM/DiT feed-forward blocks; GELU or SiLU everywhere else; softmax at the output
+      for classification; sigmoid only for gates and binary outputs. Sigmoid and tanh as <em>hidden</em> activations
+      are dead.</b> Everything below explains why — and why "dead" is not the same claim as "wrong" (page&nbsp;6's
+      TN-1 uses both, deliberately, and is fine).</p>
+
+    <!-- ===================== THE MENU ===================== -->
+    <h2>The menu — what each one is actually for</h2>
+    <p>$\phi(\cdot)$ is the generic activation symbol from page&nbsp;10's neuron $a=\phi(z)$ — every row below is a
+      concrete choice of $\phi$.</p>
+    <table class="ledger">
+      <thead><tr><th>Activation</th><th>Formula</th><th>Range</th><th>$\phi'_{\max}$</th><th>2026 role</th></tr></thead>
+      <tbody>
+        <tr><td>Sigmoid</td><td>$\sigma(x)=\dfrac{1}{1+e^{-x}}$</td><td>$(0,1)$</td><td>$0.25$</td><td>binary output &amp; gates only — <b>never hidden</b></td></tr>
+        <tr><td>Tanh</td><td>$\tanh x$</td><td>$(-1,1)$</td><td>$1.0$</td><td>legacy — but TN-1's hidden units (page&nbsp;6), deliberately</td></tr>
+        <tr><td>ReLU</td><td>$\max(0,x)$</td><td>$[0,\infty)$</td><td>$1$ active / $0$ dead</td><td>still everywhere in vision</td></tr>
+        <tr><td>GELU</td><td>$x\,\Phi(x)$</td><td>bounded below, $\to\infty$ above</td><td>measured live below</td><td>transformer FFNs, widely</td></tr>
+        <tr><td>SiLU</td><td>$x\,\sigma(x)$</td><td>bounded below, $\to\infty$ above</td><td>measured live below</td><td>SwiGLU's gate — essentially every post-2023 LLM</td></tr>
+        <tr><td>SwiGLU</td><td>$\mathrm{SiLU}(W_g\mathbf x)\odot(W_u\mathbf x)$</td><td>—</td><td>—</td><td>the FFN <b>layer</b> itself, not an activation — Qwen3's</td></tr>
+      </tbody>
+    </table>
+    <p style="color:var(--text-dim)">$\Phi(\cdot)$ here is the standard normal CDF, not a layer — a one-off
+      notational collision with nothing else on this page.</p>
+
+    <!-- ===================== WHY RELU WON ===================== -->
+    <h2>The real reason ReLU won</h2>
+    <div class="box warn"><span class="box-title">⚠️ Not "it's cheaper to compute"</span>
+      An activation is a bandwidth-bound rounding error sitting next to the matmul it follows — speed was never the
+      story. The real reason is <b>gradient flow</b>. <b>[THREAD:chain-rule beat 0 reopened]</b> — page&nbsp;5's
+      "gears" multiplied a chain of factors $\le 0.25$ and watched a 10-deep stack lose six orders of magnitude
+      ($0.25^{10}=9.54\times10^{-7}$); page&nbsp;4 first named $\sigma'(0)=0.25$ as sigmoid's ceiling. Cash that in
+      now, at depth 32:
+    </div>
+    <div class="box worked"><span class="box-title">✍️ The idealized ceiling, cashed in</span>
+      $$\sigma'_{\max}=0.25 \quad\Longrightarrow\quad 0.25^{32}=\mathbf{5.4\times10^{-20}}$$
+      <span style="color:var(--text-dim)">(constants.md §9.3 [DER].)</span> This is the <em>best</em> case — every
+      one of the 32 layers evaluated exactly at its steepest point, $z=0$. ReLU's local slope is <b>exactly 1</b> on
+      the active path, so its product never shrinks at all. That contrast — not FLOPs — is the whole story.
+    </div>
+    <p><b>⚠️ A precision correction worth making out loud (constants.md §9.3 says this value sits "below fp32's
+      smallest normal" — it does not).</b> Float32's smallest normal number is $1.1754944\times10^{-38}$
+      (<code>torch.finfo(torch.float32).tiny</code>) — about $10^{18}\times$ <em>smaller</em> than
+      $5.4\times10^{-20}$. The number is not below the representable floor; it is a perfectly ordinary fp32 float.
+      What actually kills it is <b>float32's precision, not its range</b>: the machine epsilon is
+      $1.19\times10^{-7}$ (constants.md §9.3), so adding an update of size $\eta\times5.4\times10^{-20}$ to any
+      weight of order $10^{-2}$–$1$ rounds to <em>exactly no change</em> — the update is real, and it is also
+      invisible to the hardware. "Practically zero," not "representably zero." The demo below plots both floors
+      honestly, so you can see the gap for yourself.</p>
+
+    <p><b>Sigmoid's second sin:</b> it is not zero-centered — every hidden unit's output is positive, so every
+      next-layer weight sees same-signed gradients and the optimizer zigzags instead of stepping straight downhill.
+      <b>Tanh fixed exactly that</b> ($\phi'_{\max}=1.0$, zero-centered) — and <em>still</em> lost, because
+      $\phi'(x)\to0$ for $|x|>2$: it saturates just as hard, only slightly later. Zero-centering was never the
+      bottleneck; saturation was.</p>
+
+    <p><b>ReLU's own sin — the dying unit:</b> a ReLU whose pre-activation $z<0$ for every input in the dataset has
+      gradient exactly $0$, forever — no update ever revives it. <b>GELU</b> ($x\,\Phi(x)$) and <b>SiLU</b>
+      ($x\,\sigma(x)$) are the fix: smooth, and with a small but genuinely nonzero gradient on the negative side, so
+      no unit is ever permanently dead. GELU's intuition is better than "a smooth ReLU": it multiplies $x$ by
+      $\Phi(x)$, the probability a standard normal draw lands below $x$ — a soft, value-dependent stochastic gate,
+      not a hard cutoff.</p>
+
+    <!-- ===================== SWIGLU ===================== -->
+    <h2>SwiGLU is a layer, not an activation</h2>
+    <div class="box warn"><span class="box-title">⚠️ The category error that breaks param counting</span>
+      $$\mathbf h = \mathrm{SiLU}(W_g\mathbf x)\odot(W_u\mathbf x)$$
+      has <b>learned parameters</b>, $W_g$ and $W_u$ — calling it "an activation" is a category error, and page
+      36's parameter count depends on you not making it. It also uses <em>both</em> $\odot$ (Hadamard) and matmul
+      in one line — the cash-in of page&nbsp;2's $\odot\ne@$ warning. (Single-example maths, no batch axis — the
+      column-vector convention applies: $W_g$ is $(d_{ff},d_{\text{model}})$ "out,in" as always, so $W_g\mathbf x$
+      is the matrix-times-column-vector that actually type-checks against the ledger below — <em>not</em>
+      $\mathbf x W_g$ or $\mathbf x W_g^\top$, both of which presuppose a row-vector $\mathbf x$ that this page
+      never declares. Code and batched contexts write this same layer the other way, row-batched with a
+      transpose — <code>notation.md §1.3</code>.)
+    </div>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf x$</td><td>the FFN's input (post-attention residual stream)</td><td>$(d_{\text{model}},1)$</td><td>the residual stream</td></tr>
+        <tr><td>$W_g$</td><td>gate projection</td><td>$(d_{ff}, d_{\text{model}})$</td><td>a learned parameter</td></tr>
+        <tr><td>$W_u$</td><td>up projection</td><td>$(d_{ff}, d_{\text{model}})$</td><td>a learned parameter</td></tr>
+        <tr><td>$\mathrm{SiLU}$</td><td>the gate's nonlinearity, $x\sigma(x)$</td><td>elementwise</td><td>this page's menu</td></tr>
+        <tr><td>$\odot$</td><td>elementwise (Hadamard) product</td><td>—</td><td>notation §4.1, page&nbsp;2</td></tr>
+      </tbody>
+    </table>
+    <p><b>[THREAD:Qwen3-8B beat 4]</b> — Qwen3's <code>hidden_act: "silu"</code> is exactly this gate
+      (constants.md §1.1); its FFN <em>is</em> SwiGLU. Page&nbsp;36 counts on "SwiGLU" already being on the table
+      when it tallies <code>gate_proj</code> + <code>up_proj</code> + <code>down_proj</code>.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Two more traps</span>
+      <b>"Bias is always present."</b> No — Qwen3 ships <code>attention_bias: false</code> (constants.md §1.1).
+      Bias stays essential-<em>in principle</em> (page&nbsp;10: without it every hyperplane passes through the
+      origin) but modern LLMs drop it because RMSNorm's learned gain already buys back what a bias would — it is
+      redundant, not useless. <b>"A wide-enough net can learn anything, so architecture doesn't matter."</b> The
+      universal approximation theorem is real — and it promises far less than that. Next section.
+    </div>
+
+    <!-- ===================== UAT ===================== -->
+    <h2>The MLP's honest limits</h2>
+    <p>Cybenko (1989) and Hornik (1991): a wide-enough single-hidden-layer network with a non-polynomial activation
+      approximates any continuous function on a compact set, to any accuracy. It is a real theorem, and it is the
+      reason "neural networks can learn anything" became folklore. <b>But read what it does not say:</b></p>
+    <ul>
+      <li>It does not bound the <b>width</b> — "wide enough" could mean astronomically wide, unusable in practice.</li>
+      <li>It says nothing about whether <b>gradient descent can find</b> those parameters — existence is not
+        reachability.</li>
+      <li>It promises nothing about <b>generalization</b> to data the network never saw.</li>
+      <li>It says nothing about <b>depth</b> — why stacking layers, empirically, so often beats making one layer
+        wider (page&nbsp;10's deep-vs-wide deepdive touched this; the theorem is silent on it entirely).</li>
+    </ul>
+    <div class="box key"><span class="box-title">🔑 What the theorem actually buys you</span>
+      Universal approximation says a solution <em>exists</em>. It does not say you can afford it, train to it, or
+      trust it off the training set. Everything from page&nbsp;12 onward is about those four gaps — loss,
+      optimization, generalization, and why depth is a different axis from width.
+    </div>
+    <p style="color:var(--text-dim)">Genuinely open, not manufactured closure: nobody has a complete theory of
+      <em>why</em> the wildly overparameterized networks this course builds toward generalize as well as they do.
+      Say that plainly rather than paper over it.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the 2/3 rule — why a config says $d_{ff}=12288$</summary><div>
+      <p>A vanilla two-matrix FFN ($\text{down}(\phi(\text{up}(x)))$) with the textbook width $d_{ff}=4d$ costs
+        $2\times d\times 4d = 8d^2$ parameters. SwiGLU needs <b>three</b> matrices ($W_g,W_u,W_{down}$) instead of
+        two. To match the vanilla FFN's parameter budget:
+        $$3\,d\,d_{ff}^{\text{SwiGLU}} = 8d^2 \quad\Longrightarrow\quad d_{ff}^{\text{SwiGLU}} = \tfrac{8}{3}d \approx 2.667d.$$
+        Qwen3-8B uses $d_{ff}=12288=3d$ (constants.md §1.1) — closer to the honest $2.67d$ than Llama's $3.5d$
+        ($14336$); Qwen3 "spent less" on its FFN width per the same rule. This is the arithmetic behind a number
+        you will see in every post-2023 LLM's <code>config.json</code> and never again have to wonder about.</p>
+    </div></details>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: activation zoo &amp; gradient flow</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Left panel: pick an activation and watch $\phi(x)$ and $\phi'(x)$, sampled live over $[-6,6]$ — the peak
+      slope is measured off the sampled curve, not hard-coded. Right panel: the <em>same</em> mechanism page&nbsp;5
+      used (unit input, one weight, one bias, stacked $N$ times) — reopened here across all five activations and
+      out to depth 40, computing the real per-layer product of local slopes. Drag depth to 32 with sigmoid selected
+      to check your prediction above; switch to ReLU without changing anything else.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Five activations, one gradient-flow question <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <label style="display:block;margin-bottom:10px;font-size:.85rem;color:var(--text-dim)">activation (drives
+          both panels)
+          <select id="d-act-sel" style="margin-left:6px">
+            <option value="sigmoid" selected>Sigmoid</option>
+            <option value="tanh">Tanh</option>
+            <option value="relu">ReLU</option>
+            <option value="gelu">GELU</option>
+            <option value="silu">SiLU</option>
+          </select>
+        </label>
+        <div class="act-two-panel">
+          <div>
+            <canvas id="d-act-fn" height="260"></canvas>
+            <div class="readout" id="d-act-fn-out"></div>
+          </div>
+          <div>
+            <canvas id="d-act-depth" height="260"></canvas>
+            <div class="controls" id="d-act-depth-ctrls"></div>
+            <div class="readout" id="d-act-depth-out"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p><b>Predict resolved:</b> the answer is <b>(c)</b>. At $N=32$, sigmoid's real gradient (not even the idealized
+      $5.4\times10^{-20}$ ceiling — the live simulation drifts off $z=0$ and lands lower still) is a practical zero
+      once it meets float32's $1.19\times10^{-7}$ precision floor. ReLU's stays within a small factor of $1$ the
+      whole way, exactly as the right panel shows the moment you switch the dropdown.</p>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>Run it yourself</h2>
+    <div class="box try"><span class="box-title">Run this — <code>code/activations.py</code></span>
+      Tabulates $\phi'_{\max}$ for sigmoid/tanh/ReLU/GELU by autograd (not a table you memorized), prints
+      $0.25^{32}=5.4\times10^{-20}$ against <code>torch.finfo(torch.float32).tiny</code>, then builds a real
+      32-layer sigmoid stack and a real 32-layer ReLU stack, backpropagates through each once, and prints the
+      layer-1 gradient norm. CPU, under a second.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/activations.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn <span class="tok-kw">as</span> nn</span>
+<span class="line"></span>
+<span class="line">torch.<span class="tok-fn">manual_seed</span>(<span class="tok-num">0</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># ---- 1. phi'_max for each activation, measured by autograd, not memorized ----</span></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">phi_max</span>(name):</span>
+<span class="line">    x = torch.<span class="tok-fn">linspace</span>(-<span class="tok-num">6</span>, <span class="tok-num">6</span>, <span class="tok-num">200001</span>, requires_grad=<span class="tok-kw">True</span>)</span>
+<span class="line">    <span class="tok-kw">if</span> name == <span class="tok-str">"sigmoid"</span>: y = torch.<span class="tok-fn">sigmoid</span>(x)</span>
+<span class="line">    <span class="tok-kw">elif</span> name == <span class="tok-str">"tanh"</span>:    y = torch.<span class="tok-fn">tanh</span>(x)</span>
+<span class="line">    <span class="tok-kw">elif</span> name == <span class="tok-str">"relu"</span>:    y = torch.<span class="tok-fn">relu</span>(x)</span>
+<span class="line">    <span class="tok-kw">elif</span> name == <span class="tok-str">"gelu"</span>:    y = nn.functional.<span class="tok-fn">gelu</span>(x)</span>
+<span class="line">    g = torch.autograd.<span class="tok-fn">grad</span>(y.<span class="tok-fn">sum</span>(), x)[<span class="tok-num">0</span>]</span>
+<span class="line">    <span class="tok-kw">return</span> g.<span class="tok-fn">max</span>().<span class="tok-fn">item</span>()</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">for</span> name <span class="tok-kw">in</span> [<span class="tok-str">"sigmoid"</span>, <span class="tok-str">"tanh"</span>, <span class="tok-str">"relu"</span>, <span class="tok-str">"gelu"</span>]:</span>
+<span class="line">    <span class="tok-fn">print</span>(<span class="tok-str">f"{name:8s} phi'_max = {phi_max(name):.4f}"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># ---- 2. the idealized ceiling, named against BOTH fp32 floors ----</span></span>
+<span class="line">ceiling = <span class="tok-num">0.25</span> ** <span class="tok-num">32</span></span>
+<span class="line">tiny    = torch.<span class="tok-fn">finfo</span>(torch.float32).tiny     <span class="tok-com"># smallest NORMAL, 1.1754944e-38</span></span>
+<span class="line">eps     = torch.<span class="tok-fn">finfo</span>(torch.float32).eps      <span class="tok-com"># precision floor, 1.1920929e-07</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"0.25**32       = {ceiling:.2e}"</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"fp32 min-normal = {tiny:.2e}  (ceiling is ABOVE this — still representable)"</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"fp32 epsilon    = {eps:.2e}  (ceiling is far BELOW this — an update this size vanishes on addition)"</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> ceiling &gt; tiny            <span class="tok-com"># representable...</span></span>
+<span class="line"><span class="tok-kw">assert</span> ceiling &lt; eps             <span class="tok-com"># ...but invisible to any O(1) weight update</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># ---- 3. a REAL 32-layer stack, one backward pass each ----</span></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">deep_grad</span>(act):</span>
+<span class="line">    x = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">1.0</span>, requires_grad=<span class="tok-kw">True</span>)   <span class="tok-com"># float32 by default</span></span>
+<span class="line">    h = x</span>
+<span class="line">    <span class="tok-kw">for</span> _ <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">32</span>):</span>
+<span class="line">        h = act(h)</span>
+<span class="line">    h.<span class="tok-fn">backward</span>()</span>
+<span class="line">    <span class="tok-kw">return</span> x.grad.<span class="tok-fn">item</span>()</span>
+<span class="line"></span>
+<span class="line">g_sigmoid = <span class="tok-fn">deep_grad</span>(torch.sigmoid)</span>
+<span class="line">g_relu    = <span class="tok-fn">deep_grad</span>(torch.relu)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"32-deep sigmoid stack, layer-1 grad = {g_sigmoid:.3e}"</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"32-deep ReLU stack,    layer-1 grad = {g_relu:.3e}"</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(g_sigmoid) &lt; <span class="tok-num">1e-15</span>, <span class="tok-str">"sigmoid should be practically zero"</span></span>
+<span class="line"><span class="tok-kw">assert</span> g_relu &gt; <span class="tok-num">0.5</span>, <span class="tok-str">"ReLU's gradient should survive at ~1"</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">"The myth said 'ReLU is faster.' Your own box says 'ReLU is the one whose gradient isn't zero.'"</span>)</span></code></pre>
+    </div>
+
+    <!-- ===================== CLOSING ===================== -->
+    <div class="box key"><span class="box-title">🔑 Part I, closed</span>
+      You've built the whole forward machine — from one dragged neuron (page&nbsp;1) to a real network (page&nbsp;6),
+      the probability it samples (page&nbsp;8), the softmax it decides with (page&nbsp;9), and now the bend that
+      makes it more than linear algebra. <b>[THREAD:activation beat 1]</b> — the taxonomy is complete; SwiGLU is on
+      the table for page&nbsp;36. Part&nbsp;II answers the question page&nbsp;6 left open: <b>how does it learn?</b>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-activations"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- shared activation math: real closed forms, sampled/iterated live ---- */
+  function erf(x) {
+    // Abramowitz-Stegun 7.1.26 — accurate to 1.5e-7, plenty for a teaching plot.
+    const sign = x < 0 ? -1 : 1; x = Math.abs(x);
+    const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
+    const t = 1 / (1 + p * x);
+    const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
+    return sign * y;
+  }
+  const stdCDF = x => 0.5 * (1 + erf(x / Math.SQRT2));
+  const stdPDF = x => Math.exp(-x * x / 2) / Math.sqrt(2 * Math.PI);
+
+  const ACT = {
+    sigmoid: { label: "Sigmoid", f(z) { const s = 1 / (1 + Math.exp(-z)); return { phi: s, dphi: s * (1 - s) }; } },
+    tanh:    { label: "Tanh",    f(z) { const t = Math.tanh(z); return { phi: t, dphi: 1 - t * t }; } },
+    relu:    { label: "ReLU",    f(z) { return { phi: z > 0 ? z : 0, dphi: z > 0 ? 1 : 0 }; } },
+    gelu:    { label: "GELU",    f(z) { const c = stdCDF(z), p = stdPDF(z); return { phi: z * c, dphi: c + z * p }; } },
+    silu:    { label: "SiLU",    f(z) { const s = 1 / (1 + Math.exp(-z)); return { phi: z * s, dphi: s + z * s * (1 - s) }; } },
+  };
+
+  const sel = document.getElementById("d-act-sel");
+
+  /* ---- Panel 1: phi(x) and phi'(x), sampled live over [-6,6] ---- */
+  const fnCanvas = document.getElementById("d-act-fn");
+  const fnOut = document.getElementById("d-act-fn-out");
+  function drawFn() {
+    const name = sel.value, act = ACT[name];
+    const p = new Plot(fnCanvas, { xmin: -6, xmax: 6, ymin: -1.5, ymax: 6.5, xlabel: "x", ylabel: "φ(x) / φ'(x)" });
+    p.clear(); p.grid();
+    const xs = [], phis = [], dphis = [];
+    let maxD = -Infinity, argMax = 0;
+    for (let i = -600; i <= 600; i++) {
+      const x = i / 100; // guarantees x=0 lands exactly in the sample
+      const { phi, dphi } = act.f(x);
+      xs.push(x); phis.push(phi); dphis.push(dphi);
+      if (dphi > maxD) { maxD = dphi; argMax = x; }
+    }
+    const accent = cssVar("--accent", "#b48cff"), accent2 = cssVar("--accent2", "#45e0b8");
+    p.hline(0, cssVar("--plot-border", "#3b4a6b"), [3, 3]);
+    p.vline(0, cssVar("--plot-border", "#3b4a6b"), [3, 3]);
+    p.trace(xs, phis, accent, 2.5);
+    p.trace(xs, dphis, accent2, 2.5);
+    p.label(-5.6, 6.0, "— φ(x)", accent);
+    p.label(-5.6, 5.3, "— φ'(x)", accent2);
+    fnOut.innerHTML = `<b>${act.label}</b>: measured peak slope $\\phi'_{\\max}\\approx$ <b>${maxD.toFixed(4)}</b> at $x\\approx${argMax.toFixed(2)}$`;
+    if (window.renderMathInElement) renderMathInElement(fnOut, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+  }
+
+  /* ---- Panel 2: real per-layer product of local slopes, unit input, depth 1..40 ---
+     Reopens page 5's exact mechanism (w=1, b=0.1, h0=1, phi applied N times) across
+     all five activations and out to depth 40 — nothing here is precomputed. */
+  const depthCanvas = document.getElementById("d-act-depth");
+  const depthOut = document.getElementById("d-act-depth-out");
+  const N_MAX = 40;
+  const depthCtrl = makeCtrl(document.getElementById("d-act-depth-ctrls"),
+    { label: "depth N (layers)", min: 1, max: N_MAX, step: 1, value: 32, fmt: v => v.toFixed(0) });
+
+  function depthCurve(name) {
+    const act = ACT[name];
+    let h = 1.0, prod = 1.0;
+    const xs = [], ys = [];
+    for (let n = 1; n <= N_MAX; n++) {
+      const z = h + 0.1;               // w = 1, b = 0.1 — page 5's exact setup
+      const { phi, dphi } = act.f(z);
+      prod *= Math.abs(dphi);
+      h = phi;
+      xs.push(n); ys.push(Math.max(prod, 1e-300));
+    }
+    return { xs, ys };
+  }
+
+  function drawDepth() {
+    const name = sel.value, act = ACT[name];
+    const N = depthCtrl.get();
+    const { xs, ys } = depthCurve(name);
+    const p = new Plot(depthCanvas, {
+      xmin: 1, xmax: N_MAX, ymin: 1e-40, ymax: 50, ylog: true,
+      xlabel: "depth N", ylabel: "|gradient reaching layer 1|"
+    });
+    p.clear(); p.grid();
+    const accent = cssVar("--accent", "#b48cff");
+    p.trace(xs, ys, accent, 2.5);
+    p.vline(N, cssVar("--text-dim", "#8391ab"), [4, 4]);
+    // Two DIFFERENT floors, plotted honestly (see the warn box above):
+    // (1) the TRUE fp32 representable floor — sigmoid's curve gets small but,
+    //     capped at N=40, never actually crosses it;
+    // (2) the practical-zero floor — fp32 epsilon, below which an update this
+    //     size is rounded away when added to any O(1) weight. This is the one
+    //     the curves actually cross, and it is the one that matters for training.
+    p.hline(1.1754944e-38, cssVar("--bad", "#ff6b6b"), [3, 3]);
+    p.label(2, 3e-38, "fp32 smallest normal — 1.18e-38 (never crossed here)", cssVar("--bad", "#ff6b6b"));
+    p.hline(1.1920929e-7, cssVar("--warn", "#ffd166"), [3, 3]);
+    p.label(2, 2.2e-7, "fp32 epsilon — 1.19e-7 (the floor that matters)", cssVar("--warn", "#ffd166"));
+
+    const val = ys[N - 1];
+    let verdict;
+    if (val > 0.1) verdict = "healthy — comparable to a single layer's own slope, the signal is flowing";
+    else if (val > 1.19e-7) verdict = "shrinking, but still numerically distinguishable from zero in float32";
+    else verdict = "below float32's epsilon (1.19e-7) relative to any O(1) weight — a practical zero, though (see above) not yet below the true representable floor";
+    depthOut.innerHTML = `<b>${act.label}</b> at depth <b>${N}</b>: gradient reaching layer 1 ≈ <b>${val.toExponential(2)}</b> — ${verdict}.`;
+  }
+
+  function redrawAll() { drawFn(); drawDepth(); }
+  sel.addEventListener("change", redrawAll);
+  depthCtrl.onInput(drawDepth);
+  document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redrawAll, 0));
+  redrawAll();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-activations", [
+    {
+      q: "What is $0.25^{32}$ (sigmoid's derivative ceiling, raised to depth 32)?",
+      num: 5.4e-20, tol: 5e-20,
+      why: "$0.25^{32}=5.4\\times10^{-20}$ (constants.md §9.3 [DER]) — the idealized best case, and it is already far below float32's epsilon (1.19e-7), so an update this size vanishes on addition to any O(1) weight."
+    },
+    {
+      q: "ReLU displaced sigmoid mainly because:",
+      opts: ["it's cheaper to compute", "its derivative is exactly 1 on the active path, so gradients don't vanish with depth", "it's a smoother function"],
+      a: 1,
+      why: "The activation itself is a bandwidth-bound rounding error next to the matmul — speed was never the story. Sigmoid's derivative is capped at 0.25 and multiplies down to nothing across depth; ReLU's is exactly 1. \"Smoother\" is the GELU confusion, not the ReLU story."
+    },
+    {
+      q: "SwiGLU is:",
+      opts: ["an activation function", "a layer with learned parameters $W_g$ and $W_u$"],
+      a: 1,
+      why: "$\\mathrm{SiLU}(W_g\\mathbf{x})\\odot(W_u\\mathbf{x})$ has learned weight matrices — calling it \"an activation\" is the category error that breaks page 36's parameter count."
+    },
+    {
+      q: "A ReLU unit outputs 0 for every input in your dataset and never recovers. This is:",
+      opts: ["a bug in autograd", "a dead ReLU: $z<0$ always, so the gradient is exactly 0 forever", "expected and harmless"],
+      a: 1,
+      why: "z<0 for every input means the local slope is 0 on every pass — no gradient ever reaches that unit again. GELU and SiLU fix this because they keep a small, genuinely nonzero gradient on the negative side, so no unit is ever permanently dead."
+    },
+    {
+      q: "The universal approximation theorem guarantees:",
+      opts: ["that gradient descent will find the right weights", "that a wide-enough one-hidden-layer net can represent the function", "that the trained network will generalize to new data"],
+      a: 1,
+      why: "It is purely an existence statement about representation. It is silent on trainability, generalization, and depth — the other two options are exactly what it does NOT promise."
+    },
+    {
+      q: "Qwen3's config has `attention_bias: false`. That's fine because:",
+      opts: ["bias is never useful in a neural network", "RMSNorm's learned gain plus the residual stream make an explicit bias redundant", "it's a bug in the config"],
+      a: 1,
+      why: "Bias stays essential in principle (page 10: without it, every hyperplane passes through the origin) — modern LLMs just don't need to store it separately once RMSNorm already supplies an equivalent degree of freedom (constants.md §1.1)."
+    },
+    {
+      q: "Tanh is zero-centered with $\\phi'_{\\max}=1.0$ — strictly better than sigmoid on paper. Why is it still dead as a hidden activation?",
+      opts: ["It isn't — tanh works fine", "$\\phi'(x)\\to0$ for $|x|>2$ — it still saturates, just later than sigmoid", "It's too slow to compute"],
+      a: 1,
+      why: "Zero-centering fixes the zigzag problem, not the vanishing-gradient problem. Tanh's derivative collapses just as hard once |x| grows past about 2 — saturation, not sign, was always the real killer."
+    }
+  ], "Activations & the MLP's limits — self-check (7 questions)");
+
+});
+</script>
+</body>
+</html>

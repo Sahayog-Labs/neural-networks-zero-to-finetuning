@@ -1,0 +1,664 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>53. Latent Space: The VAE — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tags, cross-ref line, a compact data table, the shape
+     ribbon, radio rows, and the two demo scaffolds. The PREDICT box, Symbol
+     Ledgers and callout boxes all come from the shared course.css components. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  table.data td.hi { color: var(--track-diffusion); font-weight: 700; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 6px 0; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .twowrap { overflow-x: auto; }
+</style>
+</head>
+<body data-page="53-the-vae-his-comfyui-runs-on.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · Track Opener</span>
+    <h1>Latent Space: The VAE Your ComfyUI Already Runs On</h1>
+    <p class="subtitle">Before a single denoising step, every image you make is squeezed
+      into a tiny latent grid by a VAE — and then decoded back out by one that was trained
+      like a GAN. This page nails down the shapes on your own disk, and shows why the
+      latent's own prior is <em>not</em> a Gaussian. That gap is the reason the next nine
+      pages exist.</p>
+
+    <div class="track-banner track-diffusion"><span class="track-label">Diffusion Track begins here</span></div>
+    <p>You already turn these knobs — CFG, samplers, schedulers, LoRA strength,
+      <code>denoise</code>, bucketing. This track never re-explains what they <em>do</em>;
+      it derives <em>why they behave as you have watched them behave</em>. We start where
+      every workflow starts: the <code>VAEEncode</code> / <code>VAEDecode</code> pair.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: answered in prose right after the "prior is not Gaussian"
+         section, and again by the live D53.2 demo + the quiz. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You have a <code>VAEDecode</code> node in every workflow. Sample a tensor of
+      <strong>pure Gaussian noise</strong> at the FLUX.2 latent shape
+      $[1,32,128,128]$ — i.e. $\mathbf{z}\sim\mathcal{N}(0,I)$ — and run it straight
+      through the decoder, no diffusion, no sampler. Do you get
+      <strong>(a)</strong> a plausible image, <strong>(b)</strong> a structured-but-wrong
+      image, or <strong>(c)</strong> colored static? Commit to a letter before you scroll.
+    </div>
+
+    <!-- ============================ GENERATIVE FRAMING ============================ -->
+    <h2>The wall every later page climbs</h2>
+
+    <p>The whole game is to sample from $p(\mathbf{x})$ — the distribution of real images.
+      Maximum likelihood (the trunk's whole story, p.12) wants to write it down explicitly,
+      $p_\theta(\mathbf{x}) = \tilde p_\theta(\mathbf{x})\,/\,Z_\theta$, and then push
+      $\theta$ to raise the probability of the training set. The numerator
+      $\tilde p_\theta$ is an easy unnormalized score you can evaluate. The denominator is
+      the problem:</p>
+
+    <p>$$Z_\theta = \int \tilde p_\theta(\mathbf{x})\,\mathrm{d}\mathbf{x}
+        \quad\text{— an integral over every possible image.}$$</p>
+
+    <table class="ledger">
+      <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+      <tr><td>$p(\mathbf{x})$</td><td>the true data distribution we want to sample</td><td>scalar density on image space</td><td>the goal</td></tr>
+      <tr><td>$\tilde p_\theta(\mathbf{x})$</td><td>an unnormalized model score — easy to evaluate</td><td>scalar</td><td>the network</td></tr>
+      <tr><td>$Z_\theta$</td><td>the normalizer that makes it a probability</td><td>scalar</td><td>$\int\tilde p_\theta\,\mathrm{d}\mathbf{x}$ — intractable</td></tr>
+      <tr><td>$\theta$</td><td>the learnable parameters</td><td>the weight vector</td><td>trained</td></tr>
+    </table>
+
+    <p>For a $1024^2$ RGB image that integral has three million dimensions and no closed
+      form. You cannot compute $Z_\theta$, so you cannot compute $p_\theta(\mathbf{x})$,
+      so you cannot maximize it directly. <strong>This is the wall.</strong> Every technique
+      in this track is a different way around it.</p>
+
+    <p class="thread"><b>[THREAD: The chain rule · beat]</b> Same verb, new escape route.
+      Notice that $\nabla_{\mathbf{x}}\log p_\theta(\mathbf{x}) = \nabla_{\mathbf{x}}\log\tilde p_\theta(\mathbf{x})$
+      — the gradient of the log-density <em>with respect to the image</em> makes the
+      constant $Z_\theta$ differentiate clean away. Work with that gradient (the
+      <em>score</em>) and the intractable normalizer never appears. We build exactly this
+      on p.56; hold the thread.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: GANs in ninety seconds — and the one fact about them that lives inside your VAE</summary><div>
+      <p>A GAN sidesteps $Z_\theta$ differently: it never writes down a likelihood at all.
+        A generator maps noise to images and a discriminator learns to tell real from fake;
+        the two play a minimax game. It samples beautifully and fast, but it gives you
+        <em>no</em> likelihood, and it is prone to <strong>mode collapse</strong> — the
+        generator finds a few outputs that fool the discriminator and stops covering the
+        data. That is why the field largely moved to diffusion for coverage and stability.
+        Do not learn WGAN-GP for this course.</p>
+      <p><strong>The one fact to keep:</strong> the SD/FLUX VAE <em>decoder</em> is trained
+        with a GAN-style adversarial loss (plus perceptual and reconstruction terms). A
+        plain maximum-likelihood VAE decoder minimizes pixel MSE and comes out
+        <em>blurry</em> — MSE rewards hedging toward the mean. The adversarial term is
+        exactly what makes your decoded outputs crisp instead of soft. So your generator is
+        diffusion, but your decoder still owes its sharpness to a GAN.</p>
+    </div></details>
+
+    <!-- ============================ AUTOENCODER -> VAE ============================ -->
+    <h2>From autoencoder to VAE</h2>
+
+    <p>A plain autoencoder is two networks: an <strong>encoder</strong> that squeezes an
+      image down to a small code, and a <strong>decoder</strong> that reconstructs it.
+      Train them together to minimize reconstruction error and the code becomes a compressed
+      representation. The trouble: nothing organizes the code space, so the gaps between
+      valid codes are dead — decode a point <em>between</em> two real codes and you get junk.</p>
+
+    <p>The <strong>variational</strong> autoencoder fixes the code space. The encoder no
+      longer emits a point; it emits a little Gaussian, and the loss pulls all those
+      Gaussians toward a shared reference:</p>
+
+    <p>$$q_{\theta_E}(\mathbf{z}\mid\mathbf{x}) = \mathcal{N}\!\big(\mathbf{z};\ \boldsymbol\mu,\ \boldsymbol\sigma^2 I\big),
+        \qquad
+        \mathcal{L}_{\text{VAE}} = \underbrace{\mathbb{E}\big[\lVert\mathbf{x}-\hat{\mathbf{x}}\rVert^2\big]}_{\text{reconstruction}}
+        + \beta_{\text{KL}}\,\underbrace{D_{\mathrm{KL}}\!\big(q_{\theta_E}(\mathbf{z}\mid\mathbf{x})\,\big\|\,\mathcal{N}(0,I)\big)}_{\text{keep codes near the reference}}.$$</p>
+
+    <table class="ledger">
+      <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+      <tr><td>$\mathbf{x}$</td><td>the input image (pixel space)</td><td>$(3, H_{px}, W_{px})$</td><td>the data</td></tr>
+      <tr><td>$\mathbf{z}$</td><td>the latent code</td><td>$(C, H_{\text{lat}}, W_{\text{lat}})$</td><td>encoder output</td></tr>
+      <tr><td>$\boldsymbol\mu,\ \boldsymbol\sigma$</td><td>per-element mean and std of the encoder posterior</td><td>each $(C, H_{\text{lat}}, W_{\text{lat}})$</td><td>the two encoder heads</td></tr>
+      <tr><td>$\hat{\mathbf{x}}$</td><td>the decoder's reconstruction</td><td>$(3, H_{px}, W_{px})$</td><td>$p_{\theta_D}(\mathbf{x}\mid\mathbf{z})$</td></tr>
+      <tr><td>$\beta_{\text{KL}}$</td><td>weight on the KL term — <em>tiny</em> in LDM, $\approx 10^{-6}$</td><td>scalar</td><td>a hyperparameter</td></tr>
+      <tr><td>$\theta_E,\ \theta_D$</td><td>encoder / decoder parameters</td><td>weight vectors</td><td>trained together</td></tr>
+    </table>
+
+    <p>To backprop through the sampling step $\mathbf{z}\sim q_{\theta_E}$ you use the
+      reparameterization trick — <strong>trunk-owned, p.8</strong>, we do not re-derive it
+      here. In one line: $\mathbf{z} = \boldsymbol\mu + \boldsymbol\sigma\odot\boldsymbol\epsilon$
+      with $\boldsymbol\epsilon\sim\mathcal{N}(0,I)$, which moves the randomness off the
+      parameters so the gradient can flow through $\boldsymbol\mu$ and $\boldsymbol\sigma$.
+      Here is the round-trip as a shape ribbon, on your FLUX.2 VAE:</p>
+
+    <div class="ribbon">image     (3, 1024, 1024)        # RGB pixels, your input photo
+encoder → (64, 128, 128)         # 64 = 32 mu + 32 logvar channels  [VP, his vae/config.json]
+split   → mu (32,128,128), logvar (32,128,128)
+z = mu + exp(0.5*logvar) * eps   (32, 128, 128)   # reparameterize; eps ~ N(0,I)
+decoder → (3, 1024, 1024)        # back to pixels
+</div>
+
+    <!-- ============================ WHAT KL BUYS ============================ -->
+    <h2>What the KL term actually buys</h2>
+
+    <div class="box key"><span class="box-title">🔑 Three things the KL does — and one it does not</span>
+      <strong>(1)</strong> It <em>regularizes</em> the codes toward a known reference
+      $\mathcal{N}(0,I)$ so they do not drift to arbitrary scales.
+      <strong>(2)</strong> It makes the latent <em>navigable</em>: because every code is a
+      little blob that overlaps its neighbors, there are no dead voids between valid codes —
+      you can interpolate and the decoder stays sensible.
+      <strong>(3)</strong> It is <em>not</em> what makes the model generative. A VAE is a
+      compressor with a tidy code space; the ability to <em>sample new images</em> is not
+      something the KL term confers.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "the KL term makes the VAE generative — just sample $\mathcal{N}(0,I)$ and decode"</span>
+      This is the predict box, and the answer is no. In a latent-diffusion model the KL
+      weight is deliberately <strong>tiny</strong> ($\beta_{\text{KL}}\approx 10^{-6}$) — it
+      is turned almost off, precisely so the encoder keeps enough information to reconstruct
+      sharply. The consequence: the aggregate distribution of real latents is <em>not</em>
+      $\mathcal{N}(0,I)$. It is a thin, structured sheet sitting inside the latent space,
+      and $\mathcal{N}(0,I)$ is a <em>bad</em> model of it. Sampling the prior and decoding
+      does not land you on that sheet — it lands you in the void, and the decoder turns the
+      void into colored static. <strong>That mismatch is the entire reason you need a
+      diffusion model on top of the VAE: to find the sheet.</strong>
+    </div>
+
+    <p>So the predict answer is <strong>(c), colored static</strong> — and the
+      reason is worth holding onto: the VAE gives you a good <em>space</em> (compact,
+      navigable, sharply decodable), but it does <em>not</em> give you a good way to
+      <em>sample</em> in that space. Diffusion is the sampler. The live demo below shows the
+      geometry of why $\mathcal{N}(0,I)$ misses.</p>
+
+    <!-- ============================ REAL NUMBERS ============================ -->
+    <h2>The VAEs on your disk, by the numbers</h2>
+
+    <p>All three VAEs below downsample by the same spatial factor $f=8$, so a $1024^2$ image
+      always becomes a $128\times128$ latent grid. What differs is the <strong>channel
+      count</strong> $C$ — and that single number sets the compression ratio through one
+      clean identity:</p>
+
+    <p>$$\text{compression} = \frac{3\,H_{px}W_{px}}{C\,H_{\text{lat}}W_{\text{lat}}}
+        = \frac{3\,H_{px}W_{px}}{C\,(H_{px}/f)(W_{px}/f)} = \frac{3 f^2}{C}
+        \quad\text{— resolution-independent; only $C$ and $f$ matter.}$$</p>
+
+    <div class="box worked"><span class="box-title">✍️ Latent shapes &amp; compression at $1024^2$ (all values from constants.md §9.6)</span>
+      <div class="twowrap"><table class="data">
+        <thead><tr><th>VAE</th><th>$f$</th><th>$C$</th><th>latent $[1,C,128,128]$</th><th>elements</th><th>compression $=3f^2/C$</th><th>tag</th></tr></thead>
+        <tbody>
+          <tr><td>SD 1.5 / SDXL</td><td>8</td><td>4</td><td>$[1,4,64,64]$ @ $512^2$</td><td>16,384</td><td class="hi">$48\times$</td><td>[VP]/[DER]</td></tr>
+          <tr><td>FLUX.1</td><td>8</td><td>16</td><td>$[1,16,128,128]$</td><td>262,144</td><td class="hi">$12\times$</td><td>[VP]</td></tr>
+          <tr><td>FLUX.2 (your disk)</td><td>8</td><td>32</td><td>$[1,32,128,128]$</td><td><b>524,288</b></td><td class="hi">$\mathbf{6.0\times}$</td><td>[VP]</td></tr>
+        </tbody>
+      </table></div>
+      FLUX.2's spatial factor is $f = 2^{4-1} = 8$ (four <code>block_out_channels</code>
+      stages) [VP, shipped <code>vae/config.json</code>, <code>AutoencoderKLFlux2</code>];
+      <code>latent_channels: 32</code> [VP]. The VAE weighs
+      <strong>84,046,371 params (84.0M)</strong> [VP, <code>hardware-ground-truth.md</code> §4].
+      After the transformer's $2\times2$ patchify, the $128\times128$ grid becomes
+      $64\times64 = \mathbf{4096}$ tokens of width $128$ [DER] — the <em>same</em> token
+      count as FLUX.1, at double the per-token width.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Do not trust the DeepWiki "32:1 / [B,128,16,16]" figure</span>
+      A widely-copied DeepWiki page reports FLUX.2's VAE as $32{:}1$ compression with a
+      $[B,128,16,16]$ latent. That is wrong: it quoted the VAE <em>composed with</em> the
+      transformer's patchify (the $128$-wide, $16\times$-downsampled token grid), not the
+      VAE output. The VAE alone is $f=8$, $32$ channels, $6.0\times$. When a number does not
+      match your own <code>config.json</code>, your <code>config.json</code> wins.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Open your own file: <code>cat ~/ComfyUI/models/vae/&lt;flux2-vae&gt;/config.json</code>
+      (or wherever your FLUX.2 VAE lives). Confirm <code>latent_channels: 32</code> and a
+      four-entry <code>block_out_channels</code> ($\Rightarrow f=2^{4-1}=8$). Then run
+      <code>code/vae_ceiling.py</code> — it encodes a real photo through your SD 1.5 (4-ch)
+      and FLUX.2 (32-ch) VAEs, prints the shapes and compressions
+      (<strong>$48\times$ / $6.0\times$</strong>) and the reconstruction residual, then
+      samples $\mathcal{N}(0,I)$ at latent shape and decodes it to colored static. Your VAE
+      round-trips your photo; your VAE's own prior gives noise. That gap is the whole rest
+      of the track. <em>(~30 s.)</em>
+    </div>
+
+    <p><strong>Why the channel count climbed 4 → 16 → 32 over the years.</strong> Every extra
+      latent channel is fidelity the field is <em>buying back</em>. SD 1.5's aggressive
+      $48\times$ squeeze into 4 channels throws away fine texture the decoder then has to
+      hallucinate; FLUX.2 spends compression (down to $6.0\times$) to carry more real
+      information into the latent, so the decoder invents less. More channels cost you a
+      bigger latent to diffuse over, and buy you sharper, more faithful reconstructions.
+      That trade is draggable in the next demo.</p>
+
+    <!-- ============================ DEMO 1 ============================ -->
+    <h2>Demo — latent shape &amp; compression calculator</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Switch the model and the resolution. Watch two things: the compression ratio
+      <em>never</em> changes with resolution (it is $3f^2/C$), but the element count and
+      token count scale with area. And FLUX.2's 32 channels sit at the bottom of the
+      compression bars — it spends the most compression to buy the most fidelity.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Pixels → latent, live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="radio-row" id="d-calc-model">
+          <span class="grp-label">VAE:</span>
+          <label><input type="radio" name="calcmodel" value="sd15"> SD 1.5 (4-ch)</label>
+          <label><input type="radio" name="calcmodel" value="flux1"> FLUX.1 (16-ch)</label>
+          <label><input type="radio" name="calcmodel" value="flux2" checked> FLUX.2 (32-ch)</label>
+        </div>
+        <div class="radio-row" id="d-calc-res">
+          <span class="grp-label">resolution:</span>
+          <label><input type="radio" name="calcres" value="512"> 512²</label>
+          <label><input type="radio" name="calcres" value="1024" checked> 1024²</label>
+          <label><input type="radio" name="calcres" value="2048"> 2048²</label>
+        </div>
+        <canvas id="d-calc" height="200"></canvas>
+        <div class="readout" id="d-calc-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 2 ============================ -->
+    <h2>Demo — round-trip vs. decoding the prior</h2>
+
+    <p>Here is the predict box, run live on a real linear autoencoder: the <strong>2-D
+      DCT</strong>, the exact transform inside JPEG. Its encoder projects each $8\times8$ image
+      block onto 64 frequency coefficients — that is the <em>latent</em>; keep the lowest $K$
+      and you have a compressor of ratio $64/K$. Its decoder is the inverse DCT. Everything
+      below is that transform computed on the real pixels of the scene — no canned image, no
+      lookup table.</p>
+
+    <p>Two decoded tiles, side by side. <strong>Round-trip:</strong> encode the photo, keep $K$
+      coefficients, decode — crisp, because a real image's latent lives on a thin sheet (nearly
+      all of its energy sits in a handful of low frequencies). <strong>Decode the prior:</strong>
+      throw the photo away and hand the decoder $\mathbf{z}\sim\mathcal{N}(0,I)$ at the
+      <em>same</em> latent shape and the <em>same</em> total energy — but spread
+      <em>isotropically</em> across all 64 frequencies instead of concentrated on the sheet. You
+      get colored static. Same decoder, same energy budget; the only thing that changed is
+      whether the code sits on the data sheet.</p>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Round-trip (crisp) vs. $\mathcal{N}(0,I)$ decode (static) <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="twowrap"><canvas id="d-vae-tiles" height="200"></canvas></div>
+        <div class="controls" id="d-vae-ctrls"></div>
+        <p style="margin:10px 0 0"><button class="btn secondary" id="d-vae-go">Resample $\mathcal{N}(0,I)$</button></p>
+        <div class="readout" id="d-vae-out"></div>
+        <p style="margin:1.3em 0 .3em;font-size:.9rem;color:var(--text-dim)">
+          Reconstruction residual $\lvert\mathbf{x}-\hat{\mathbf{x}}\rvert$ at <b>4× gain</b> —
+          where the compressor spent its error budget (edges and texture, never flat sky):</p>
+        <div class="twowrap"><canvas id="d-vae-resid" height="260"></canvas></div>
+      </div>
+    </div>
+
+    <p>This DCT autoencoder is deliberately the simplest <em>real</em> one — a fixed linear
+      basis, no learning. Your FLUX.2 VAE is nonlinear and GAN-trained, so its static is richer
+      and its round-trip sharper, but the geometry is identical: run
+      <code>code/vae_ceiling.py</code> and you get these same two tiles from the real 32-channel
+      decoder on your own disk. And the gap only widens with scale, because of
+      <strong>dimension</strong>: a real FLUX.2 latent is
+      $32\times128\times128 = 524{,}288$-dimensional, and in that many dimensions
+      $\mathcal{N}(0,I)$ puts essentially all of its mass on a thin spherical shell of radius
+      $\sqrt{D}$, nowhere near the low-dimensional sheet where images live.
+      <strong>Decoding a prior sample never lands on the sheet — so it decodes to static.
+      Diffusion is the machine that learns to walk from the shell onto the sheet.</strong>
+      That is the answer to the predict box, and the reason for everything that follows.</p>
+
+    <p class="thread"><b>[THREAD: The memory ledger · beat]</b> Same reality check, new object.
+      The FLUX.2 VAE is 84.0M params — at the fp32 it ships in, $\approx 0.34$ GB; in bf16,
+      $\approx 0.17$ GB. Against your measured <strong>121.6875 GiB</strong> MemTotal
+      [MEA-DEV] that is a rounding error. The lesson the ledger keeps repeating: the
+      <em>weights</em> are the mass, not the activations or the latents — a half-megabyte
+      latent grid is free; it is the parameter tensors you budget for.</p>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-53"></div>
+
+    <p class="xref" style="margin-top:2em">→ p.54 takes these latent shapes and noises them:
+      the forward process turns $\mathbf{x}_0$ (a VAE latent) into $\mathbf{x}_t$ one
+      rotation at a time. → p.56 differentiates the log-density to get the score and cashes
+      the chain-rule thread. → p.60 uses exactly these shapes ($4096$ latent tokens vs
+      pixel-space) to justify why diffusion runs in latent space at all.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ================= DEMO 1 — latent shape / compression calculator ================= */
+  (function () {
+    const MODELS = {
+      sd15:  { name: "SD 1.5",  f: 8, C: 4,  arch: "U-Net" },
+      flux1: { name: "FLUX.1",  f: 8, C: 16, arch: "DiT" },
+      flux2: { name: "FLUX.2",  f: 8, C: 32, arch: "DiT" },
+    };
+    const ORDER = ["sd15", "flux1", "flux2"];
+    const canvas = document.getElementById("d-calc");
+    const out = document.getElementById("d-calc-out");
+
+    const mkey = () => document.querySelector('input[name="calcmodel"]:checked').value;
+    const res  = () => parseInt(document.querySelector('input[name="calcres"]:checked').value, 10);
+
+    // REAL math: everything below is computed live from f, C, resolution.
+    function compute(k, Hpx) {
+      const m = MODELS[k];
+      const Hlat = Math.ceil(Hpx / m.f);
+      const elems = m.C * Hlat * Hlat;
+      const comp = (3 * Hpx * Hpx) / elems;          // = 3 f^2 / C, resolution-independent
+      const tokens = (Hlat / 2) * (Hlat / 2);        // 2x2 patchify (DiT only)
+      return { m, Hpx, Hlat, elems, comp, tokens };
+    }
+
+    function drawBars(selKey, Hpx) {
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = canvas.clientWidth || 640, cssH = 200;
+      canvas.width = Math.round(cssW * dpr); canvas.height = Math.round(cssH * dpr);
+      canvas.style.height = cssH + "px";
+      const g = canvas.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, cssW, cssH);
+
+      const comps = ORDER.map(k => compute(k, Hpx).comp);
+      const maxC = Math.max(...comps);
+      const padL = 96, padR = 20, padT = 16, padB = 26;
+      const plotW = cssW - padL - padR, plotH = cssH - padT - padB;
+      const n = ORDER.length, rowH = plotH / n;
+      const accent = cssVar("--track-diffusion", "#ff9466");
+      const dim = cssVar("--text-dim", "#8391ab");
+      const border = cssVar("--border", "#3b4a6b");
+      const bgTrack = cssVar("--bg-panel2", "#1d1829");
+
+      g.font = "12px " + cssVar("--mono", "monospace");
+      g.textBaseline = "middle";
+      ORDER.forEach((k, i) => {
+        const m = MODELS[k], c = comps[i];
+        const y = padT + i * rowH + rowH * 0.5;
+        const bh = Math.min(26, rowH * 0.6);
+        const bw = (c / maxC) * plotW;
+        // label
+        g.fillStyle = dim; g.textAlign = "right";
+        g.fillText(m.name + " (" + m.C + "ch)", padL - 10, y);
+        // track + bar
+        g.fillStyle = bgTrack; g.fillRect(padL, y - bh / 2, plotW, bh);
+        g.fillStyle = (k === selKey) ? accent : border;
+        g.fillRect(padL, y - bh / 2, bw, bh);
+        // value
+        g.fillStyle = (k === selKey) ? accent : dim; g.textAlign = "left";
+        g.fillText(c.toFixed(1) + "×", padL + bw + 8, y);
+      });
+      g.fillStyle = dim; g.textAlign = "left";
+      g.fillText("compression = 3f²/C  (higher = more squeezed, less fidelity)", padL, cssH - 8);
+    }
+
+    function draw() {
+      const k = mkey(), r = res();
+      const c = compute(k, r);
+      drawBars(k, r);
+      const shape = "[1, " + c.m.C + ", " + c.Hlat + ", " + c.Hlat + "]";
+      const tok = (c.m.arch === "U-Net")
+        ? "<b>— </b>(U-Net: no patchify, no tokens)"
+        : "<b>" + c.tokens.toLocaleString() + "</b> tokens (2×2 patchify, width " + c.m.C * 4 + ")";
+      out.innerHTML =
+        "<b>" + c.m.name + "</b> at " + r + "²  →  latent <b>" + shape + "</b> = <b>" +
+        c.elems.toLocaleString() + "</b> elements · compression <b>" + c.comp.toFixed(1) + "×</b> · " + tok +
+        "<br><span style='color:var(--text-dim)'>Compression stays <b>" + c.comp.toFixed(1) +
+        "×</b> at every resolution — only the element/token counts scale with area. FLUX.2 spends " +
+        "the most compression (32 channels) to buy back the most fidelity.</span>";
+    }
+
+    document.querySelectorAll('input[name="calcmodel"],input[name="calcres"]')
+      .forEach(r => r.addEventListener("change", draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ================= DEMO 2 — round-trip vs. decoding the prior =================
+     A REAL linear autoencoder computed live on real pixels: the 8x8 2-D DCT (the
+     transform inside JPEG). Encoder = block DCT -> 64 coefficients (the latent);
+     decoder = inverse DCT. Two experiments, identical to code/vae_ceiling.py's:
+       (a) round-trip: keep the K lowest-frequency coeffs, invert -> crisp;
+       (b) decode the prior: replace the latent with z~N(0,I), energy-matched to
+           the real coeffs but spread ISOTROPICALLY over all 64 frequencies, invert
+           -> colored static. Same decoder, same energy; the code just left the sheet.
+     No fabricated image anywhere: DCT/IDCT are exact orthonormal transforms, run
+     here on the RGB planes of the painted scene.
+     ============================================================================ */
+  (function () {
+    const tilesCv = document.getElementById("d-vae-tiles");
+    const residCv = document.getElementById("d-vae-resid");
+    const out = document.getElementById("d-vae-out");
+    const goBtn = document.getElementById("d-vae-go");
+    const host = document.getElementById("d-vae-ctrls");
+    const N = 128, B = 8, NB = N / B;               // 128px, 8x8 blocks, 16x16 grid of blocks
+
+    // ---- paint a representative scene (varied frequency content) on an offscreen canvas
+    function paintScene(ctx) {
+      const g = ctx.createLinearGradient(0, 0, 0, N);   // sky gradient (very low freq)
+      g.addColorStop(0, "#2a5a9a"); g.addColorStop(1, "#c9dcef");
+      ctx.fillStyle = g; ctx.fillRect(0, 0, N, N);
+      ctx.fillStyle = "#ffd24a"; ctx.beginPath();       // sun (smooth edge)
+      ctx.arc(N * 0.74, N * 0.24, N * 0.11, 0, 2 * Math.PI); ctx.fill();
+      ctx.fillStyle = "#31543a"; ctx.beginPath();       // mountains (hard edges = mid/high freq)
+      ctx.moveTo(0, N); ctx.lineTo(N * 0.38, N * 0.36); ctx.lineTo(N * 0.80, N); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#4a7a52"; ctx.beginPath();
+      ctx.moveTo(N * 0.44, N); ctx.lineTo(N * 0.78, N * 0.50); ctx.lineTo(N, N); ctx.closePath(); ctx.fill();
+      ctx.fillStyle = "#c14b3a"; ctx.fillRect(N * 0.10, N * 0.60, N * 0.17, N * 0.20);  // red house
+      ctx.fillStyle = "#f0c27a"; ctx.fillRect(N * 0.135, N * 0.66, N * 0.05, N * 0.06); // window
+      for (let i = 0; i < 22; i++) {                    // picket fence (fine, high-frequency texture)
+        ctx.fillStyle = i % 2 ? "#d8d0c0" : "#8a8070";
+        ctx.fillRect(N * 0.02 + i * (N * 0.96 / 22), N * 0.86, N * 0.96 / 22, N * 0.14);
+      }
+    }
+    const scene = document.createElement("canvas"); scene.width = N; scene.height = N;
+    paintScene(scene.getContext("2d"));
+    const raw = scene.getContext("2d").getImageData(0, 0, N, N).data;
+    const src = [new Float64Array(N * N), new Float64Array(N * N), new Float64Array(N * N)];
+    for (let p = 0; p < N * N; p++) for (let c = 0; c < 3; c++) src[c][p] = raw[p * 4 + c] / 255;
+
+    // ---- 8-point orthonormal DCT matrix  D[u][x] = a(u) cos((2x+1)uπ/16)
+    const Dm = [], iDm = [];
+    for (let u = 0; u < B; u++) {
+      Dm[u] = new Float64Array(B);
+      const a = u === 0 ? Math.sqrt(1 / B) : Math.sqrt(2 / B);
+      for (let x = 0; x < B; x++) Dm[u][x] = a * Math.cos(((2 * x + 1) * u * Math.PI) / (2 * B));
+    }
+    for (let x = 0; x < B; x++) { iDm[x] = new Float64Array(B); for (let u = 0; u < B; u++) iDm[x][u] = Dm[u][x]; }
+
+    // 2-D DCT of an 8x8 block:  C = D · Bm · Dᵀ ; inverse: Bm = Dᵀ · C · D
+    function dct2(bm) {
+      const t = new Float64Array(B * B), o = new Float64Array(B * B);
+      for (let u = 0; u < B; u++) for (let y = 0; y < B; y++) { let s = 0; for (let x = 0; x < B; x++) s += Dm[u][x] * bm[x * B + y]; t[u * B + y] = s; }
+      for (let u = 0; u < B; u++) for (let v = 0; v < B; v++) { let s = 0; for (let y = 0; y < B; y++) s += t[u * B + y] * Dm[v][y]; o[u * B + v] = s; }
+      return o;
+    }
+    function idct2(cm) {
+      const t = new Float64Array(B * B), o = new Float64Array(B * B);
+      for (let x = 0; x < B; x++) for (let v = 0; v < B; v++) { let s = 0; for (let u = 0; u < B; u++) s += iDm[x][u] * cm[u * B + v]; t[x * B + v] = s; }
+      for (let x = 0; x < B; x++) for (let y = 0; y < B; y++) { let s = 0; for (let v = 0; v < B; v++) s += t[x * B + v] * iDm[y][v]; o[x * B + y] = s; }
+      return o;
+    }
+
+    // zig-zag order over the 8x8 frequency grid (low frequency first) — the JPEG scan order
+    const ZZ = (() => {
+      const cells = [];
+      for (let s = 0; s < 2 * B - 1; s++) for (let u = 0; u <= s; u++) { const v = s - u; if (u < B && v < B) cells.push(s % 2 === 0 ? [v, u] : [u, v]); }
+      return cells.map(([u, v]) => u * B + v);
+    })();
+
+    // ---- forward pass ONCE: full DCT coeffs for every block/channel; per-frequency energy
+    const coeff = [[], [], []];         // coeff[c][blk] = Float64Array(64)
+    let energyTotal = 0, nBlk = NB * NB;
+    for (let c = 0; c < 3; c++) {
+      for (let by = 0; by < NB; by++) for (let bx = 0; bx < NB; bx++) {
+        const bm = new Float64Array(B * B);
+        for (let y = 0; y < B; y++) for (let x = 0; x < B; x++) bm[y * B + x] = src[c][(by * B + y) * N + (bx * B + x)];
+        const cm = dct2(bm);
+        coeff[c][by * NB + bx] = cm;
+        for (let k = 0; k < B * B; k++) energyTotal += cm[k] * cm[k];
+      }
+    }
+    const sigmaIso = Math.sqrt(energyTotal / (3 * nBlk * B * B));   // isotropic std, energy-matched
+
+    // reconstruct the image keeping the K lowest-frequency coeffs (zig-zag) per block
+    function roundTrip(K) {
+      const planes = [new Float64Array(N * N), new Float64Array(N * N), new Float64Array(N * N)];
+      const keep = new Uint8Array(B * B); for (let k = 0; k < K; k++) keep[ZZ[k]] = 1;
+      for (let c = 0; c < 3; c++) for (let by = 0; by < NB; by++) for (let bx = 0; bx < NB; bx++) {
+        const cm = coeff[c][by * NB + bx], tm = new Float64Array(B * B);
+        for (let k = 0; k < B * B; k++) if (keep[k]) tm[k] = cm[k];
+        const bm = idct2(tm);
+        for (let y = 0; y < B; y++) for (let x = 0; x < B; x++) planes[c][(by * B + y) * N + (bx * B + x)] = bm[y * B + x];
+      }
+      return planes;
+    }
+    // decode the prior: z ~ N(0,I), isotropic, energy-matched -> invert
+    function priorDecode(seed) {
+      const rng = new NN.RNG(seed);
+      const planes = [new Float64Array(N * N), new Float64Array(N * N), new Float64Array(N * N)];
+      for (let c = 0; c < 3; c++) for (let by = 0; by < NB; by++) for (let bx = 0; bx < NB; bx++) {
+        const tm = new Float64Array(B * B);
+        for (let k = 0; k < B * B; k++) tm[k] = rng.normal(0, 1) * sigmaIso;
+        const bm = idct2(tm);
+        for (let y = 0; y < B; y++) for (let x = 0; x < B; x++) planes[c][(by * B + y) * N + (bx * B + x)] = bm[y * B + x];
+      }
+      return planes;
+    }
+
+    // ---- rendering
+    function blit(fg, planes, x0, y0, side, label) {
+      const tmp = document.createElement("canvas"); tmp.width = N; tmp.height = N;
+      const tctx = tmp.getContext("2d"); const im = tctx.createImageData(N, N), d = im.data;
+      for (let p = 0; p < N * N; p++) {
+        for (let c = 0; c < 3; c++) d[p * 4 + c] = Math.max(0, Math.min(255, Math.round(planes[c][p] * 255)));
+        d[p * 4 + 3] = 255;
+      }
+      tctx.putImageData(im, 0, 0);
+      fg.imageSmoothingEnabled = true; fg.drawImage(tmp, x0, y0, side, side);
+      fg.strokeStyle = cssVar("--border", "#3b4a6b"); fg.strokeRect(x0, y0, side, side);
+      fg.fillStyle = cssVar("--text-dim", "#8391ab"); fg.font = "12px system-ui";
+      fg.textAlign = "center"; fg.fillText(label, x0 + side / 2, y0 - 8);
+    }
+
+    const heat = new Heatmap(residCv, { colormap: "sequential", cellText: false, colorbar: true, hover: true, height: 260,
+      title: "residual |x − x̂|, 4× gain" });
+
+    const kC = makeCtrl(host, { label: "coefficients kept K (of 64) — compression 64/K", min: 1, max: 64, step: 1, value: 8, fmt: v => v.toFixed(0) });
+    let seed = 20240716;
+
+    function residualGrid(rt) {
+      const G = 16, cell = N / G, grid = [];
+      for (let gy = 0; gy < G; gy++) { grid[gy] = []; for (let gx = 0; gx < G; gx++) {
+        let s = 0, n = 0;
+        for (let y = gy * cell; y < (gy + 1) * cell; y++) for (let x = gx * cell; x < (gx + 1) * cell; x++) {
+          for (let c = 0; c < 3; c++) { s += Math.abs(src[c][y * N + x] - rt[c][y * N + x]); n++; }
+        }
+        grid[gy][gx] = Math.min(1, 4 * (s / n));   // 4x gain, clamped
+      } }
+      return grid;
+    }
+
+    function draw() {
+      const K = Math.round(kC.get());
+      const rt = roundTrip(K), pr = priorDecode(seed);
+      const dpr = window.devicePixelRatio || 1;
+      const side = 150, gap = 22, labelH = 20, W = side * 3 + gap * 4, H = side + labelH + gap;
+      tilesCv.width = Math.round(W * dpr); tilesCv.height = Math.round(H * dpr); tilesCv.style.height = H + "px";
+      const fg = tilesCv.getContext("2d"); fg.setTransform(dpr, 0, 0, dpr, 0, 0); fg.clearRect(0, 0, W, H);
+      blit(fg, src, gap, labelH, side, "original");
+      blit(fg, rt, gap * 2 + side, labelH, side, "round-trip (K=" + K + ")");
+      blit(fg, pr, gap * 3 + side * 2, labelH, side, "N(0,I) decode");
+
+      heat.setData(residualGrid(rt));
+
+      // real reconstruction error of the round-trip
+      let se = 0, nn = 0;
+      for (let c = 0; c < 3; c++) for (let p = 0; p < N * N; p++) { const e = src[c][p] - rt[c][p]; se += e * e; nn++; }
+      const rmse = Math.sqrt(se / nn), psnr = 20 * Math.log10(1 / (rmse + 1e-12));
+      out.innerHTML =
+        "latent = 64 DCT coeffs/block; keeping <b>" + K + "</b> → compression <b>" + (64 / K).toFixed(1) + "×</b>, " +
+        "round-trip <b>PSNR " + psnr.toFixed(1) + " dB</b> (RMSE " + rmse.toFixed(3) + "). " +
+        "The N(0,I) decode carries the <em>same</em> total latent energy but spread isotropically over all 64 " +
+        "frequencies — off the sheet, so it renders as colored static regardless of K." +
+        "<br><span style='color:var(--text-dim)'>The residual heatmap: error concentrates on edges and the fence " +
+        "(high frequency), and is near-zero on the flat sky — exactly the fidelity your VAE's channel count buys back.</span>";
+    }
+
+    kC.onInput(draw);
+    goBtn.addEventListener("click", () => { seed = (seed + 1013904223) >>> 0; draw(); });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ================= QUIZ ================= */
+  renderQuiz("quiz-53", [
+    {
+      q: "Your FLUX.2 VAE at $1024^2$ ($f=8$, 32 channels). What is its compression ratio, pixels to latent elements?",
+      num: 6.0, tol: 0.3, unit: "×",
+      why: "compression $= 3f^2/C = 3\\cdot 64 / 32 = 6.0\\times$. FLUX.1's 16 channels give $12\\times$; SD 1.5's 4 channels give $48\\times$. More channels = less compression = more fidelity carried into the latent."
+    },
+    {
+      q: "You sample pure Gaussian noise $\\mathbf{z}\\sim\\mathcal{N}(0,I)$ at the FLUX latent shape and run it straight through <code>VAEDecode</code>. You get:",
+      opts: [
+        "A plausible, if random, real image",
+        "Colored static — the prior sample misses the data sheet",
+        "A pure black frame",
+        "The mean training image"
+      ],
+      a: 1,
+      why: "The aggregate latent distribution is a thin structured sheet, and $\\mathcal{N}(0,I)$ is a bad model of it. A prior draw lands in the void off the sheet, which the decoder renders as static. Expecting a real image is the 'the prior is Gaussian, so decoding it is generation' misconception — the KL is near-off ($\\beta_{\\text{KL}}\\approx10^{-6}$) exactly so it isn't."
+    },
+    {
+      q: "In a latent-diffusion VAE, the KL term's main job is to:",
+      opts: [
+        "Make the model generative so you can sample the prior",
+        "Make the latent navigable — no dead voids between valid codes",
+        "Compress the image further",
+        "Sharpen the decoded output"
+      ],
+      a: 1,
+      why: "The KL keeps codes near a reference so the space is smooth and interpolable (navigable). It does not make the model generative — that's the corrected misconception. Sharpness comes from the decoder's GAN-style loss; compression comes from the channel count, not the KL."
+    },
+    {
+      q: "How many elements does a FLUX.2 latent hold at $1024^2$ ($[1,32,128,128]$)?",
+      num: 524288, tol: 0, unit: "elements",
+      why: "$32\\times128\\times128 = 524{,}288$. (SD 1.5 at $512^2$: $4\\times64\\times64 = 16{,}384$; FLUX.1 at $1024^2$: $16\\times128\\times128 = 262{,}144$.)"
+    },
+    {
+      q: "Why is your SD/FLUX VAE decoder's output crisp, when a textbook maximum-likelihood VAE decoder is blurry?",
+      opts: [
+        "It uses more latent channels",
+        "It is trained with a GAN-style adversarial loss, not just pixel MSE",
+        "The KL term sharpens it",
+        "It decodes at higher resolution"
+      ],
+      a: 1,
+      why: "A plain VAE decoder minimizing pixel MSE hedges toward the mean and comes out soft. The SD/FLUX decoder adds an adversarial (GAN) term plus a perceptual loss, which is what forces sharp, plausible texture. Your generator is diffusion; your decoder owes its crispness to a GAN."
+    },
+    {
+      q: "After FLUX.2's $2\\times2$ patchify, how many tokens does a $1024^2$ image become?",
+      num: 4096, tol: 0, unit: "tokens",
+      why: "The $128\\times128$ latent grid patchified $2\\times2$ gives $64\\times64 = 4096$ tokens (of width $128$). Answering $16{,}384$ forgets the patchify — that's the raw $128\\times128$ grid, not the token count."
+    }
+  ], "Latent space — self-check");
+
+});
+</script>
+</body>
+</html>

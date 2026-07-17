@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>42. 'Fine-Tuning' Names Three Different Things — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Scoped to this page's type-signature sorter demo only. */
+  .sorter-tray { display: flex; flex-wrap: wrap; gap: 10px; margin: 10px 0 18px; padding: 12px; border: 1px dashed var(--border); border-radius: var(--radius); min-height: 56px; background: var(--bg-panel2); }
+  .sorter-card { border: 1px solid var(--border); background: var(--bg-panel); border-radius: 8px; padding: 8px 12px; cursor: pointer; font-size: .88rem; font-weight: 600; color: var(--text); transition: all .12s; user-select: none; }
+  .sorter-card:hover { border-color: var(--accent); transform: translateY(-1px); }
+  .sorter-card.selected { border-color: var(--predict); box-shadow: 0 0 0 2px var(--predict); }
+  .sorter-card.placed-theta { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--bg-panel)); cursor: default; }
+  .sorter-card.placed-c { border-color: var(--accent2); background: color-mix(in srgb, var(--accent2) 14%, var(--bg-panel)); cursor: default; }
+  .sorter-card.wrong { animation: sorter-shake .32s; border-color: var(--bad); }
+  @keyframes sorter-shake { 0%,100%{transform:translateX(0);} 25%{transform:translateX(-5px);} 75%{transform:translateX(5px);} }
+  .sorter-bins { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 6px 0; }
+  .sorter-bin { border: 2px solid var(--border); border-radius: var(--radius); padding: 12px; min-height: 130px; background: var(--bg-panel); }
+  .sorter-bin.hot { border-color: var(--accent); }
+  .sorter-bin h4 { margin: 0 0 8px; font-size: .82rem; text-transform: uppercase; letter-spacing: .5px; color: var(--text-dim); }
+  .sorter-bin .sorter-cards { display: flex; flex-wrap: wrap; gap: 8px; min-height: 32px; }
+  .sorter-msg { min-height: 22px; font-size: .87rem; color: var(--text-dim); margin: 6px 0; }
+  .sorter-msg.bad { color: var(--bad); font-weight: 600; }
+  .sorter-lr-readout { font-family: var(--mono); font-size: .87rem; background: var(--bg-code); border-left: 3px solid var(--accent2); border-radius: 6px; padding: 10px 14px; margin-top: 8px; min-height: 20px; }
+  .sorter-score { font-weight: 700; font-family: var(--mono); }
+</style>
+</head>
+<body data-page="42-three-fine-tunings.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV — Adaptation</span>
+    <h1>'Fine-Tuning' Names Three Different Things</h1>
+    <p class="subtitle">You've built LoRA and QLoRA by hand (pp.40–41). Now zoom out: your own ComfyUI graph
+      stacks a LoRA, a ControlNet, an IP-Adapter, and a prompt in one pass, and they never fight each other.
+      One question explains why — and it also explains what "DreamBooth vs. LoRA" gets wrong.</p>
+
+    <!-- ============================================================= PREDICT -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      In your ComfyUI graph you can stack a LoRA, a ControlNet, an IP-Adapter, and a prompt all at once and
+      they don't fight. Why not? <b>(a)</b> they're applied in a careful sequence so they don't overwrite each
+      other, <b>(b)</b> they edit <em>different kinds of object</em>, <b>(c)</b> they secretly do the same
+      thing and ComfyUI averages them. Commit to one before you scroll — it's resolved two boxes down.
+    </div>
+
+    <h2>Three operations wearing one word</h2>
+    <p>"Fine-tuning" is three different operations wearing one word. A ComfyUI user means "LoRA or DreamBooth
+      on a subject." An LLM engineer means "SFT plus preference alignment." A researcher means "gradient
+      descent on <em>any</em> subset of the weights." All three are right, and all three are incomplete,
+      because the real question isn't <em>which recipe</em> — it's a type signature. Sort every adaptation
+      technique by that signature and your whole messy node graph becomes legible.</p>
+
+    <div class="box rule"><span class="box-title">📐 The taxonomy — three axes</span>
+      <table>
+        <thead><tr><th>Axis</th><th>Answers</th></tr></thead>
+        <tbody>
+          <tr><td><b>WHERE</b> does the change go?</td>
+            <td>all weights (<b>full FT</b>) · a low-rank correction (<b>LoRA</b>) · the vocabulary
+              (<b>textual inversion</b>, ~3 KB) · <b>nowhere — you change the input</b> (ControlNet,
+              IP-Adapter, RAG, a better prompt)</td></tr>
+          <tr><td><b>WHAT</b> are you teaching?</td>
+            <td><b>form</b> (style, format, idiom, behaviour) vs. <b>facts</b> (→ you can't fine-tune facts
+              in; go to RAG — the full decision lives on p.47)</td></tr>
+          <tr><td><b>WHICH</b> recipe?</td>
+            <td>SFT · DreamBooth (rare token + prior preservation) · DPO/GRPO · continued pretraining</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The collapsing test</span>
+      <p style="margin-top:0"><b>After you're done, is the base model different?</b></p>
+      <p><b>LoRA / DreamBooth / full FT / SFT / DPO</b> → <b>Yes.</b> $\theta$ changed.<br>
+      <b>ControlNet / IP-Adapter / RAG / a better prompt</b> → <b>No.</b> The base model is bit-identical;
+      you bolted an extra input onto it.</p>
+      <p style="margin-bottom:0">One question collapses the whole confusion. Every technique on this page
+      answers it the same way every time — that's what makes it a taxonomy and not a vibe.</p>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ The corollary that makes it stick</span>
+      You <b>train</b> a LoRA on your own images in ~20 minutes with 15–20 photos. You <b>download</b> a
+      ControlNet — it took someone 100,000+ images and a datacenter, but it then works on <em>any</em> image,
+      forever, because it isn't about content, it's about a kind of control. That is why there are roughly
+      <b>500,000 LoRAs on Civitai</b> and about <b>15 useful ControlNets</b>
+      <span style="color:var(--text-dim)">[EST — community folklore, order-of-magnitude, not a verified
+      constant]</span>. The ratio <em>is</em> the distinction, made quantitative: one $\theta$-edit is
+      cheap and narrow; one $\mathbf{c}$-edit is expensive and universal.
+    </div>
+
+    <p>Resolving the PREDICT above: it's <b>(b)</b>. A LoRA edits $\theta$; the ControlNet, the IP-Adapter,
+      and the prompt all edit $\mathbf{c}$ (the conditioning). Nothing is being sequenced or averaged —
+      they simply aren't the same kind of object, so there's nothing for them to collide over.</p>
+
+    <div class="box key"><span class="box-title">🔑 The punchline for your graph</span>
+      You can stack all of them at once — a LoRA edits $\theta$; the ControlNet, the IP-Adapter, and the
+      prompt all edit $\mathbf{c}$. <b>They don't collide because they aren't the same kind of object.</b>
+      Your ComfyUI graph has a clean type signature: at most one $\theta$-edit (maybe two, if you chain
+      LoRAs), and a stack of $\mathbf{c}$-edits underneath. Once you see it, the distinction is permanent.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "DreamBooth vs. LoRA — which should I use?"</span>
+      A category error half the internet makes. <b>DreamBooth is <em>what you train</em></b> — a recipe: a
+      rare token plus prior-preservation loss so the model doesn't forget "person" while it learns
+      <em>your</em> person. <b>LoRA is <em>how you store the change</em></b> — a parameterization: instead
+      of writing a new $d_{out}\times d_{in}$ weight matrix, you write a rank-$r$ correction $BA$. They
+      answer different axes (WHICH vs. WHERE) and modern practice is <b>both, simultaneously</b> — look at
+      the filename in any training repo: <code>train_dreambooth_lora_flux.py</code>.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "ControlNet / IP-Adapter is fine-tuning"</span>
+      No. Both change $\mathbf{c}$ — the conditioning fed to a sampling process — not $\theta$. The base
+      model that produced the ControlNet or IP-Adapter's own weights is unrelated to and untouched by
+      whatever checkpoint you load them onto. Run the collapsing test: after ControlNet runs, is your base
+      model different? No — same weights, on disk, before and after.
+    </div>
+
+    <h2>The three LRs, one principle</h2>
+    <p>These edits touch wildly different parameter counts, so their learning rates differ by orders of
+      magnitude — generated by one rule carried from p.40: <b>fewer trainable parameters ⇒ higher LR.</b>
+      A method that moves 8.19 billion numbers that already encode everything the model knows must tiptoe;
+      a method that moves 768 numbers can stride.</p>
+
+    <table>
+      <thead><tr><th>Method</th><th>LR</th><th>Trainable params</th></tr></thead>
+      <tbody>
+        <tr><td>LLM full FT (8B)</td><td>1e-5 – 2e-5</td><td>8.19e9</td></tr>
+        <tr><td>Diffusion full FT / DreamBooth</td><td>1e-6 – 5e-6</td><td>1.2e10</td></tr>
+        <tr><td>LLM LoRA</td><td>1e-4 – 3e-4 (~10× full-FT)</td><td>4.4e7</td></tr>
+        <tr><td><b>Diffusion LoRA</b></td><td><b>1e-4</b></td><td>3e7</td></tr>
+        <tr><td>Textual inversion</td><td>5e-4 – 5e-3</td><td>768</td></tr>
+      </tbody>
+    </table>
+    <p style="color:var(--text-dim);font-size:.9em;margin-top:-.6em">[EST — constants.md §9.4, rules of
+      thumb, not measured constants.]</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The 100× trap</span>
+      A diffusion LoRA trained at $\eta = 1\text{e-}6$ (the <em>full</em>-fine-tune / DreamBooth rate) will
+      barely move at all — that LR is <b>100× too small</b> for a rank-16 adapter with only 3e7 trainable
+      parameters. Diffusion LoRA wants $\eta \approx 1\text{e-}4$. Conflating the full-FT row with the LoRA
+      row is the single most common reason a diffusion LoRA "won't learn."
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: textual inversion — teaching a word, not a weight</summary><div>
+      <p>Textual inversion doesn't touch the network's weights at all. It adds <b>one new embedding vector</b>
+        — 768 numbers, the width of the text encoder's embedding space — and optimizes <em>that</em> against
+        the reconstruction loss while everything else stays frozen. $\theta$ (the network's parameters) is
+        untouched; the <em>vocabulary</em> grew by one token. That's why it sits on the WHERE axis next to
+        "the vocabulary," not next to "all weights" or "a low-rank correction" — and why it can tolerate the
+        highest LR in the table (5e-4 – 5e-3): 768 free numbers with no risk of catastrophically disturbing
+        a network that already works.</p>
+    </div></details>
+
+    <!-- ============================================================= DEMO -->
+    <h2>Demo — the type-signature sorter</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Click a card, then click the bin you think it belongs in. The question to ask every time is the
+      collapsing test: <b>after this technique runs, is the base model different?</b>
+    </div>
+    <div class="demo">
+      <div class="demo-head">Sort ten techniques by type signature <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="sorter-tray" id="sorter-tray"></div>
+        <div class="sorter-msg" id="sorter-msg">Select a card above, then click a bin below.</div>
+        <div class="sorter-bins">
+          <div class="sorter-bin" id="sorter-bin-theta">
+            <h4>Base model changes ($\theta$)</h4>
+            <div class="sorter-cards" id="sorter-cards-theta"></div>
+          </div>
+          <div class="sorter-bin" id="sorter-bin-c">
+            <h4>Input changes ($\mathbf{c}$)</h4>
+            <div class="sorter-cards" id="sorter-cards-c"></div>
+          </div>
+        </div>
+        <div class="readout" id="sorter-score">Sorted: 0 / 10</div>
+        <div class="sorter-lr-readout" id="sorter-lr">Click a card already sorted into the $\theta$ bin to see
+          its (trainable params → LR) mapping.</div>
+      </div>
+    </div>
+
+    <p>The aha, once you've sorted all ten: ControlNet, IP-Adapter, RAG, and a better prompt all land in the
+      <em>same</em> bin despite feeling like completely different tools — because they share a type. Your
+      ComfyUI node graph is a stack of $\mathbf{c}$-edits plus at most one $\theta$-edit.
+      <code>[THREAD:memory-ledger beat]</code> the trainable-parameter count you just sorted by is the same
+      count that set p.40's memory ledger — fewer trainable params is simultaneously "cheaper to store" and
+      "wants a higher LR," one fact wearing two hats.</p>
+
+    <!-- ============================================================= CODE ARTIFACT -->
+    <h2>Code artifact — your own graph, typed</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>python inspect_my_comfy_graph.py --workflow ~/ComfyUI/user/default/workflows/&lt;your_file&gt;.json</code>
+      (no arg → a bundled example graph, no files needed). It lists every node in a saved ComfyUI workflow and
+      tags it $\theta$-edit vs. $\mathbf{c}$-edit vs. infra (load/sample/decode/save — neither), then prints
+      the same sentence the demo above teaches you to say: <em>"your graph changes the base model in 1 place
+      and the conditioning in 4."</em> Read-only, installs nothing, ~2 s on your box.
+      <code>--workflow-dir &lt;dir&gt; --all</code> reports on every saved workflow in a folder — point it at
+      your own 12 GB of LoRA workflows (hardware-ground-truth.md §5) and see how many of your graphs have
+      more than one $\theta$-edit stacked.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-com"># inspect_my_comfy_graph.py — the classification core.</span></span>
+<span class="line"><span class="tok-com"># THETA_EDIT_TYPES / C_EDIT_TYPES / INFRA_TYPES are the type-signature table,</span></span>
+<span class="line"><span class="tok-com"># as Python sets of ComfyUI node class_type strings.</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">classify</span>(nodes):</span>
+<span class="line">    <span class="tok-str">"""Tag every node theta-edit / c-edit / infra / unknown."""</span></span>
+<span class="line">    tagged = []</span>
+<span class="line">    <span class="tok-kw">for</span> n <span class="tok-kw">in</span> nodes:</span>
+<span class="line">        ct = n[<span class="tok-str">"class_type"</span>]</span>
+<span class="line">        <span class="tok-kw">if</span> ct <span class="tok-kw">in</span> THETA_EDIT_TYPES:</span>
+<span class="line">            bucket = <span class="tok-str">"THETA-EDIT"</span>  <span class="tok-com"># the base model is different after this node</span></span>
+<span class="line">        <span class="tok-kw">elif</span> ct <span class="tok-kw">in</span> C_EDIT_TYPES:</span>
+<span class="line">            bucket = <span class="tok-str">"C-EDIT"</span>      <span class="tok-com"># the base model is untouched; the INPUT changed</span></span>
+<span class="line">        <span class="tok-kw">elif</span> ct <span class="tok-kw">in</span> INFRA_TYPES:</span>
+<span class="line">            bucket = <span class="tok-str">"infra"</span>        <span class="tok-com"># load/sample/decode/save — neither</span></span>
+<span class="line">        <span class="tok-kw">else</span>:</span>
+<span class="line">            bucket = <span class="tok-str">"unknown"</span></span>
+<span class="line">        tagged.append({**n, <span class="tok-str">"bucket"</span>: bucket})</span>
+<span class="line">    <span class="tok-kw">return</span> tagged</span></code></pre>
+    </div>
+    <p style="color:var(--text-dim);font-size:.9em">Self-check the script asserts on its bundled example:
+      <code>LoraLoader → THETA-EDIT</code>; <code>ControlNetApply</code>, <code>IPAdapterApply</code>,
+      <code>CLIPTextEncode</code> (×2, positive/negative) → <code>C-EDIT</code> — reproducing "1 place / 4
+      places" exactly (spec-code.md D.2).</p>
+
+    <p><code>[THREAD:Qwen3-8B beat]</code> every $\theta$-edit LR in this page's table is anchored to the same
+      8,190,735,360-parameter count the course has been counting since p.36 — "fewer trainable params ⇒
+      higher LR" is the same fact from two directions: p.40 turned it into a memory saving, this page turns
+      it into a learning-rate rule. Forward-looking: your FLUX.2 text encoder is a Mistral — the LLM track
+      you're building through Part V is, among other things, the manual for the front half of your own
+      diffusion model (the tracks reunite on this point at p.64).</p>
+
+    <!-- ============================================================= QUIZ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz42"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- Demo: the type-signature sorter (page-local classification widget;
+     no engine call needed — this is a taxonomy concept, not a math one,
+     per pedagogy §7.1: the "something to be surprised by" is which bin
+     ControlNet lands in, not a numeric computation). ---- */
+  (function () {
+    const CARDS = [
+      { id: "fullft", label: "Full FT (LLM)", bucket: "theta", where: "all weights", which: "full fine-tune",
+        params: "8.19e9", lr: "1e-5 – 2e-5" },
+      { id: "lora", label: "LoRA", bucket: "theta", where: "low-rank correction ΔW = BA", which: "parameterization, any recipe",
+        params: "4.4e7 (LLM) / 3e7 (diffusion)", lr: "1e-4 – 3e-4 (LLM) / 1e-4 (diffusion)" },
+      { id: "dreambooth", label: "DreamBooth", bucket: "theta", where: "usually all weights (recipe, not a WHERE)", which: "rare token + prior preservation",
+        params: "1.2e10 (as full FT)", lr: "1e-6 – 5e-6" },
+      { id: "sft", label: "SFT", bucket: "theta", where: "whatever WHERE it's paired with (often full FT or LoRA)", which: "supervised instruction tuning",
+        params: "depends on WHERE — SFT is a WHICH, not a WHERE", lr: "matches whichever WHERE it's paired with" },
+      { id: "dpo", label: "DPO / GRPO", bucket: "theta", where: "whatever WHERE it's paired with (often LoRA)", which: "preference alignment",
+        params: "depends on WHERE — DPO is a WHICH, not a WHERE", lr: "matches whichever WHERE it's paired with" },
+      { id: "controlnet", label: "ControlNet", bucket: "c", where: "nowhere — structural conditioning signal", which: "—",
+        params: "n/a — base model untouched", lr: "n/a" },
+      { id: "ipadapter", label: "IP-Adapter", bucket: "c", where: "nowhere — image-conditioning signal", which: "—",
+        params: "n/a — base model untouched", lr: "n/a" },
+      { id: "rag", label: "RAG", bucket: "c", where: "nowhere — retrieved text in the context window", which: "—",
+        params: "n/a — base model untouched", lr: "n/a" },
+      { id: "textinv", label: "Textual inversion", bucket: "theta", where: "the vocabulary — one new embedding", which: "embedding optimization",
+        params: "768", lr: "5e-4 – 5e-3" },
+      { id: "prompt", label: "A better prompt", bucket: "c", where: "nowhere — you changed the instructions", which: "—",
+        params: "n/a — base model untouched", lr: "n/a" },
+    ];
+
+    const tray = document.getElementById("sorter-tray");
+    const msg = document.getElementById("sorter-msg");
+    const binTheta = document.getElementById("sorter-bin-theta");
+    const binC = document.getElementById("sorter-bin-c");
+    const colTheta = document.getElementById("sorter-cards-theta");
+    const colC = document.getElementById("sorter-cards-c");
+    const scoreOut = document.getElementById("sorter-score");
+    const lrOut = document.getElementById("sorter-lr");
+
+    let selected = null;
+    let placed = 0;
+
+    // Seeded shuffle (nn.js RNG) so the tray order is reproducible across
+    // reloads, per course rule "seed all RNG" — even for a display-only
+    // ordering, determinism means two learners comparing notes see the same layout.
+    const rng = new NN.RNG(42);
+    const order = CARDS.map((_, i) => i);
+    for (let i = order.length - 1; i > 0; i--) {
+      const j = rng.int(i + 1);
+      [order[i], order[j]] = [order[j], order[i]];
+    }
+
+    function renderTray() {
+      tray.innerHTML = "";
+      order.forEach(i => {
+        const c = CARDS[i];
+        const el = document.createElement("div");
+        el.className = "sorter-card";
+        el.textContent = c.label;
+        el.dataset.id = c.id;
+        el.addEventListener("click", () => selectCard(c.id, el));
+        tray.appendChild(el);
+      });
+    }
+
+    function selectCard(id, el) {
+      tray.querySelectorAll(".sorter-card").forEach(e => e.classList.remove("selected"));
+      el.classList.add("selected");
+      selected = id;
+      const c = CARDS.find(c => c.id === id);
+      msg.classList.remove("bad");
+      msg.innerHTML = `Selected <b>${c.label}</b>. Now click a bin — ask: <em>after this runs, is the base model different?</em>`;
+    }
+
+    function attemptPlace(targetBucket) {
+      if (!selected) { msg.textContent = "Select a card first."; return; }
+      const c = CARDS.find(c => c.id === selected);
+      const cardEl = [...tray.querySelectorAll(".sorter-card")].find(e => e.dataset.id === selected);
+      if (c.bucket === targetBucket) {
+        cardEl.remove();
+        const col = targetBucket === "theta" ? colTheta : colC;
+        const placedEl = document.createElement("div");
+        placedEl.className = "sorter-card " + (targetBucket === "theta" ? "placed-theta" : "placed-c");
+        placedEl.textContent = c.label;
+        placedEl.title = `WHERE: ${c.where} · WHICH: ${c.which}`;
+        if (targetBucket === "theta") {
+          placedEl.addEventListener("click", () => {
+            lrOut.innerHTML = `<b>${c.label}</b> — trainable params: <b>${c.params}</b> · LR: <b>${c.lr}</b>`;
+          });
+        }
+        col.appendChild(placedEl);
+        placed++;
+        selected = null;
+        msg.classList.remove("bad");
+        msg.innerHTML = `✅ Correct — ${c.label} is a <b>${targetBucket === "theta" ? "θ-edit" : "c-edit"}</b>
+          (WHERE: ${c.where}).`;
+        scoreOut.innerHTML = `Sorted: <b>${placed}</b> / 10${placed === 10 ? " — all ten. Notice which four landed together in the c bin." : ""}`;
+      } else {
+        cardEl.classList.remove("selected");
+        cardEl.classList.add("wrong");
+        setTimeout(() => cardEl.classList.remove("wrong"), 320);
+        msg.classList.add("bad");
+        msg.innerHTML = `❌ Not quite. The collapsing test: <b>after ${c.label} runs, is the base model
+          different?</b> ${c.bucket === "theta" ? "Yes — θ changed." : "No — the base model is bit-identical; only the input changed."}`;
+        selected = null;
+      }
+    }
+
+    binTheta.addEventListener("click", (e) => { if (e.target.closest(".sorter-card.placed-theta")) return; attemptPlace("theta"); });
+    binC.addEventListener("click", (e) => { if (e.target.closest(".sorter-card.placed-c")) return; attemptPlace("c"); });
+
+    renderTray();
+  })();
+
+  /* ---- Quiz ---- */
+  renderQuiz("quiz42", [
+    {
+      q: "After you apply a ControlNet to a generation, is the base checkpoint on disk different?",
+      opts: ["No — ControlNet changes the input (conditioning), not the weights", "Yes — ControlNet is itself a fine-tune of the base model", "Only if you also enable IP-Adapter", "Only for SDXL-based ControlNets"],
+      a: 0,
+      why: "The collapsing test: after ControlNet runs, is the base model different? No — it's bit-identical. ControlNet edits $\\mathbf{c}$, not $\\theta$. The distractor 'ControlNet is a fine-tune' is the exact misconception this page corrects."
+    },
+    {
+      q: "\"Should I use DreamBooth or LoRA for my subject?\" What's wrong with the question as posed?",
+      opts: ["Nothing — they're mutually exclusive alternatives", "It's a category error: DreamBooth is a recipe (WHICH), LoRA is a parameterization (WHERE) — modern practice uses both together", "DreamBooth is obsolete and should never be used", "LoRA can't be combined with a rare-token trick"],
+      a: 1,
+      why: "DreamBooth answers WHICH (a training recipe: rare token + prior preservation); LoRA answers WHERE (how the change is stored: a low-rank correction). They're different axes, so 'vs.' is a category error — the standard modern setup does both at once (train_dreambooth_lora_flux.py)."
+    },
+    {
+      q: "You want the model to know the contents of your private database. Which axis governs the answer, and what is it?",
+      opts: ["WHERE — put it in a LoRA", "WHAT — it's facts, so no fine-tuning method installs it; retrieve it instead (RAG)", "WHICH — use DPO to align the model to the database", "None — any full fine-tune will memorize it reliably"],
+      a: 1,
+      why: "The WHAT axis: form (style/behaviour) can be taught by any θ-edit, but facts cannot be reliably fine-tuned in — SFT on documents teaches the model to sound like them, not to retrieve from them. The form-vs-facts decision procedure itself is p.47's; this page only classifies which axis the question is on."
+    },
+    {
+      q: "Textual inversion (768 trainable params, LR up to ~5e-3) vs. LLM full fine-tuning (8.19e9 params, LR down to ~2e-5) — roughly what order-of-magnitude LR ratio does 'fewer trainable params ⇒ higher LR' predict?",
+      num: 150, tol: 100, unit: "×",
+      why: "5e-3 ÷ 2e-5 ≈ 250× at the exact range endpoints; the nearest power of ten is 10² = 100× (log₁₀250 ≈ 2.4, closer to 2 than 3). Both the rounded order-of-magnitude answer (~100×) and the literal endpoint ratio (~250×) are accepted here — the point is 'several hundred, not several,' not the third digit."
+    },
+    {
+      q: "\"My diffusion LoRA won't learn — I set the LR to 1e-6, like a fine-tune.\" What's the bug?",
+      opts: ["1e-6 is the diffusion full-FT/DreamBooth rate, not the LoRA rate — diffusion LoRA wants ~1e-4, a 100× difference", "The LoRA rank is too low, not the LR", "1e-6 is correct; the real bug is the batch size", "Diffusion models can't use LoRA at all"],
+      a: 0,
+      why: "The 100× trap: 1e-6 – 5e-6 is the full-FT/DreamBooth row (1.2e10 trainable params); diffusion LoRA (3e7 trainable params) wants ~1e-4. Conflating the two rows is D-09's flagged error — it silently makes every diffusion LoRA look like it isn't learning."
+    },
+    {
+      q: "Your ComfyUI graph has a LoRA + a ControlNet + a prompt in one pass. How many of these three changed the base model's weights?",
+      num: 1, tol: 0,
+      why: "Only the LoRA is a θ-edit. The ControlNet and the prompt are both $\\mathbf{c}$-edits — they change what goes into an unchanged base model. This is the 'clean type signature' punchline: at most one θ-edit, any number of $\\mathbf{c}$-edits, and they never collide because they aren't the same kind of object."
+    }
+  ], "Section check — three axes, one collapsing test");
+
+});
+</script>
+</body>
+</html>

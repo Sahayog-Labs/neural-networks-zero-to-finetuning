@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<!-- ============================================================================
+     ANN COURSE — CANONICAL PAGE TEMPLATE  (copy this file to start a new page)
+     ============================================================================
+     This is the spec-by-example. Every ~50 course pages is a copy of this shell
+     with the content swapped. It demonstrates, in ONE file, every shared
+     component and every live-math primitive the course ships. Read the comments;
+     they are the contract.
+
+     THE THREE HARD RULES
+       1. Static, offline, no build. Opens from file://. No CDN, no npm, no
+          bundler, no ES modules (file:// blocks module CORS). Plain <script>.
+       2. Demos compute REAL math, live, in the browser. No pre-baked curves, no
+          decorative animation. If it says the network trains, it trains here.
+       3. Never break the existing API. makeCtrl / Plot / renderQuiz / eng and
+          the NN.* / viz globals are fixed contracts — build on them, don't fork.
+
+     LOAD ORDER (bottom of <body>, this exact order):
+         course.js        — theme, nav, KaTeX, makeCtrl, Plot, renderQuiz, eng
+         course-map.js     — window.COURSE_MAP (drives sidebar + pager)
+         nn.js             — window.NN: Value, MLP, Adam, Trainer, attention, ...
+         viz.js            — Heatmap, NetGraph, Surface3D, TensorViz, Timeline, hl
+         (your page script) — one IIFE per demo, inside DOMContentLoaded
+
+     PAGE SHELL (do not change the structure — CSS + buildNav depend on it):
+         <body data-page="THIS-FILENAME.html">   <-- MUST match the file name and
+                                                      the `file:` field in course-map.js,
+                                                      or the sidebar won't highlight
+                                                      and the pager won't find neighbors.
+                                                      (THIS-FILENAME.html is illustrative
+                                                      placeholder text inside this comment,
+                                                      intentionally left generic — the
+                                                      real, active tag is line 42 below,
+                                                      which correctly reads TEMPLATE-example.html.)
+         <div id="layout"> <main id="content"> <div class="inner"> ... </div></main></div>
+         buildNav() injects the <nav id="sidebar"> as #layout's first child and the
+         prev/next .pager as .inner's last child — you write neither by hand.
+============================================================================ -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Title convention: "N. Page Title — Neural Networks" -->
+<title>Template &amp; Component Gallery — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+</head>
+<body data-page="TEMPLATE-example.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <!-- ===== KICKER / H1 / SUBTITLE — the standard page header ===== -->
+    <span class="kicker">Reference · Build System</span>
+    <h1>The Page Template &amp; Component Gallery</h1>
+    <p class="subtitle">One page that uses every box, every primitive, and every
+      live-math demo type the course ships. Copy it, delete what you don't need,
+      keep the shell intact.</p>
+
+    <!-- ============================================================= -->
+    <!-- KaTeX: inline with $...$, display with $$...$$ (or \( \) \[ \]).  -->
+    <!-- Auto-rendered by course.js after the KaTeX bundle loads. Just     -->
+    <!-- write LaTeX in the HTML; do not call KaTeX yourself.              -->
+    <!-- ============================================================= -->
+    <h2>Math renders inline and display</h2>
+    <p>A single neuron computes a weighted sum then an activation: inline,
+      $z = \sum_i w_i x_i + b$, and $a = \sigma(z)$. The same thing set as a
+      display equation:</p>
+    <p>$$a = \sigma\!\left(\sum_{i=1}^{n} w_i x_i + b\right), \qquad
+        \sigma(z) = \frac{1}{1 + e^{-z}}$$</p>
+
+    <!-- ============================================================= -->
+    <!-- table.ledger — the Symbol Ledger. Drop one directly under any    -->
+    <!-- equation-heavy passage: symbol | meaning | shape/units | source. -->
+    <!-- It's the most-repeated table in the course, so the styling is    -->
+    <!-- deliberately quiet — no full grid, no zebra striping, just a     -->
+    <!-- hairline under each row and a monospace first column. Just write -->
+    <!-- <table class="ledger">; the <thead> header row is optional (a    -->
+    <!-- few pages use a headerless two/three-column ledger instead).     -->
+    <!-- ============================================================= -->
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$z$</td><td>pre-activation — the weighted sum before the nonlinearity</td><td>scalar</td><td>computed above</td></tr>
+        <tr><td>$w_i$</td><td>the $i$-th input's weight</td><td>scalar</td><td>a learned parameter</td></tr>
+        <tr><td>$b$</td><td>bias</td><td>scalar</td><td>a learned parameter</td></tr>
+        <tr><td>$\sigma$</td><td>the sigmoid nonlinearity</td><td>—</td><td>fixed function</td></tr>
+        <tr><td>$a$</td><td>the unit's activation, $\sigma(z)$</td><td>scalar</td><td>computed above</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============================================================= -->
+    <!-- THE SEVEN CALLOUT BOXES. Structure is always:                   -->
+    <!--   <div class="box VARIANT"><span class="box-title">…</span> … </div> -->
+    <!-- Variants: key (violet), rule (teal), warn (red), deep (rose),   -->
+    <!--           worked (green, read-only derivation), try (amber, GO RUN), -->
+    <!--           predict (indigo, commit to a guess before scrolling). -->
+    <!-- ============================================================= -->
+    <h2>Callout boxes</h2>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Use <code>.box.key</code> for the one sentence a reader must leave with.
+      A weight is just a number that scales an input; learning is nudging every
+      such number a little in the direction that lowers the loss.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Rule / definition</span>
+      Use <code>.box.rule</code> for a crisp definition or formula to memorize.
+      The chain rule: $\frac{dL}{dw} = \frac{dL}{da}\cdot\frac{da}{dz}\cdot\frac{dz}{dw}$.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Watch out</span>
+      Use <code>.box.warn</code> for the classic trap. Forgetting
+      <code>zero_grad()</code> makes gradients <em>accumulate</em> across steps —
+      with mini-batches the model diverges in tens of steps.
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example</span>
+      Use <code>.box.worked</code> for a read-only, pencil-and-paper derivation
+      (green = "follow along", as opposed to amber = "go interact"). For
+      $z = 0.5(0.6) + (-0.3)(-0.2) + 0.1 = 0.46$, then $a = \tanh(0.46) = 0.4301$.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Use <code>.box.try</code> (dashed amber, auto "RUN THIS" tag) to point at a
+      demo directly below it. Drag the gain slider in the next demo until the
+      curve saturates — watch the useful gradient region shrink to nothing.
+    </div>
+
+    <!-- Predict: ask before the reader can see the answer. ON-PAGE-RESOLUTION -->
+    <!-- RULE — every .box.predict on a real page MUST be answered somewhere    -->
+    <!-- later on the SAME page (a sentence of prose, a worked box, a quiz —    -->
+    <!-- any of those count). Never leave a predict unresolved. Plain           -->
+    <!-- construction like key/rule/warn/worked (border-left + title color):    -->
+    <!-- no dashed border, no "RUN THIS" tag — those belong to .box.try. Write  -->
+    <!-- the 🔮 by hand in the title text, same as 🔑/📐/⚠️/✍️ above.          -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A tanh unit's output is $a = 0.98$ — nearly saturated. Before you scroll,
+      guess: is its local gradient $1 - a^2$ closer to <b>1, 0.5, or 0.04</b>?
+    </div>
+    <p>Resolving the predict right here, one sentence later: it's <b>0.04</b> —
+      $1 - 0.98^2 = 1 - 0.9604 = 0.0396 \approx 0.04$. A nearly-saturated unit
+      passes almost no gradient (the same fact the self-check quiz asks about below).</p>
+
+    <!-- Deep dive: collapsible, closed by default. For optional depth that would -->
+    <!-- otherwise interrupt the main thread. Note the inner <div> wrapper.        -->
+    <details class="deepdive"><summary>🔬 Deep dive: why the sigmoid derivative is $\sigma(1-\sigma)$</summary><div>
+      <p>With $\sigma(z) = (1+e^{-z})^{-1}$, differentiate via the chain rule:
+        $\sigma'(z) = \frac{e^{-z}}{(1+e^{-z})^2}$. Rewrite $e^{-z} = \frac{1-\sigma}{\sigma}\cdot\sigma$…
+        and it collapses to the famous $\sigma'(z) = \sigma(z)\,(1-\sigma(z))$. This is
+        why the gradient vanishes when a unit saturates: at $\sigma \to 0$ or
+        $\sigma \to 1$, the product $\sigma(1-\sigma) \to 0$.</p>
+    </div></details>
+
+    <!-- ============================================================= -->
+    <!-- CODEBLOCK. Static markup = copy button auto-wired by course.js's  -->
+    <!-- wireCodeblocks() at DOMContentLoaded. Line numbers are pure CSS    -->
+    <!-- counters. class="line hl" highlights a line. Token color is        -->
+    <!-- OPTIONAL hand-applied spans (tok-kw/str/num/fn/com).               -->
+    <!--                                                                    -->
+    <!-- To generate this markup instead of hand-writing it, viz.js's       -->
+    <!-- hl.block(code, 'python', {highlight:[2]}) returns exactly this      -->
+    <!-- structure — but if you INSERT it dynamically after load, call the   -->
+    <!-- global wireCodeblocks() again so its copy button works.            -->
+    <!-- ============================================================= -->
+    <h2>Code blocks</h2>
+    <p>The PyTorch this course is teaching you to read:</p>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn <span class="tok-kw">as</span> nn</span>
+<span class="line"></span>
+<span class="line">model = nn.<span class="tok-fn">Sequential</span>(nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">8</span>), nn.<span class="tok-fn">Tanh</span>(), nn.<span class="tok-fn">Linear</span>(<span class="tok-num">8</span>, <span class="tok-num">1</span>))</span>
+<span class="line">opt = torch.optim.<span class="tok-fn">Adam</span>(model.<span class="tok-fn">parameters</span>(), lr=<span class="tok-num">0.05</span>)</span>
+<span class="line hl">loss = nn.<span class="tok-fn">BCEWithLogitsLoss</span>()(model(X), y)  <span class="tok-com"># the line that matters</span></span>
+<span class="line">loss.<span class="tok-fn">backward</span>()   <span class="tok-com"># autograd fills every .grad</span></span>
+<span class="line">opt.<span class="tok-fn">step</span>(); opt.<span class="tok-fn">zero_grad</span>()</span></code></pre>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- DEMO A — makeCtrl + Plot. The workhorse: a slider drives a live   -->
+    <!-- recompute of a curve. Real math every frame, nothing precomputed. -->
+    <!-- Demo DOM contract:                                                -->
+    <!--   <div class="demo"> <div class="demo-head">…<span class="demo-tag">LIVE</span></div> -->
+    <!--     <div class="demo-body"> <canvas height="N"></canvas>          -->
+    <!--       <div class="controls"></div>  (makeCtrl appends here)       -->
+    <!--       <div class="readout"></div> </div></div>                    -->
+    <!-- ALWAYS give <canvas> a height attribute — Plot/viz read it once.  -->
+    <!-- ============================================================= -->
+    <h2>Demo A — a slider-driven Plot</h2>
+    <div class="demo">
+      <div class="demo-head">Activation saturation <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-plot" height="300"></canvas>
+        <div class="controls" id="d-plot-ctrls"></div>
+        <div class="readout" id="d-plot-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- DEMO B — Heatmap fed by REAL attention math (NN.attention).       -->
+    <!-- The temperature slider recomputes the softmax live; the heatmap    -->
+    <!-- rows always sum to 1 because it is the actual attention matrix.    -->
+    <!-- ============================================================= -->
+    <h2>Demo B — a Heatmap of real attention weights</h2>
+    <div class="demo">
+      <div class="demo-head">Attention · temperature sweep <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-heat" height="300"></canvas>
+        <div class="controls" id="d-heat-ctrls"></div>
+        <div class="readout" id="d-heat-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- DEMO C — NetGraph animating a forward AND a backward pass over the -->
+    <!-- course's 2-2-1 worked example. Node fills and edge colors are the  -->
+    <!-- ACTUAL activations / weights / gradients from NN.worked221() — the -->
+    <!-- same nine numbers the backprop chapter derives by hand.            -->
+    <!-- ============================================================= -->
+    <h2>Demo C — NetGraph: forward and backward passes</h2>
+    <div class="demo">
+      <div class="demo-head">The 2-2-1 network, signal and gradient <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-net" height="280"></canvas>
+        <p style="margin:12px 0 0">
+          <button class="btn secondary" id="d-net-fwd">Animate forward →</button>
+          <button class="btn secondary" id="d-net-bwd">← Animate backward</button>
+        </p>
+        <div class="readout" id="d-net-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- DEMO D — LIVE TRAINING. This actually trains an MLP on XOR in the  -->
+    <!-- browser using nn.js: MLP + Adam + Trainer, stepped from rAF so the  -->
+    <!-- loss curve draws itself and the tab stays alive. The loss MUST go   -->
+    <!-- down; the NetGraph re-tints as the weights change.                 -->
+    <!-- ============================================================= -->
+    <h2>Demo D — train XOR, live, in your browser</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Press Train. A 2-8-1 tanh network learns XOR from four points; the loss
+      curve is real and falls below $10^{-3}$. Press Reset to re-seed and watch a
+      different (but reproducible) run.
+    </div>
+    <div class="demo">
+      <div class="demo-head">XOR · MLP[2,8,1] · Adam <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:16px" class="d-train-grid">
+          <div><canvas id="d-train-loss" height="260"></canvas></div>
+          <div><canvas id="d-train-net" height="260"></canvas></div>
+        </div>
+        <p style="margin:12px 0 0">
+          <button class="btn" id="d-train-go">Train</button>
+          <button class="btn secondary" id="d-train-reset">Reset</button>
+        </p>
+        <div class="readout" id="d-train-out">Ready.</div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- DEMO E — TensorViz: shape / matmul drill. Sweeps row(A)×col(B)→C. -->
+    <!-- ============================================================= -->
+    <h2>Demo E — TensorViz: a matmul, cell by cell</h2>
+    <div class="demo">
+      <div class="demo-head">Shape bookkeeping <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-tensor" height="220"></canvas>
+        <p style="margin:12px 0 0"><button class="btn secondary" id="d-tensor-go">Animate A @ B → C</button></p>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- TRACK BANNER — marks the fork into the LLM or diffusion track.     -->
+    <!-- Standalone divider: track-banner + track-llm | track-diffusion.    -->
+    <!-- (You can also add track-llm/track-diffusion as a modifier on any    -->
+    <!--  .box or .demo to tint it to a track's color.)                     -->
+    <!-- ============================================================= -->
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>Everything past this divider belongs to the LLM track. The banner tells a
+      reader which of the two parallel paths they're on without a second layout.</p>
+
+    <!-- ============================================================= -->
+    <!-- MILESTONE — a progress checkpoint. data-progress (0–100) fills the  -->
+    <!-- bar (wired by course.js's wireMilestones()).                       -->
+    <!-- ============================================================= -->
+    <div class="milestone" data-progress="50">
+      <span class="milestone-flag">Milestone</span>
+      Halfway. You can now read a training loop and know what every line does.
+      <span class="milestone-pct">50%</span> of the course.
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- QUIZ — renderQuiz(containerId, questions[], title).                -->
+    <!--   MC:      {q, opts:[…], a: correctIndex, why}                     -->
+    <!--   Numeric: {q, num: value, tol, unit, why}  (tol default 5%)       -->
+    <!-- LaTeX is allowed in q/opts/why (double-escape backslashes in JS).  -->
+    <!-- ============================================================= -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-template"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+/* Each demo is its own IIFE so its locals never leak. Everything runs inside a
+   single DOMContentLoaded — which fires AFTER course.js's own (registered first,
+   because course.js loads first), so buildNav()/wireCodeblocks()/wireMilestones()
+   have already run by the time this does. */
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO A: makeCtrl + Plot — live activation curve ---- */
+  (function () {
+    const canvas = document.getElementById("d-plot");
+    const out = document.getElementById("d-plot-out");
+    // makeCtrl(parentEl, {label,min,max,step,value,unit,fmt}) -> {input, get(), onInput(fn)}
+    const gain = makeCtrl(document.getElementById("d-plot-ctrls"),
+      { label: "gain (k in tanh(k·z))", min: 0.2, max: 6, step: 0.1, value: 1, fmt: v => v.toFixed(1) });
+    // Canvas strokeStyle can't resolve a CSS var() string, so read the computed
+    // color. viz.js exposes vizUtils.cssVar for exactly this; using it keeps the
+    // trace theme-aware (re-read on every draw).
+    const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+
+    function draw() {
+      const k = gain.get();
+      // Plot(canvas, {xmin,xmax,ymin,ymax,xlog,ylog,xlabel,ylabel})
+      const p = new Plot(canvas, { xmin: -6, xmax: 6, ymin: -1.15, ymax: 1.15, xlabel: "z", ylabel: "a = tanh(k·z)" });
+      p.clear(); p.grid();
+      // REAL math: sample the curve live, never a stored array.
+      const xs = [], ys = [];
+      for (let x = -6; x <= 6; x += 0.05) { xs.push(x); ys.push(Math.tanh(k * x)); }
+      p.trace(xs, ys, accent(), 2.5);
+      p.hline(0, "#555", [3, 3]); p.vline(0, "#555", [3, 3]);
+      // Derivative at the origin = k; the "useful gradient" width shrinks as k grows.
+      out.innerHTML = `slope at z=0 is <b>${k.toFixed(2)}</b>; the curve saturates for |z| &gt; <b>${(2.5 / k).toFixed(2)}</b>`;
+    }
+    gain.onInput(draw);
+    draw();
+    // Re-tint on theme toggle (colors are read live, so just redraw).
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO B: Heatmap of real NN.attention weights ---- */
+  (function () {
+    const { Mat, attention, RNG } = NN;
+    const rng = new RNG(7);
+    // Fixed random Q,K,V so the demo is reproducible across reloads.
+    const n = 6, dk = 8;
+    const Q = Mat.randn(n, dk, rng, 1), K = Mat.randn(n, dk, rng, 1), V = Mat.randn(n, dk, rng, 1);
+    const labels = ["The", "cat", "sat", "on", "the", "mat"];
+    const canvas = document.getElementById("d-heat");
+    const out = document.getElementById("d-heat-out");
+
+    // Heatmap(canvas, {data, rowLabels, colLabels, colormap, cellText, hover, ...})
+    const hm = new Heatmap(canvas, {
+      data: [[0]], rowLabels: labels, colLabels: labels,
+      colormap: "sequential", cellText: true, colorbar: true, hover: true,
+      cellText: (v) => v.toFixed(2),
+    });
+
+    const tau = makeCtrl(document.getElementById("d-heat-ctrls"),
+      { label: "temperature τ", min: 0.15, max: 6, step: 0.05, value: Math.sqrt(dk), fmt: v => v.toFixed(2) });
+
+    function draw() {
+      const res = attention(Q, K, V, { temperature: tau.get() });   // REAL softmax(QKᵀ/τ)
+      hm.setData(res.A.toArray());
+      const meanH = res.entropy.reduce((a, b) => a + b, 0) / res.entropy.length;
+      const meanEff = res.effKeys.reduce((a, b) => a + b, 0) / res.effKeys.length;
+      out.innerHTML = `mean row entropy <b>${meanH.toFixed(3)}</b> nats · effective keys per query <b>${meanEff.toFixed(2)}</b> of ${n}` +
+        ` — low τ → sharp argmax (few keys), high τ → uniform (all keys)`;
+    }
+    tau.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO C: NetGraph forward/backward over the 2-2-1 worked example ---- */
+  (function () {
+    const w = NN.worked221();          // real Values; .grad already populated
+    const nd = w.nodes;
+    const canvas = document.getElementById("d-net");
+    const out = document.getElementById("d-net-out");
+
+    // weights[l] must be shape (layers[l+1] × layers[l]).
+    const weights = [
+      [[w.P.W1_11.data, w.P.W1_12.data], [w.P.W1_21.data, w.P.W1_22.data]], // (2×2)
+      [[w.P.W2_1.data, w.P.W2_2.data]],                                     // (1×2)
+    ];
+    // Activations per layer: input x, hidden a1, output ŷ.
+    const acts = [w.x.slice(), w.forward.a1.slice(), [w.forward.yhat]];
+    // Node gradients per layer (dL/d·) from the SAME backward pass.
+    const grads = [[0, 0], [nd.a1_1.grad, nd.a1_2.grad], [nd.yhat.grad]];
+
+    // NetGraph(canvas, {layers, weights, activations, labels, ...})
+    const ng = new NetGraph(canvas, {
+      layers: [2, 2, 1], weights, activations: acts,
+      labels: [["x₁", "x₂"], ["h₁", "h₂"], ["ŷ"]],
+    });
+    out.innerHTML = `forward: ŷ = <b>${w.forward.yhat.toFixed(4)}</b>, loss L = <b>${w.loss.toFixed(4)}</b> · ` +
+      `backward: δ⁽²⁾ = dL/dz₂ = <b>${nd.z2.grad.toFixed(4)}</b>`;
+
+    document.getElementById("d-net-fwd").addEventListener("click", () => {
+      ng.animateForward(acts, { duration: 1100 });      // signal flows left → right
+    });
+    document.getElementById("d-net-bwd").addEventListener("click", () => {
+      ng.animateBackward(grads, { duration: 1100 });    // gradient flows right → left
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => ng.draw(), 0));
+  })();
+
+  /* ---- DEMO D: LIVE TRAINING — XOR actually trains here ---- */
+  (function () {
+    const { MLP, Adam, Trainer, xorData, RNG } = NN;
+    const lossCanvas = document.getElementById("d-train-loss");
+    const netCanvas = document.getElementById("d-train-net");
+    const out = document.getElementById("d-train-out");
+    const goBtn = document.getElementById("d-train-go");
+    const resetBtn = document.getElementById("d-train-reset");
+
+    const data = xorData();            // 4 corners: y = x1 XOR x2
+    const TARGET_STEPS = 900;
+    let model, opt, trainer, timeline, netGraph, raf = null, seed = 42;
+
+    // Pull weights out of the live model into NetGraph's (nout × nin) layout.
+    function layerWeights() {
+      return model.layers.map(L => L.neurons.map(nr => nr.w.map(wv => wv.data)));
+    }
+    // Forward one representative input, capturing per-layer activations to display.
+    function activationsFor(x) {
+      const layers = [x.slice()];
+      let h = x;
+      for (const L of model.layers) { const o = L.forward(h); layers.push(o.map(v => v.data)); h = o; }
+      return layers;
+    }
+
+    function build() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      const rng = new RNG(seed);
+      model = new MLP([2, 8, 1], { act: "tanh", rng });
+      opt = new Adam(model.parameters(), { lr: 0.05 });
+      trainer = new Trainer({ model, X: data.X, y: data.y, loss: "bce", opt });
+      // Timeline(canvas, {ylog, ylabel, ...}) — thin Plot wrapper, auto-scaling loss curve.
+      timeline = new Timeline(lossCanvas, { ylog: true, ylabel: "loss", xlabel: "step" });
+      netGraph = new NetGraph(netCanvas, {
+        layers: [2, 8, 1], weights: layerWeights(), activations: activationsFor(data.X[1]),
+        labels: [["x₁", "x₂"], null, ["ŷ"]],
+      });
+      out.textContent = `Ready (seed ${seed}). Press Train.`;
+      goBtn.disabled = false;
+    }
+
+    function run() {
+      goBtn.disabled = true;
+      const loop = () => {
+        const loss = trainer.steps(6);                 // 6 real optimizer steps / frame
+        timeline.push(trainer.step_, loss);
+        if (trainer.step_ % 30 === 0 || trainer.step_ >= TARGET_STEPS) {
+          netGraph.setWeights(layerWeights());
+          netGraph.setActivations(activationsFor(data.X[1]));
+          const acc = trainer.accuracy();
+          out.innerHTML = `step <b>${trainer.step_}</b> · loss <b>${loss.toExponential(2)}</b> · accuracy <b>${(acc * 100).toFixed(0)}%</b> (${acc * 4}/4 corners)`;
+        }
+        if (trainer.step_ < TARGET_STEPS) raf = requestAnimationFrame(loop);
+        else {
+          raf = null;
+          const acc = trainer.accuracy();
+          out.innerHTML = `done · final loss <b>${trainer.history[trainer.history.length - 1].toExponential(2)}</b> · accuracy <b>${(acc * 100).toFixed(0)}%</b> — XOR solved.`;
+        }
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    goBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", () => { seed = (seed + 101) % 100000; build(); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => { timeline && timeline.draw(); netGraph && netGraph.draw(); }, 0));
+    build();
+  })();
+
+  /* ---- DEMO E: TensorViz matmul ---- */
+  (function () {
+    const canvas = document.getElementById("d-tensor");
+    // TensorViz(canvas, {mode:'matmul', A:{shape,label}, B:{shape,label}, labels:{C}})
+    const tv = new TensorViz(canvas, {
+      mode: "matmul",
+      A: { shape: [3, 4], label: "X" }, B: { shape: [4, 2], label: "W" },
+      labels: { C: "XW" },
+    });
+    document.getElementById("d-tensor-go").addEventListener("click", () => {
+      tv.animateMatmul({ A: { shape: [3, 4], label: "X" }, B: { shape: [4, 2], label: "W" } });
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => tv.draw(), 0));
+  })();
+
+  /* ---- QUIZ: one multiple-choice, one numeric ---- */
+  renderQuiz("quiz-template", [
+    {
+      q: "A tanh unit's output is $a = 0.98$. Roughly how large is its local gradient $1 - a^2$?",
+      opts: ["About 1.0", "About 0.5", "About 0.04", "Exactly 0"],
+      a: 2,
+      why: "$1 - 0.98^2 = 1 - 0.9604 = 0.0396 \\approx 0.04$ — a nearly-saturated unit passes almost no gradient."
+    },
+    {
+      q: "In the worked 2-2-1 example, the loss after one SGD step (η = 0.5) is (to 2 d.p.):",
+      num: 0.3402, tol: 0.01,
+      why: "The engine reproduces §5.4 exactly: $L: 0.4530 \\to 0.3402$ after one step."
+    }
+  ], "Template self-check");
+
+});
+</script>
+</body>
+</html>

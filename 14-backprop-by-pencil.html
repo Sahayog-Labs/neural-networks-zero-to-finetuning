@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>14. Backpropagation, by Pencil — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the math-bearing ledger tables carry KaTeX matrices/fractions
+   that are wider than a phone. Let each table scroll inside its own box on
+   narrow screens so the page body never scrolls horizontally. Desktop
+   (>900px) is untouched — there the .inner column is wide enough to fit them. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="14-backprop-by-pencil.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns · ⭐ The Course Spine</span>
+    <h1>Backpropagation, by Pencil: TN-1's Nine Gradients</h1>
+    <p class="subtitle">The forward pass turned a network into a number. Now we run the number backward and read
+      out, by hand, how every one of TN-1's nine weights should move. Then the page checks each one against a live
+      autograd engine — to the last decimal.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:TN1 — the object]</b> · <b>[THREAD:CHAIN — the verb, made mechanical]</b>. TN-1 is the spine of
+      this course: nine downstream pages name it. You met its <em>forward</em> pass on page&nbsp;6 (signal to
+      $\hat y = 0.3727$) and the chain rule itself on page&nbsp;5. This page reopens both — the same object, the
+      same rule — and turns them into an <em>algorithm</em> you can execute with a pencil. Every number below is
+      frozen; your job is to reproduce it, and the demo's job is to prove you did.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: this PREDICT is answered below, in the "dead-unit
+         lesson" box right after the Input 1 worked table. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      TN-1's first hidden pre-activation is $z_{1,1} = 0.5(1) + (-0.3)(2) + 0.1$. Compute it. Then predict: what is
+      the gradient of the loss with respect to the weight $W_{2,1}$ that multiplies <em>this unit's</em> output?
+      Write both down before you scroll — the answer is worked out in the dead-unit section below.
+    </div>
+
+    <!-- ===================== RECAP ===================== -->
+    <h2>The object: TN-1, reopened</h2>
+    <div class="box rule"><span class="box-title">📐 TN-1 (from page 6)</span>
+      A $2 \to 2\,(\tanh) \to 1\,(\text{sigmoid}) \to \text{BCE}$ network. <b>Nine parameters.</b> The frozen
+      weights (<code>constants.md</code> §8):
+      $$W_1 = \begin{bmatrix} 0.5 & -0.3 \\ 0.8 & 0.2 \end{bmatrix},\quad
+        \mathbf b_1 = \begin{bmatrix} 0.1 \\ -0.1 \end{bmatrix},\quad
+        W_2 = \begin{bmatrix} 0.6 & -0.9 \end{bmatrix},\quad b_2 = 0.2,\quad \eta = 0.1$$
+      Recall the invariant: <b>$W$ is always $(d_{\text{out}}, d_{\text{in}})$</b>. $W_1$ is $(2,2)$; $W_2$ is
+      $(1,2)$. The target is $y = 1$.
+    </div>
+
+    <p>Forward, the network is a chain of simple functions: a linear map, a $\tanh$, another linear map, a sigmoid,
+      a loss. Backward, we want nine numbers — one per parameter — each answering "if I nudge you, how much does the
+      loss change?" The chain rule says: to get any of them, multiply the local slopes along the path from that
+      parameter to the loss. Backprop is just the chain rule <em>ordered so no slope is ever computed twice.</em></p>
+
+    <!-- ===================== THE DELTA OBJECT ===================== -->
+    <h2>The one quantity everything is built from: $\boldsymbol\delta$</h2>
+    <p>Define, for every layer $\ell$,</p>
+    <p>$$\delta^{(\ell)}_i \;=\; \frac{\partial \mathcal{L}}{\partial z^{(\ell)}_i}
+        \qquad\text{— "how much the loss changes per unit change in this pre-activation."}$$</p>
+    <p>This is <b>the backprop workhorse</b>. Once you have $\boldsymbol\delta$ for a layer, every parameter
+      gradient in that layer is just $\boldsymbol\delta$ times a value you already cached on the way forward. That is
+      the whole trick — and it is why one backward pass costs about the same as one forward pass.</p>
+
+    <div class="box rule"><span class="box-title">📐 The four backprop equations</span>
+      <p><b>(BP1) Output error.</b> $\;\boldsymbol\delta^{(L)} = \nabla_{\mathbf a}\mathcal{L} \odot \phi'(\mathbf z^{(L)})$.
+        For BCE + sigmoid this collapses to the clean $\boldsymbol\delta^{(L)} = \hat y - y$.</p>
+      <p><b>(BP2) Recurse backward.</b> $\;\boldsymbol\delta^{(\ell)} = \left(W^{(\ell+1)\top}\boldsymbol\delta^{(\ell+1)}\right)\odot \phi'(\mathbf z^{(\ell)})$.</p>
+      <p><b>(BP3) Weight gradient.</b> $\;\dfrac{\partial\mathcal{L}}{\partial W^{(\ell)}} = \boldsymbol\delta^{(\ell)}\,\mathbf a^{(\ell-1)\top}$.</p>
+      <p><b>(BP4) Bias gradient.</b> $\;\dfrac{\partial\mathcal{L}}{\partial \mathbf b^{(\ell)}} = \boldsymbol\delta^{(\ell)}$.</p>
+
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\boldsymbol\delta^{(\ell)}$</td><td>loss-change per unit change in layer $\ell$'s pre-activation</td><td>$(d_\ell, 1)$</td><td>what we solve for</td></tr>
+          <tr><td>$W^{(\ell+1)}$</td><td>next layer's weights</td><td>$(d_{\ell+1}, d_\ell)$</td><td>forward pass</td></tr>
+          <tr><td>$\boldsymbol\delta^{(\ell+1)}$</td><td>the same quantity, one layer later</td><td>$(d_{\ell+1}, 1)$</td><td>already computed — <b>this is the recursion</b></td></tr>
+          <tr><td>$\phi'(\mathbf z^{(\ell)})$</td><td>slope of the activation at the value it actually took</td><td>$(d_\ell, 1)$</td><td><b>cached from the forward pass</b> — this is why training eats VRAM</td></tr>
+          <tr><td>$\mathbf a^{(\ell-1)}$</td><td>previous layer's activation</td><td>$(d_{\ell-1}, 1)$</td><td>cached from the forward pass</td></tr>
+          <tr><td>$\odot$</td><td>elementwise (Hadamard) product</td><td>—</td><td>—</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0"><b>Shape check (BP2):</b> $(d_\ell, d_{\ell+1})\times(d_{\ell+1},1) = (d_\ell,1)$,
+        then $\odot\,(d_\ell,1)\to(d_\ell,1)$. ✓ And the universal law: <b>the gradient has the same shape as the
+        thing it differentiates</b> — that is why <code>param.grad</code> has <code>param.shape</code>.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Why BP3 is the memory villain</span>
+      BP3 multiplies $\boldsymbol\delta^{(\ell)}$ by the cached activation $\mathbf a^{(\ell-1)}$. To take one
+      backward step you must have <em>kept every forward activation in memory</em>. On a 9-parameter network that is
+      nothing; on Qwen3-8B it is gigabytes — and it is exactly the term page&nbsp;18 will call the activation
+      cache. <b>[THREAD:MEM]</b> — hold this thought; the ledger reopens it.
+    </div>
+
+    <!-- ===================== WORKED INPUT 1 ===================== -->
+    <h2>Worked by hand — Input 1: $x = [1.0,\ 2.0]$, the dead-unit case</h2>
+    <p>Forward first (this is page 6's arithmetic, transcribed from <code>constants.md</code> §8.1). Notice
+      $z_{1,1} = 0.5(1) + (-0.3)(2) + 0.1 = 0$ — that answers the first half of the PREDICT: the top hidden unit is
+      <em>off</em> for this input.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Forward (Input 1)</span>
+      <table class="ledger">
+        <tbody>
+          <tr><td>$\mathbf z_1$</td><td>$W_1\mathbf x + \mathbf b_1$</td><td>$[\,0.0,\ 1.1\,]$</td></tr>
+          <tr><td>$\mathbf a_1$</td><td>$\tanh(\mathbf z_1)$</td><td>$[\,0.0,\ 0.8005\,]$</td></tr>
+          <tr><td>$z_2$</td><td>$W_2\mathbf a_1 + b_2$</td><td>$-0.5205$</td></tr>
+          <tr><td>$\hat y$</td><td>$\sigma(z_2)$</td><td>$0.3727$</td></tr>
+          <tr><td>$\mathcal{L}$</td><td>$-[\,y\ln\hat y + (1-y)\ln(1-\hat y)\,]$</td><td><b>$0.9869$</b> nats</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Now backward. Start at the loss and walk left, applying the four equations.</p>
+    <div class="box worked"><span class="box-title">✍️ Backward (Input 1) — the nine gradients</span>
+      <p><b>Shape ribbon.</b> $\;\delta^{(2)}\ (1{,}1)\;\to\;\partial\mathcal L/\partial W_2\ (1{,}2)\;\to\;\partial\mathcal L/\partial\mathbf a_1\ (2{,}1)\;\to\;\boldsymbol\delta_1\ (2{,}1)\;\to\;\partial\mathcal L/\partial W_1\ (2{,}2)$.</p>
+      <table class="ledger">
+        <tbody>
+          <tr><td>(BP1)</td><td>$\dfrac{\partial\mathcal L}{\partial z_2} = \hat y - y$</td><td>$-0.6273$</td></tr>
+          <tr><td>(BP3)</td><td>$\dfrac{\partial\mathcal L}{\partial W_2} = \delta^{(2)}\,\mathbf a_1^\top$</td><td>$[\,0.0,\ -0.5021\,]$ &nbsp;← first entry dead ($a_{1,1}=0$)</td></tr>
+          <tr><td>(BP4)</td><td>$\dfrac{\partial\mathcal L}{\partial b_2} = \delta^{(2)}$</td><td>$-0.6273$</td></tr>
+          <tr><td></td><td>$\dfrac{\partial\mathcal L}{\partial\mathbf a_1} = W_2^\top\delta^{(2)}$</td><td>$[\,-0.3764,\ 0.5645\,]$</td></tr>
+          <tr><td></td><td>$\phi'(\mathbf z_1) = 1-\mathbf a_1^2$; $\ \tanh'(0)=1.0,\ \tanh'(1.1)=0.3592$</td><td></td></tr>
+          <tr><td>(BP2)</td><td>$\boldsymbol\delta_1 = \dfrac{\partial\mathcal L}{\partial\mathbf a_1}\odot\phi'(\mathbf z_1)$</td><td>$[\,-0.3764,\ 0.2028\,]$</td></tr>
+          <tr><td>(BP3)</td><td>$\dfrac{\partial\mathcal L}{\partial W_1} = \boldsymbol\delta_1\,\mathbf x^\top$</td><td>$\begin{bmatrix}-0.3764 & -0.7527\\ 0.2028 & 0.4056\end{bmatrix}$</td></tr>
+          <tr><td>(BP4)</td><td>$\dfrac{\partial\mathcal L}{\partial\mathbf b_1} = \boldsymbol\delta_1$</td><td>$[\,-0.3764,\ 0.2028\,]$</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">One SGD step ($\eta = 0.1$): $\hat y:\ 0.3727 \to 0.4395$, &nbsp;
+        $\mathcal{L}:\ 0.9869 \to 0.8222$, &nbsp; $\Delta\mathcal{L} = \mathbf{-0.1646}$.
+        <b>It learned. You did it with a pencil.</b></p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The dead-unit lesson (the PREDICT answer)</span>
+      Because $a_{1,1} = 0$, the gradient $\partial\mathcal L/\partial W_{2,1} = 0$ — that weight <b>cannot move
+      this step</b>, and nothing is broken: the unit is simply off for <em>this</em> input. <b>Yet</b> $\tanh'(0)=1$,
+      so the gradient flows <em>back through</em> the unit undiminished — the row $\partial\mathcal L/\partial W_1[0]
+      = [-0.3764, -0.7527]$ is fully alive. Two contrasting facts, one hand computation: a zero <em>weight</em>
+      gradient and a healthy <em>upstream</em> gradient, side by side.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Watch it, forward and backward, over the real graph</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Press <b>Animate forward</b> to watch the signal flow left→right (node fills are the live activations); press
+      <b>Animate backward</b> to watch the gradient flow right→left (node fills become the live node gradients).
+      Then flip the input toggle to <b>Input 2</b> and watch the dead top unit <em>light up</em>. The nine-gradient
+      table underneath is computed live by this course's autograd engine — every entry should equal the frozen
+      pencil values above. <code>code/14_backprop_tn1.py</code> reproduces them in NumPy.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">TN-1 · signal and gradient <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p style="margin:0 0 10px">
+          <b>Input:</b>
+          <label style="margin-left:8px"><input type="radio" name="tn1-input" value="1" checked> Input 1 &nbsp;$x=[1.0,\ 2.0]$ (dead unit)</label>
+          <label style="margin-left:14px"><input type="radio" name="tn1-input" value="2"> Input 2 &nbsp;$x=[0.60,\ -0.20]$ (healthy)</label>
+        </p>
+        <canvas id="d-net" height="300"></canvas>
+        <p style="margin:12px 0 0">
+          <button class="btn secondary" id="d-net-fwd">Animate forward →</button>
+          <button class="btn secondary" id="d-net-bwd">← Animate backward</button>
+        </p>
+        <div class="readout" id="d-net-out"></div>
+        <div id="d-grad-table" style="margin-top:14px"></div>
+      </div>
+    </div>
+
+    <!-- ===================== WORKED INPUT 2 ===================== -->
+    <h2>Worked by hand — Input 2: $x = [0.60,\ -0.20]$, the healthy case</h2>
+    <p>Same nine weights, a different input — and now <em>no</em> dead unit and <em>no</em> saturation
+      ($\tanh'(0.46) = 0.8150$, $\tanh'(0.34) = 0.8928$, both healthy). This is the input whose nine live gradients
+      page&nbsp;17 will reopen to motivate Adam. Values frozen in <code>constants.md</code> §8.7, verified three
+      independent ways.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Forward &amp; the nine gradients (Input 2)</span>
+      <table class="ledger">
+        <tbody>
+          <tr><td>$\mathbf z_1$</td><td>$[\,0.46,\ 0.34\,]$</td><td>$\mathbf a_1 = [\,0.4301,\ 0.3275\,]$</td></tr>
+          <tr><td>$z_2$</td><td>$0.1633$</td><td>$\hat y = 0.5407$</td></tr>
+          <tr><td>$\mathcal{L}$</td><td colspan="2"><b>$0.6148$</b> nats</td></tr>
+        </tbody>
+      </table>
+      <table class="ledger" style="margin-top:.6em">
+        <thead><tr><th>Parameter</th><th>Gradient</th><th>Parameter</th><th>Gradient</th></tr></thead>
+        <tbody>
+          <tr><td>$\partial\mathcal L/\partial W_1[0][0]$</td><td>$-0.1348$</td><td>$\partial\mathcal L/\partial W_1[0][1]$</td><td>$+0.0449$</td></tr>
+          <tr><td>$\partial\mathcal L/\partial W_1[1][0]$</td><td>$+0.2214$</td><td>$\partial\mathcal L/\partial W_1[1][1]$</td><td>$-0.0738$</td></tr>
+          <tr><td>$\partial\mathcal L/\partial b_1[0]$</td><td>$-0.2246$</td><td>$\partial\mathcal L/\partial b_1[1]$</td><td>$+0.3690$</td></tr>
+          <tr><td>$\partial\mathcal L/\partial W_2[0]$</td><td>$-0.1975$</td><td>$\partial\mathcal L/\partial W_2[1]$</td><td>$-0.1504$</td></tr>
+          <tr><td>$\partial\mathcal L/\partial b_2$</td><td>$-0.4593$</td><td></td><td></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">One SGD step ($\eta = 0.1$): $\hat y:\ 0.5407 \to 0.5695$, &nbsp;
+        $\mathcal{L}:\ 0.6148 \to 0.5630$, &nbsp; $\Delta\mathcal{L} = \mathbf{-0.0518}$. Nine live gradients, no
+        zero among them.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Handed forward to page 17</span>
+      <b>[THREAD:TN1 — beat forward]</b> These nine gradients aren't the same size: the largest,
+      $\partial\mathcal L/\partial b_2 = -0.4593$, and the smallest, $\partial\mathcal L/\partial W_1[0][1] =
+      +0.0449$, are an order of magnitude apart. <em>How</em> far apart, and why a single learning rate cannot serve
+      both — that is page&nbsp;17's opening question, and it is what Adam exists to answer. We compute the exact
+      ratio there, not here.
+    </div>
+
+    <!-- ===================== WHY CHEAP ===================== -->
+    <h2>Why backprop is cheap</h2>
+    <div class="box rule"><span class="box-title">📐 One backward pass, not $P$ forward passes</span>
+      Every $\boldsymbol\delta$ is reused: the loss's sensitivity to a deep parameter travels through the same
+      shared $\boldsymbol\delta$'s that every other parameter in that layer uses. So <b>one</b> backward pass, reusing
+      the forward pass's cached values, yields <em>all</em> $P$ gradients at a cost of about one forward pass —
+      $O(1)$ passes, not $O(P)$. The naive alternative, finite differences, would perturb each parameter and re-run
+      the whole forward pass <em>once per parameter</em>: $P$ forward passes for the same nine numbers. At nine
+      parameters that is a shrug; at eight billion it is the difference between training and not. <b>[THREAD:CHAIN]</b>
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "A zero gradient means a dead or broken network."</span>
+      Here $\partial\mathcal L/\partial W_{2,1} = 0$ is <em>correct and local</em>: the unit $a_{1,1}$ is off for
+      this input, so the weight reading its output has nothing to learn from <em>this</em> example. Flip to another
+      input (Input 2) and it is nonzero again. A local zero is information, not a failure.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Backprop is a different algorithm from the chain rule."</span>
+      It <em>is</em> the chain rule — reverse mode — simply <em>ordered</em> so that each shared intermediate
+      ($\boldsymbol\delta$) is computed once and reused, instead of re-derived down every path. Same math, smarter
+      bookkeeping.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "You must store the whole computation graph to get gradients."</span>
+      You store the forward <b>activations</b> (BP3's $\mathbf a^{(\ell-1)}$), not a symbolic graph. That storage
+      <em>is</em> the training memory cost — the same activation cache the memory ledger charges you for on page 18.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/14_backprop_tn1.py</code> — computes both inputs' nine gradients by an explicit NumPy chain rule
+      (no autograd), and prints them so they match the two frozen tables on this page. Page&nbsp;15 reuses it as the
+      autograd cross-check — where one "exactly zero" entry turns out not to be exactly zero at all.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: reverse mode gives all $P$ gradients in one pass; forward mode would cost $P$</summary><div>
+      <p>There are two ways to walk a chain of derivatives. <b>Forward mode</b> pushes a derivative
+        $\partial\cdot/\partial\theta_j$ forward from one chosen input $\theta_j$ to the output — one pass yields the
+        sensitivity of <em>every</em> output to <em>one</em> input. <b>Reverse mode</b> pulls
+        $\partial\mathcal L/\partial\cdot$ backward from one chosen output — one pass yields the sensitivity of
+        <em>one</em> output to <em>every</em> input.</p>
+      <p>Training has exactly one scalar output (the loss) and millions of inputs (the parameters). So reverse mode
+        is the obvious fit: <b>one</b> backward pass delivers all $P$ gradients, where forward mode would need $P$
+        separate passes. That asymmetry — one loss, many parameters — is the entire reason every deep-learning
+        framework computes gradients in reverse. Page 15 shows this same reverse walk running inside PyTorch's
+        <code>.backward()</code>.</p>
+    </div></details>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz14"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* The two frozen TN-1 configs. Same nine weights; only x (and thus the
+     activations and gradients) differ. NEVER call worked221() with no args —
+     that reproduces the RETIRED §5.4 network (spec-part2 warning). */
+  const CFG = {
+    1: { W1: [[0.5, -0.3], [0.8, 0.2]], b1: [0.1, -0.1], W2: [0.6, -0.9], b2: 0.2, x: [1.0, 2.0], y: 1 },
+    2: { W1: [[0.5, -0.3], [0.8, 0.2]], b1: [0.1, -0.1], W2: [0.6, -0.9], b2: 0.2, x: [0.60, -0.20], y: 1 }
+  };
+
+  /* fmt: a gradient that is 0 to machine precision must print "0.0000", never
+     "-0.0000" (the dead-unit entry computes to ~-1.7e-17 in float64). */
+  const fmt = v => (Math.abs(v) < 1e-9 ? "0.0000" : v.toFixed(4));
+
+  (function () {
+    const { worked221 } = NN;
+    const canvas = document.getElementById("d-net");
+    const out = document.getElementById("d-net-out");
+    const tableEl = document.getElementById("d-grad-table");
+
+    let which = 1;
+    let w, weights, acts, grads, ng;
+
+    function compute() {
+      w = worked221(CFG[which]);                 // live Values, .grad populated
+      const nd = w.nodes;
+      // weights[l] shape (layers[l+1] x layers[l]): (2x2) then (1x2)
+      weights = [
+        [[w.P.W1_11.data, w.P.W1_12.data], [w.P.W1_21.data, w.P.W1_22.data]],
+        [[w.P.W2_1.data, w.P.W2_2.data]]
+      ];
+      acts = [w.x.slice(), w.forward.a1.slice(), [w.forward.yhat]];
+      // node gradients per layer (dL/d node) from the SAME backward pass
+      grads = [[0, 0], [nd.a1_1.grad, nd.a1_2.grad], [nd.yhat.grad]];
+    }
+
+    function readout() {
+      const nd = w.nodes;
+      out.innerHTML =
+        `forward: &nbsp;ŷ = <b>${w.forward.yhat.toFixed(4)}</b>, &nbsp; loss ℒ = <b>${w.loss.toFixed(4)}</b>` +
+        ` &nbsp;·&nbsp; backward: &nbsp;δ⁽²⁾ = ∂ℒ/∂z₂ = <b>${nd.z2.grad.toFixed(4)}</b>`;
+    }
+
+    function gradTable() {
+      const g = w.grads;   // keyed by param name
+      const rows = [
+        ["∂ℒ/∂W₁[0][0]", g.W1_11, "∂ℒ/∂W₁[0][1]", g.W1_12],
+        ["∂ℒ/∂W₁[1][0]", g.W1_21, "∂ℒ/∂W₁[1][1]", g.W1_22],
+        ["∂ℒ/∂b₁[0]", g.b1_1, "∂ℒ/∂b₁[1]", g.b1_2],
+        ["∂ℒ/∂W₂[0]", g.W2_1, "∂ℒ/∂W₂[1]", g.W2_2],
+        ["∂ℒ/∂b₂", g.b2, "", null]
+      ];
+      let html = `<div style="font-size:.82rem;color:var(--text-dim);margin-bottom:4px">The nine gradients, computed live for Input ${which}:</div>`;
+      html += `<table class="ledger"><tbody>`;
+      for (const r of rows) {
+        html += `<tr><td><code>${r[0]}</code></td><td><b>${fmt(r[1])}</b></td>` +
+          (r[3] === null ? `<td></td><td></td>` : `<td><code>${r[2]}</code></td><td><b>${fmt(r[3])}</b></td>`) + `</tr>`;
+      }
+      html += `</tbody></table>`;
+      tableEl.innerHTML = html;
+    }
+
+    function rebuild() {
+      compute();
+      if (!ng) {
+        ng = new NetGraph(canvas, {
+          layers: [2, 2, 1], weights, activations: acts,
+          labels: [["x₁", "x₂"], ["h₁", "h₂"], ["ŷ"]]
+        });
+      } else {
+        ng.setWeights(weights);
+        ng.setActivations(acts);
+      }
+      readout();
+      gradTable();
+    }
+
+    document.getElementById("d-net-fwd").addEventListener("click", () => {
+      ng.setActivations(acts);                   // restore signal fills first
+      ng.animateForward(acts, { duration: 1100 });
+    });
+    document.getElementById("d-net-bwd").addEventListener("click", () => {
+      ng.animateBackward(grads, { duration: 1100, onDone: () => ng.setActivations(acts) });
+    });
+    document.querySelectorAll('input[name="tn1-input"]').forEach(r => {
+      r.addEventListener("change", e => { which = +e.target.value; rebuild(); });
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => ng && ng.draw(), 0));
+
+    rebuild();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz14", [
+    {
+      q: "Input 1: the bias gradient $\\partial\\mathcal{L}/\\partial b_2$ is (to 4 d.p.):",
+      num: -0.6273, tol: 0.001,
+      why: "For BCE + sigmoid, (BP1)/(BP4) give $\\partial\\mathcal{L}/\\partial b_2 = \\delta^{(2)} = \\hat y - y = 0.3727 - 1 = -0.6273$."
+    },
+    {
+      q: "Input 1: the first entry of $\\partial\\mathcal{L}/\\partial W_2$ is:",
+      num: 0.0, tol: 0.001,
+      why: "By (BP3), $\\partial\\mathcal{L}/\\partial W_{2,1} = \\delta^{(2)} a_{1,1}$, and $a_{1,1}=\\tanh(0)=0$. Not because the net is broken — the unit is simply off for this input."
+    },
+    {
+      q: "Input 2: the loss $\\mathcal{L}$ before the SGD step is (to 4 d.p.):",
+      num: 0.6148, tol: 0.002,
+      why: "Forward on $x=[0.60,-0.20]$ gives $\\hat y = 0.5407$ and $\\mathcal{L} = -\\ln(0.5407) = 0.6148$ nats (constants §8.7)."
+    },
+    {
+      q: "BP3, $\\partial\\mathcal{L}/\\partial W^{(\\ell)} = \\boldsymbol\\delta^{(\\ell)}\\mathbf{a}^{(\\ell-1)\\top}$, needs which forward quantity kept in memory?",
+      opts: ["The next layer's weights $W^{(\\ell+1)}$", "The previous layer's activation $\\mathbf{a}^{(\\ell-1)}$", "The final prediction $\\hat y$ only", "Nothing — gradients are computed from scratch"],
+      a: 1,
+      why: "BP3 multiplies $\\boldsymbol\\delta$ by the cached activation $\\mathbf{a}^{(\\ell-1)}$. Keeping every forward activation is exactly the training-memory cost the ledger charges on page 18."
+    },
+    {
+      q: "What is $\\tanh'(0)$, and what does it mean for the dead unit?",
+      opts: ["$0$ — the gradient stops at the dead unit", "$1$ — the gradient still flows back through the dead unit", "$0.25$ — the sigmoid's max slope", "Undefined at zero"],
+      a: 1,
+      why: "$\\tanh'(z)=1-\\tanh^2 z$, so $\\tanh'(0)=1$. The weight gradient $\\partial\\mathcal{L}/\\partial W_{2,1}$ is zero (because $a_{1,1}=0$), yet the upstream gradient passes through undiminished."
+    },
+    {
+      q: "Backprop versus finite differences, for a network with $P$ parameters:",
+      opts: ["Both cost one forward pass", "Backprop costs one backward pass; finite differences cost one forward pass per parameter", "Backprop costs $P$ passes; finite differences cost one", "They are the same algorithm"],
+      a: 1,
+      why: "Reverse-mode backprop returns all $P$ gradients in one backward pass (~one forward pass of cost). Finite differences perturb each parameter separately — $P$ forward passes for the same numbers."
+    },
+    {
+      q: "Input 1: after one SGD step at $\\eta = 0.1$, the change in loss $\\Delta\\mathcal{L}$ is (to 4 d.p.):",
+      num: -0.1646, tol: 0.001,
+      why: "$\\mathcal{L}: 0.9869 \\to 0.8222$, so $\\Delta\\mathcal{L} = -0.1646$ (constants §8.3). The loss fell — the pencil update learned."
+    }
+  ], "Backprop by pencil — self-check");
+
+});
+</script>
+</body>
+</html>

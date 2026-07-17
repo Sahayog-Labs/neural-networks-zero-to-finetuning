@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>34. Residuals &amp; the Residual Stream — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the math-bearing ledgers carry KaTeX products/fractions wider
+   than a phone. Let each scroll inside its own box on narrow screens so the
+   page body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* the residual on/off control is a checkbox, not a slider — match .ctrl spacing */
+.ctrl.toggle { display: flex; align-items: center; gap: 10px; }
+.ctrl.toggle input { width: auto; }
+</style>
+</head>
+<body data-page="34-residuals-and-normalization.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Residual Connections and the Residual Stream</h1>
+    <p class="subtitle">Two pages ago the RNN died of a product of shrinking Jacobians. A single "<code>+ x</code>"
+      kills that death for good — and installs the most reusable mental model in the whole course: the residual
+      stream, a shared bus that 36 committees write on in turn.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:chain-rule — the verb]</b> · <b>[THREAD:Qwen3-8B — the anchor]</b>. This page reopens the chain
+      rule you last met on <b>page&nbsp;28</b> as a product of Jacobians (the BPTT product that killed the RNN). Same
+      verb, same failure — a product that decays — and the <em>same fix</em> the LSTM cell-state used: a
+      near-identity Jacobian. What is new here is <em>where</em> the fix sits in a transformer, and the bus-shaped
+      object it turns the model into. Qwen3-8B's real numbers ($L=36$, <code>rms_norm_eps</code>) anchor it, climaxing
+      at the parameter count on <b>page&nbsp;36</b>.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 What this page owns (and what it doesn't)</span>
+      The <em>why</em> of gradient flow (page&nbsp;19, init &amp; vanishing gradients) and the <em>why</em> of
+      normalization's axis (page&nbsp;20) were derived in the trunk — this page does not re-derive them. This page
+      owns the <b>where</b>: where the <code>+ x</code> sits in a block, why the residual path must stay clean
+      (pre-norm), and the layer-count arithmetic that makes 36-deep stacks legal.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in the "The number that sells it" worked box below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A 36-layer stack. Each layer, on the backward pass, multiplies the gradient by a Jacobian of norm about
+      $0.9$ — a plausible, even <em>healthy</em>, value. With <b>no</b> skip connection, how much of the
+      layer-36 gradient survives back to layer&nbsp;0: about <b>90%</b>, <b>22%</b>, or <b>2%</b>? Commit before you
+      scroll. (You saw the LSTM "highway" version of this on page&nbsp;28 — this is the same curve.)
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>The idea: compute only <em>what to change</em></h2>
+    <p>A plain layer is told: "here is $\mathbf{x}$; produce the next representation." A residual layer is told
+      something humbler and far more useful: "here is $\mathbf{x}$; produce only <em>what to change about it</em>,
+      and I'll add your change back on." In symbols the whole difference is one plus sign:</p>
+    <p>$$\mathbf{y} = \mathbf{x} + F(\mathbf{x};\theta).$$</p>
+    <p>The default behavior is now <b>"do nothing"</b>: if $F$ outputs zero, the layer is the identity and the signal
+      passes untouched. A 100-layer stack desperately needs each of its layers to be <em>able</em> to do nearly
+      nothing — most refinements are small — and a plain layer has to <em>learn</em> the identity from scratch
+      (hard), while a residual layer gets it for free (just push $F \to 0$).</p>
+    <p>But the forward-pass "it remembers the input" story is the <em>secondary</em> reason, and mistaking it for the
+      main one is the classic error. The real mechanism is on the <b>backward</b> pass, and it is worth stating as a
+      sentence you keep:</p>
+    <div class="box key"><span class="box-title">🔑 The gradient highway</span>
+      The <code>+ x</code> gives the gradient a road from the loss straight back to layer&nbsp;1 that <em>does not
+      pass through a single weight matrix</em>. Nothing on that road can shrink it. Depth stops being fatal because
+      there is always one clean path home.
+    </div>
+
+    <!-- ===================== THE MATH ===================== -->
+    <h2>The math: an $I$-term nothing can shrink</h2>
+    <p><b>[THREAD:chain-rule]</b> — the same verb as page&nbsp;28, now with a gift term. Differentiate
+      $\mathbf{y} = \mathbf{x} + F(\mathbf{x})$ with respect to its input:</p>
+    <p>$$\frac{\partial \mathbf{y}}{\partial \mathbf{x}} = I + \frac{\partial F}{\partial \mathbf{x}}.$$</p>
+    <p>The $I$ is the highway. Now chain it through all $L$ layers — this is exactly the BPTT product from
+      page&nbsp;28, but read what the identity does to it:</p>
+    <p>$$\frac{\partial \mathcal{L}}{\partial \mathbf{x}_0}
+        = \frac{\partial \mathcal{L}}{\partial \mathbf{x}_L}\;
+          \prod_{\ell=1}^{L}\left(I + \frac{\partial F_\ell}{\partial \mathbf{x}_{\ell-1}}\right).$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{x}_\ell$</td><td>the hidden state after layer $\ell$ (layer 0 = the input)</td><td>$(d,1)$, $d=4096$</td><td>forward pass</td></tr>
+        <tr><td>$F_\ell$</td><td>layer $\ell$'s sublayer — what it decides to add</td><td>$\mathbb{R}^d\to\mathbb{R}^d$</td><td>attention or FFN, page 35</td></tr>
+        <tr><td>$\partial F_\ell/\partial \mathbf{x}_{\ell-1}$</td><td>the sublayer's Jacobian — how much its output moves when its input does</td><td>$(d,d)$</td><td>backward pass</td></tr>
+        <tr><td>$I$</td><td>the identity matrix — the <b>highway term</b> the skip connection injects</td><td>$(d,d)$</td><td>the $+\,\mathbf{x}$</td></tr>
+        <tr><td>$\partial\mathcal{L}/\partial\mathbf{x}_0$</td><td>gradient reaching the very bottom of the stack</td><td>$(d,1)$</td><td>what depth threatens</td></tr>
+        <tr><td>$L$</td><td>number of layers</td><td>scalar — 36 for Qwen3-8B</td><td>config, below</td></tr>
+      </tbody>
+    </table>
+    <p>Expand that product mentally. One term in the expansion is $I\cdot I\cdots I = I$ — an <b>unattenuated path
+      from the loss all the way to layer&nbsp;0</b>, untouched by any $\partial F$. Contrast page&nbsp;28's RNN, whose
+      product was $\prod \gamma$ with every $\gamma \le 1$: no identity term, so the product could only decay. The
+      residual doesn't make the decaying terms disappear — it <em>adds a term that can't decay</em>, and at depth
+      that term is the one that survives.</p>
+    <div class="box rule"><span class="box-title">📐 Same problem, same fix, different decade</span>
+      The LSTM cell state (page&nbsp;28) had a near-additive path with Jacobian $\approx \operatorname{diag}(\mathbf{f}_i)$,
+      $\mathbf{f}_i \to 1$. A residual connection has Jacobian $I + \partial F/\partial\mathbf{x}$. These are the same
+      idea: <b>keep a route whose Jacobian is near the identity so the gradient has somewhere to flow that doesn't
+      multiply it down.</b> One fact, met twice, is one idea — not two.
+    </div>
+
+    <!-- ===================== WORKED NUMBER ===================== -->
+    <h2>The number that sells it — and resolves the predict</h2>
+    <div class="box worked"><span class="box-title">✍️ Worked example</span>
+      Take a healthy per-layer Jacobian norm $\gamma = 0.9$ and Qwen3-8B's depth $L = 36$
+      (<code>num_hidden_layers = 36</code> [VP], constants&nbsp;§1.1).
+      <p style="margin:.6em 0 0">$$\gamma^{L} = 0.9^{36} = 0.0225.$$</p>
+      Only <b>2.25%</b> of the layer-36 gradient reaches layer&nbsp;0 — <em>that is the predict's answer:
+      about&nbsp;2%.</em> A "healthy" 0.9, compounded 36 times, still throws away 97.75% of the signal. Now switch the
+      residual on. Each per-layer multiplier becomes $I + \partial F_\ell/\partial\mathbf{x}$; with a small,
+      mean-zero learned update ($\|\partial F/\partial\mathbf{x}\|\approx 0.1$) the product stays $O(1)\approx
+      \mathbf{1.0}$. The fold-improvement at $L=36$:
+      <p style="margin:.6em 0 0">$$\frac{1}{0.9^{36}} = \frac{1}{0.0225} = \mathbf{44.4\times} \text{ more gradient.}$$</p>
+      Push to a deeper 2026 model — GLM-5 is reported at $L = 78$ layers — and $0.9^{78} = 2.70\times10^{-4}$ vs
+      $\approx 1$: about <b>3,700×</b> (exactly $1/0.9^{78}$ when the update is negligible — set the demo's
+      $\|\partial F/\partial\mathbf{x}\|$ slider to 0 to land on it). <em>Residual connections are not an
+      optimization. They are the thing that makes depth legal.</em> The deeper you go, the more the residual is
+      doing.
+    </div>
+    <p>For calibration: the same base at $L=100$ gives $0.9^{100} = 2.7\times10^{-5}$ [DER, constants&nbsp;§9.3] — a
+      hundred-layer plain stack passes essentially nothing. This is exactly the "amplifier" number from Part&nbsp;II,
+      met again as an architecture verdict.</p>
+
+    <!-- ===================== DEMO ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Drive the highway yourself. Set the residual toggle <b>off</b> at $L=36$ and watch the surviving-gradient
+      ratio dive to $0.0225$; toggle it <b>on</b> and it snaps back to $\approx 1$. Then drag $L$ out to 78 and watch
+      the no-residual trace crater while the residual trace barely moves. Every point on both curves is computed
+      live — $\gamma^\ell$ for the plain stack, the actual product $\prod(1+\partial F_\ell)$ for the residual one.
+    </div>
+    <h2>Demo — the gradient highway</h2>
+    <div class="demo">
+      <div class="demo-head">Gradient reaching layer 0 vs depth <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-hw" height="330"></canvas>
+        <div class="controls" id="d-hw-ctrls"></div>
+        <div class="readout" id="d-hw-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== THE RESIDUAL STREAM ===================== -->
+    <h2>Install the model: the residual stream</h2>
+    <p>Unroll the whole stack once and something clicks. Because every layer only <em>adds</em>, the state at the top
+      is the input plus every contribution along the way:</p>
+    <p>$$\mathbf{x}_L = \mathbf{x}_0 + \sum_{\ell=1}^{L} F_\ell(\mathbf{x}_{\ell-1}).$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{x}_0$</td><td>the embedded input — what gets written onto the bus first</td><td>$(d,1)$</td><td>the embedding, page 27</td></tr>
+        <tr><td>$F_\ell(\mathbf{x}_{\ell-1})$</td><td>layer $\ell$'s contribution: it <em>reads</em> the bus, thinks, and <em>adds</em></td><td>$(d,1)$</td><td>attention or FFN, page 35</td></tr>
+        <tr><td>$\mathbf{x}_L$</td><td>the accumulated stream at the top, ready for the output head</td><td>$(d,1)$</td><td>this sum — the output head reads it</td></tr>
+      </tbody>
+    </table>
+    <div class="box key"><span class="box-title">🔑 The residual stream</span>
+      The residual stream is a shared <b>bus</b>, $d = 4096$ wide, running the length of the model. Every layer
+      <em>reads</em> from it, computes a contribution, and <em>adds</em> to it. Nothing is overwritten; everything
+      accumulates. The model isn't a pipeline that transforms — it's a <b>whiteboard 36 committees write on in
+      sequence.</b> This is the single most reusable mental model in the course; hold onto it.
+    </div>
+    <p>Once you see the bus, a stack of otherwise-separate facts becomes one picture (each of these is cashed out
+      later — this is the forward-reference list, not a detour):</p>
+    <ul>
+      <li><b>Why $d$ is constant through the whole model.</b> You can only add vectors of matching shape, so the bus
+        width never changes. That "$d = 4096$ everywhere" you kept seeing is the bus, not a coincidence.</li>
+      <li><b>Why LoRA works.</b> A LoRA adapter is just a small extra writer on the bus — a low-rank contribution
+        added alongside a layer's — so it can steer behavior without rewriting the model (Part&nbsp;IV, page&nbsp;40).</li>
+      <li><b>Why activation steering works.</b> Add a fixed vector to the bus at some layer and you shift every
+        downstream read — the operational face of page&nbsp;27's linear-representation hypothesis.</li>
+      <li><b>Why $W_O$ matters.</b> An attention head's output projection is its <em>write port</em> onto the bus
+        (page&nbsp;30); heads are independent until that matmul.</li>
+    </ul>
+    <details class="deepdive"><summary>🔬 Deep dive: parallel blocks read and write the same bus at once</summary><div>
+      <p>The bus model makes an otherwise-exotic architecture obvious. In a <em>parallel</em> block (Cohere's Tiny
+        Aya, among others) the attention sublayer and the FFN sublayer both read the <em>same</em> $\mathbf{x}$ and
+        both write their contribution to the stream, rather than the FFN reading the attention layer's output:
+        $\mathbf{x}_{\ell} = \mathbf{x}_{\ell-1} + \text{Attn}(\text{norm}(\mathbf{x}_{\ell-1})) +
+        \text{FFN}(\text{norm}(\mathbf{x}_{\ell-1}))$. On a bus this is trivially sensible — two committees writing
+        the same round instead of taking turns — and it shortens the critical path. Nothing about the highway
+        argument changes: both contributions still ride an $I$-term home.</p>
+    </div></details>
+
+    <!-- ===================== PRE VS POST NORM ===================== -->
+    <h2>Keep the highway clean: pre-norm, not post-norm</h2>
+    <p>Normalization has to go <em>somewhere</em> in the block (page&nbsp;20 said why you need it at all). The only
+      question this page cares about is <b>where relative to the </b><code>+ x</code>, and it turns out to decide
+      whether the highway stays clean.</p>
+    <table class="ledger">
+      <thead><tr><th>Placement</th><th>Block</th><th>Residual path</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>Post-LN (2017)</td><td>$\mathbf{y} = \text{norm}(\mathbf{x} + F(\mathbf{x}))$</td><td>a norm sits <em>on</em> the highway — no longer a clean $I$</td><td>needs LR warmup; unstable past ~12 layers</td></tr>
+        <tr><td>Pre-LN (since ~2020)</td><td>$\mathbf{y} = \mathbf{x} + F(\text{norm}(\mathbf{x}))$</td><td>path stays exactly "$\mathbf{x}\ +\ $something" — highway intact</td><td>trains stably at 36 / 78 / 100+ layers</td></tr>
+      </tbody>
+    </table>
+    <p>Read the two formulas against the highway argument: post-norm wraps a normalization <em>around</em> the sum,
+      so the $I$-term picks up that norm's Jacobian and the road home is no longer unobstructed. Pre-norm normalizes
+      only the <em>input to</em> $F$, leaving the outer $+\,\mathbf{x}$ pristine — the $I$ survives untouched.
+      <b>Every 2026 frontier model is pre-norm</b> [V-sec]; this is a <em>settled</em> question, not a live tradeoff.</p>
+
+    <h3>The norm itself: RMSNorm</h3>
+    <p>And it is not LayerNorm anymore — it is <b>RMSNorm</b>, which throws away the mean-centering LayerNorm does and
+      keeps only the rescaling:</p>
+    <p>$$\text{RMS}(\mathbf{x}) = \sqrt{\tfrac{1}{d}\textstyle\sum_{i=1}^{d} x_i^2 + \varepsilon},
+        \qquad
+        \text{RMSNorm}(\mathbf{x}) = \mathbf{g} \odot \frac{\mathbf{x}}{\text{RMS}(\mathbf{x})}.$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{x}$</td><td>the hidden vector being normalized (one bus reading)</td><td>$(d,1)$</td><td>the residual stream</td></tr>
+        <tr><td>$d$</td><td>model width — the count we average over</td><td>scalar = 4096</td><td>config <code>hidden_size</code> [VP]</td></tr>
+        <tr><td>$\varepsilon$</td><td>stability floor so a near-zero vector doesn't divide by zero</td><td>scalar</td><td>config <code>rms_norm_eps</code> — see below</td></tr>
+        <tr><td>$\mathbf{g}$</td><td>learned per-dimension gain (RMSNorm's <em>only</em> parameters — no bias)</td><td>$(d,1)$</td><td>trained</td></tr>
+        <tr><td>$\odot$</td><td>elementwise product</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+    <p>That $\varepsilon$ is not a mystery constant — it is a line in the config file you can open right now. For
+      Qwen3-8B:</p>
+    <div class="codeblock" data-lang="json">
+      <div class="codeblock-head"><span class="lang-tag">config.json</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">  <span class="tok-str">"hidden_size"</span>: <span class="tok-num">4096</span>,          <span class="tok-com"># this is d — the bus width</span></span>
+<span class="line">  <span class="tok-str">"num_hidden_layers"</span>: <span class="tok-num">36</span>,     <span class="tok-com"># this is L — 0.9^36 = 0.0225 without skips</span></span>
+<span class="line">  <span class="tok-str">"rms_norm_eps"</span>: <span class="tok-num">1e-06</span>,        <span class="tok-com"># this is the ε in RMS(x)</span></span></code></pre>
+    </div>
+    <p>So on Qwen3-8B, $\varepsilon = 1\times10^{-6}$ [VP], sitting inside the square root exactly where the formula
+      puts it. No bias term appears because the learned gain $\mathbf{g}$ plus the downstream layers' own affine
+      maps make one redundant — one fewer parameter per feature, at no measured cost.</p>
+    <details class="deepdive"><summary>🔬 Deep dive: QK-Norm is an RMSNorm, and depth-scaled variants</summary><div>
+      <p>The <code>q_norm</code> / <code>k_norm</code> you'll meet assembling the block (page&nbsp;30) are just
+        RMSNorm applied to the per-head query and key vectors before the dot product — re-imposing the unit-variance
+        that the $\sqrt{d_{\text{head}}}$ scale assumed. Same operation, different tensor. And 2026 labs tune the norm
+        to depth: GLM-5 / Trinity use a <em>depth-scaled</em> RMSNorm whose effective gain accounts for how many
+        contributions have already accumulated on the bus. All of it is variations on the one formula above — the
+        bus stays the invariant.</p>
+    </div></details>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Residuals help the network remember the input."</span>
+      That forward-pass story is real but <em>secondary</em>. The load-bearing mechanism is the <b>backward</b>
+      pass: the $I$-term nothing can shrink. If you only remember the "memory" story you will not predict that
+      residuals matter <em>more</em> the deeper you go — but $0.9^{36} = 0.0225$ vs $\approx 1$ says they do.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Residuals let you make networks arbitrarily deep — deeper is better."</span>
+      They make deep networks <em>trainable</em>, not <em>better</em>. Returns diminish, and labs know it:
+      GLM-5 <em>cut</em> depth from GLM-4.7's 92 layers to 78 while widening the bus ($d$: 5120 → 6144) [V-sec] — a
+      2026 lab deciding a previous generation had overshot on depth. Trainable is not the same as optimal.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "<code>x + F(x)</code> breaks if $F$ changes the shape."</span>
+      Correct — and that is precisely <em>why</em> $d$ is held constant through the entire transformer: you cannot
+      add mismatched vectors. CNNs, whose spatial dims change, need a $1\times1$ conv on the skip to match shapes;
+      transformers never do, because the bus width is sacred.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz34"></div>
+
+    <!-- ===================== THREADS / CROSS-REFS ===================== -->
+    <div class="box key"><span class="box-title">🧵 Where this connects</span>
+      <b>[THREAD:chain-rule]</b> — the $I$-term is this thread's fourth architecture beat: derivative (p.5) →
+      backprop over TN-1 (p.14) → the RNN's decaying BPTT product (p.28) → <em>the residual's un-shrinkable
+      identity here</em>; it returns as the diffusion score on the diffusion track.
+      <b>[THREAD:Qwen3-8B]</b> — $L=36$ and <code>rms_norm_eps = 1e-6</code> join the anchor's frozen numbers,
+      climaxing at the full parameter count on <b>page&nbsp;36</b>.
+      Forward: → <b>page&nbsp;35</b> assembles the block (two clean highways, pre-norm, RMSNorm, SwiGLU) · → LoRA as
+      "a small writer on the bus" (<b>page&nbsp;40</b>). Back: ← <b>page&nbsp;28</b> (the LSTM highway) · ←
+      <b>page&nbsp;20</b> (why normalize at all).
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: the gradient highway ----
+     No-residual trace: gamma^ell (a product of decaying Jacobians, exactly the
+     page-28 RNN curve). Residual trace: the ACTUAL product  prod (1 + dF*r_ell)
+     of near-identity Jacobians, with r_ell a fixed seeded ±sequence so the run
+     is reproducible and stays O(1). When dF=0 the residual trace is exactly 1. */
+  (function () {
+    const canvas = document.getElementById("d-hw");
+    const out = document.getElementById("d-hw-out");
+    const ctrls = document.getElementById("d-hw-ctrls");
+
+    const gamma = makeCtrl(ctrls,
+      { label: "per-layer Jacobian norm γ", min: 0.5, max: 1.2, step: 0.01, value: 0.9, fmt: v => v.toFixed(2) });
+    const Lmax = makeCtrl(ctrls,
+      { label: "depth L (layers)", min: 4, max: 120, step: 1, value: 36, fmt: v => v.toFixed(0) });
+    const dF = makeCtrl(ctrls,
+      { label: "learned-update norm ‖∂F/∂x‖ (residual on)", min: 0, max: 0.5, step: 0.01, value: 0.1, fmt: v => v.toFixed(2) });
+
+    // residual on/off toggle (checkbox — makeCtrl only builds sliders)
+    const tWrap = document.createElement("div");
+    tWrap.className = "ctrl toggle";
+    tWrap.innerHTML = `<label for="d-hw-res">residual connection</label>
+      <input type="checkbox" id="d-hw-res" checked>`;
+    ctrls.appendChild(tWrap);
+    const resChk = tWrap.querySelector("input");
+
+    // deterministic ±1-ish sequence in [-1,1], seeded (mulberry32) — same every reload.
+    function seq(n) {
+      let s = 0x9e3779b9 >>> 0, a = [];
+      for (let i = 0; i < n; i++) {
+        s |= 0; s = (s + 0x6D2B79F5) | 0;
+        let t = Math.imul(s ^ (s >>> 15), 1 | s);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        a.push(((t ^ (t >>> 14)) >>> 0) / 4294967296 * 2 - 1);
+      }
+      return a;
+    }
+    const R = seq(121); // enough for Lmax=120
+
+    const NOREZ = "#e0607e", REZ = "#4f87ff";
+
+    function draw() {
+      const g = gamma.get(), L = Math.round(Lmax.get()), d = dF.get(), on = resChk.checked;
+      const p = new Plot(canvas, {
+        xmin: 1, xmax: Math.max(L, 8), ymin: 1e-8, ymax: 2, ylog: true,
+        xlabel: "layers back from the loss (ℓ)", ylabel: "|gradient reaching layer 0|"
+      });
+      p.clear(); p.grid();
+
+      // no-residual: gamma^ell
+      const xs = [], noR = [], reR = [];
+      let prod = 1;
+      for (let l = 1; l <= L; l++) {
+        xs.push(l);
+        noR.push(Math.pow(g, l));
+        prod *= (1 + d * R[l - 1]);       // real product of (I + ∂F) magnitudes
+        reR.push(Math.abs(prod));
+      }
+      p.trace(xs, noR, NOREZ, 2.6);
+      if (on) p.trace(xs, reR, REZ, 2.6);
+      p.hline(1, "#7a8bad", [4, 4]);       // "no loss" reference at 1
+      // detents at the two anchor depths
+      if (L >= 36) p.vline(36, "#6b7a9c", [2, 3]);
+      if (L >= 78) p.vline(78, "#6b7a9c", [2, 3]);
+
+      const noEnd = Math.pow(g, L);
+      const reEnd = Math.abs(reR[reR.length - 1]);
+      const fold = reEnd / noEnd;
+      if (on) {
+        out.innerHTML =
+          `at L = <b>${L}</b>: plain stack passes <b style="color:${NOREZ}">${eng(noEnd)}</b> ` +
+          `(γ<sup>${L}</sup>) · residual passes <b style="color:${REZ}">${reEnd.toFixed(3)}</b> · ` +
+          `<b>${eng(fold)}×</b> more gradient with the highway.`;
+      } else {
+        out.innerHTML =
+          `residual <b>off</b> — at L = <b>${L}</b> the plain stack passes only ` +
+          `<b style="color:${NOREZ}">${eng(noEnd)}</b> of the gradient home (γ<sup>${L}</sup>). ` +
+          (noEnd < 1e-6 ? "That is effectively zero: the bottom layers never learn." :
+            "Toggle the residual on and watch it snap back to ≈ 1.");
+      }
+    }
+
+    gamma.onInput(draw); Lmax.onInput(draw); dF.onInput(draw);
+    resChk.addEventListener("change", draw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz34", [
+    {
+      q: "A 36-layer plain stack with per-layer Jacobian norm $\\gamma = 0.9$. What fraction of the layer-36 gradient reaches layer 0? Compute $0.9^{36}$.",
+      num: 0.0225, tol: 0.001,
+      why: "$0.9^{36} = 0.0225$ — only 2.25% survives. A 'healthy' 0.9 compounded 36 times still discards 97.75% of the gradient; the residual restores it to $\\approx 1$ (a 44× improvement)."
+    },
+    {
+      q: "The <i>primary</i> reason a residual connection helps training is:",
+      opts: [
+        "The forward pass carries the input forward, so the network 'remembers' it",
+        "The backward pass gets an $I$-term in every layer's Jacobian that nothing can shrink",
+        "It adds parameters, increasing capacity",
+        "It normalizes the activations at each layer"
+      ],
+      a: 1,
+      why: "The 'remembers the input' story is real but secondary (misconception trap #1). The load-bearing mechanism is the backward pass: $\\partial\\mathbf{y}/\\partial\\mathbf{x} = I + \\partial F/\\partial\\mathbf{x}$ gives an un-shrinkable path from loss to layer 0."
+    },
+    {
+      q: "Why is the width $d = 4096$ held constant through the entire transformer?",
+      opts: [
+        "So the attention heads all have the same size",
+        "It's an arbitrary hyperparameter that happens to be fixed",
+        "The residual stream is a shared bus, and you can only add vectors of matching shape",
+        "To keep the parameter count round"
+      ],
+      a: 2,
+      why: "$\\mathbf{y} = \\mathbf{x} + F(\\mathbf{x})$ requires $\\mathbf{x}$ and $F(\\mathbf{x})$ to share a shape. The bus width is sacred; that is why $d$ never changes (misconception trap #3)."
+    },
+    {
+      q: "Every 2026 frontier model places its normalization as:",
+      opts: [
+        "Post-norm: $\\text{norm}(\\mathbf{x} + F(\\mathbf{x}))$ — a norm on the residual path",
+        "Pre-norm: $\\mathbf{x} + F(\\text{norm}(\\mathbf{x}))$ — the residual path stays clean",
+        "No normalization at all",
+        "Alternating pre- and post-norm by layer"
+      ],
+      a: 1,
+      why: "Pre-norm normalizes only the input to $F$, leaving the outer $+\\,\\mathbf{x}$ (and its $I$-term highway) untouched. Post-norm wraps a norm around the sum and destabilizes past ~12 layers — a settled question."
+    },
+    {
+      q: "Qwen3-8B's <code>rms_norm_eps</code> — the $\\varepsilon$ inside $\\text{RMS}(\\mathbf{x})$ — is:",
+      num: 1e-6, tol: 0,
+      unit: "",
+      why: "Straight from config.json: $\\varepsilon = 1\\times10^{-6}$ [VP]. It sits inside the square root as the stability floor so a near-zero vector doesn't divide by zero."
+    },
+    {
+      q: "Your 40-layer from-scratch transformer refuses to train without a long LR warmup and diverges anyway. The most likely fix:",
+      opts: [
+        "Add more layers so it has more capacity",
+        "Remove the residual connections to simplify the gradient",
+        "You used post-norm — switch to pre-norm so the residual highway stays clean",
+        "Switch from RMSNorm to LayerNorm"
+      ],
+      a: 2,
+      why: "Post-LN puts a norm on the residual path and goes unstable past ~12 layers (this is misconception 'deeper is fine' meeting the pre/post-norm reality). Pre-norm keeps the $I$-term clean and trains at 36/78/100+ layers."
+    }
+  ], "Residuals & the residual stream — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,500 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>18. The Memory Ledger — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the ledger tables carry per-component byte breakdowns wider than
+   a phone. Let each scroll inside its own box on narrow screens so the page body
+   never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* Legend chips for the memory-calculator demo. */
+.memleg { display:flex; flex-wrap:wrap; gap:6px 16px; margin-top:12px; font-size:.82rem; }
+.memleg span { display:inline-flex; align-items:center; gap:6px; color:var(--text-dim); }
+.memleg i { width:13px; height:13px; border-radius:3px; display:inline-block; }
+.capbox { margin:10px 0 2px; font-size:.9rem; }
+.capbox input { width:7.5em; padding:4px 7px; border-radius:6px; border:1px solid var(--plot-border,#3b4a6b);
+  background:transparent; color:inherit; font:inherit; }
+</style>
+</head>
+<body data-page="18-memory-ledger.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns · ⭐ The Memory Ledger</span>
+    <h1>The Memory Ledger: 16 Bytes per Parameter, and Does It Fit on YOUR Box?</h1>
+    <p class="subtitle">Backprop (page&nbsp;14) makes one gradient per weight; page&nbsp;15 showed why you also keep
+      an fp32 master copy; page&nbsp;17 named Adam's two moment buffers. This page adds them up into one number —
+      the memory a full fine-tune actually costs — and then dares you to measure whether your own machine can hold
+      it.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:MEM — the reality check]</b> · <b>[THREAD:QWEN]</b>. This is the reality-check thread's home page.
+      Every earlier beat pointed here: page&nbsp;14's cached activations (BP3), page&nbsp;15's fp32 master weights,
+      page&nbsp;17's Adam <span style="white-space:nowrap">$m,v$</span>. We turn them into a ledger, price it on our
+      anchor model Qwen3-8B, and hold the result against hardware you own. The rule the whole page enforces:
+      <b>you do not get to assume how much memory you have — you measure it.</b>
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: resolved by (a) the computed 122.05 GiB need stated
+         plainly below, and (b) the demo computing FITS/OOM live from HIS measured
+         MemTotal. The page must NOT assert his usable number (predict-then-measure,
+         D-04 / constants §6.8). Do NOT state the fit answer above this line. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You are about to compute how much memory a <b>full</b> AdamW fine-tune of Qwen3-8B needs. Your box was sold as
+      <b>128&nbsp;GB</b>. Before you run anything, commit to an answer: <b>does it fit?</b> Write the numbers in
+      <b>GiB</b>, not GB — the two differ by 7%, and that gap is where this whole page lives. Then, further down, run
+      the script and read your machine's <em>actual</em> usable memory off your own screen. Hold your guess until
+      then.
+    </div>
+
+    <!-- ===================== BYTES PER PARAM ===================== -->
+    <h2>Why one parameter costs sixteen bytes</h2>
+    <p>A parameter is one number. Naively you would think training it costs the size of that number — 2&nbsp;bytes in
+      bf16. It costs eight times that, and every row of the reason is something you have already met.</p>
+
+    <div class="box rule"><span class="box-title">📐 The 16-bytes-per-parameter ledger (bf16 mixed precision + AdamW)</span>
+      <table class="ledger">
+        <thead><tr><th>Item</th><th>Precision</th><th>B/param</th><th>Why it exists</th></tr></thead>
+        <tbody>
+          <tr><td>weights</td><td>bf16</td><td>2</td><td>what the GPU computes the forward pass with</td></tr>
+          <tr><td>gradients</td><td>bf16</td><td>2</td><td>backprop (p.14) produces exactly one per weight — same shape as the weight</td></tr>
+          <tr><td>fp32 master weights</td><td>fp32</td><td>4</td><td>bf16 has 7 mantissa bits; a $2\times10^{-5}$ update to an $O(1)$ weight rounds to <b>zero</b> (p.15's float reality) — so the real weight lives in fp32</td></tr>
+          <tr><td>Adam $m$</td><td>fp32</td><td>4</td><td>first moment — the momentum buffer (p.17)</td></tr>
+          <tr><td>Adam $v$</td><td>fp32</td><td>4</td><td>second moment — the per-parameter scale (p.17)</td></tr>
+          <tr><td><b>TOTAL</b></td><td></td><td><b>16</b></td><td><b>memorize $16P$</b></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0"><b>[THREAD:CHAIN]</b> callback: the gradient and fp32-master rows are not
+        arbitrary. Backprop <em>made</em> the gradients (one per weight, page&nbsp;14), and the float-that-isn't-zero
+        (page&nbsp;15) is <em>why</em> the master copy has to be fp32 — a bf16 master would silently swallow every
+        small update. The ledger is the memory shadow of the last four pages. Confidence: <b>[DER]</b>,
+        <code>constants.md</code> §2.1.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "16 B/param? I've read it's 4× the model, and also 8×. Which?"</span>
+      <b>Both, and they are the same 16 bytes</b> — a reader who skims two blog posts hits this apparent
+      contradiction. 16&nbsp;B/param is <b>4×</b> the <em>fp32</em> weight size (4&nbsp;B/param) <em>and</em>
+      <b>8×</b> the <em>bf16</em> weight size (2&nbsp;B/param). Different denominators, one footprint. State which
+      baseline you mean and the paradox evaporates.
+    </div>
+
+    <!-- ===================== THE NUMBER ===================== -->
+    <h2>The number: pricing Qwen3-8B</h2>
+    <p>Qwen3-8B has exactly <b>8,190,735,360</b> parameters (page&nbsp;36 counts every one; the checkpoint's own
+      safetensors index confirms it to the byte). Multiply by 16:</p>
+
+    <div class="box worked"><span class="box-title">✍️ Full-FT state of Qwen3-8B</span>
+      <p>$$8{,}190{,}735{,}360 \times 16\ \text{B} = 131{,}051{,}765{,}760\ \text{B}
+        = \underbrace{131.05\ \text{GB}}_{\text{decimal},\ /10^9}
+        = \underbrace{122.05\ \text{GiB}}_{\text{binary},\ /2^{30}}$$</p>
+      <table class="ledger">
+        <thead><tr><th>Component</th><th>B/param</th><th>Size (GB)</th></tr></thead>
+        <tbody>
+          <tr><td>weights (bf16)</td><td>2</td><td>16.38</td></tr>
+          <tr><td>gradients (bf16)</td><td>2</td><td>16.38</td></tr>
+          <tr><td>fp32 master</td><td>4</td><td>32.76</td></tr>
+          <tr><td>Adam $m$</td><td>4</td><td>32.76</td></tr>
+          <tr><td>Adam $v$</td><td>4</td><td>32.76</td></tr>
+          <tr><td><b>total</b></td><td><b>16</b></td><td><b>131.05</b></td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0"><b>Look at what dominates.</b> Adam's two moment buffers alone — $m + v$, the
+        8&nbsp;B/param of optimizer moments — come to <b>65.53&nbsp;GB</b>, <b>exactly half</b> the entire footprint
+        (8 of the 16 bytes). Each single buffer (32.76&nbsp;GB) is <em>twice the size of the model's weights</em>
+        (16.38&nbsp;GB). The thing you are training is a minority of what you are storing. <b>[DER]</b>,
+        <code>constants.md</code> §2.2.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ This is STATE only — activations are a separate line, always</span>
+      The 131.05&nbsp;GB above is weights + gradients + optimizer state. It does <b>not</b> include
+      <b>activations</b> — the forward values BP3 caches to compute weight gradients (page&nbsp;14's memory villain).
+      Those are a <em>separate, separately-labelled</em> line: <b>[EST]</b> roughly <b>2–6&nbsp;GB</b> at batch&nbsp;1,
+      sequence&nbsp;2048 <em>with</em> gradient checkpointing, and far more without it. It is an estimate — this
+      course has you measure it, never quotes it as a fact. Never fold activations silently into the state number.
+      <b>[THREAD:MEM]</b>
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Units discipline — do not mix GB and GiB in one comparison</span>
+      Anything you compare against <b>hardware capacity</b> is <b>GiB</b> ($2^{30}$ B); a weight or optimizer figure
+      quoted <b>on its own</b> is <b>GB</b> ($10^9$ B). $1\,\text{GiB} = 1.0737\,\text{GB}$. So "131.05&nbsp;GB of
+      state" is correct, and to ask whether it fits your box you first convert to <b>122.05&nbsp;GiB</b> and compare
+      <em>that</em> to the machine's GiB. The single most expensive arithmetic error in this whole subject is a
+      GB/GiB mismatch. <code>constants.md</code> §0.
+    </div>
+
+    <!-- ===================== MEASURE ===================== -->
+    <h2>Now stop computing and measure</h2>
+    <p>You have the need: <b>122.05&nbsp;GiB</b> of state. The obvious next step is to compare it to your box's
+      128&nbsp;GB — <em>and that is the trap.</em> "128&nbsp;GB" is the number on the box, not the number the
+      allocator hands you. Firmware and driver reserve a slice before you touch it, and that slice is invisible and
+      unpublished. So we refuse to assert your budget. You measure it.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/measure_your_box.py --no-gpu</code> (it ships in <code>code/</code>, installs nothing, reads
+      no weights). Step&nbsp;1 prints your <code>MemTotal</code> in B / GB / GiB and your <code>MemAvailable</code>,
+      then prints this page's question and a <b>FITS / DOES NOT FIT</b> verdict computed against 122.05&nbsp;GiB
+      <em>from your number, live</em>. Read the verdict off your own screen before you read the next paragraph.
+      <div class="codeblock" data-lang="bash">
+        <div class="codeblock-head"><span class="lang-tag">bash</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">python code/measure_your_box.py --no-gpu</span></code></pre>
+      </div>
+    </div>
+
+    <p>Whatever it said, notice the shape of the answer. The state you computed by hand is <b>122.05&nbsp;GiB</b>.
+      A machine advertised at 128&nbsp;<em>GiB</em> of usable memory would clear it with 5.95&nbsp;GiB to spare —
+      but <b>published capacity is never usable capacity</b>. The spec sheet is off by a firmware carveout of a few
+      percent before you allocate a single byte, and 122.05 is close enough to the ceiling that a few percent is the
+      whole story. That is why this page has you read your own <code>MemTotal</code> rather than trusting a marketing
+      figure — and why the answer to the predict is, honestly, <b>"measure it, then decide"</b>: the demo below
+      lands the verdict on <em>your</em> number, not ours.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "128 GB is what I have."</span>
+      Measure it. Usable <code>MemTotal</code> is materially less than the advertised figure, and the difference —
+      a firmware/driver carveout — is invisible until you look. A course that told a man with the hardware in front
+      of him what his hardware has is a course that gets caught. The number is yours to read.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>The memory calculator</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the parameter count and watch the ledger rebuild live. Switch the <b>method</b> and watch the bar
+      collapse. Enter your measured <code>MemTotal</code> (from the script above) to drop in a capacity line and get
+      a live FITS/OOM verdict. <em>Aha:</em> snap to Qwen3-8B in <b>Full AdamW</b> and the bar tops out at
+      122.05&nbsp;GiB of state; switch to <b>LoRA</b> and the trainable state all but vanishes — while the base
+      weights and the activation band <b>do not move</b>.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Memory ledger · live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-mem" height="340"></canvas>
+        <div class="memleg" id="d-mem-leg"></div>
+        <div class="controls" id="d-mem-ctrls"></div>
+        <div class="capbox">
+          Your measured <code>MemTotal</code> (GiB, from the script — leave blank until you run it):
+          <input type="number" id="d-mem-cap" step="0.01" min="0" placeholder="e.g. 121.69">
+          <button class="btn secondary" id="d-mem-snap" type="button">Snap to Qwen3-8B</button>
+        </div>
+        <div class="readout" id="d-mem-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== ESCAPE LADDER ===================== -->
+    <h2>The escape ladder</h2>
+    <p>If full state does not fit — and on an 8B model against a real budget, it is a near-miss — you climb down a
+      ladder, trading optimizer fidelity for bytes. Each rung is a real technique with its own later page.</p>
+
+    <div class="box rule"><span class="box-title">📐 What each method costs on Qwen3-8B <b>[DER]</b>, <code>constants.md</code> §2.3</span>
+      <table class="ledger">
+        <thead><tr><th>Method</th><th>B/param</th><th>State (GB / GiB)</th><th>vs a real ~122 GiB budget</th></tr></thead>
+        <tbody>
+          <tr><td>Full, AdamW mixed</td><td>16</td><td>131.05 GB / 122.05 GiB</td><td>razor-thin — the near-miss you just measured</td></tr>
+          <tr><td>Full, 8-bit Adam</td><td>10</td><td>81.91 GB / 76.28 GiB</td><td>fits</td></tr>
+          <tr><td><b>LoRA r=16, all-linear</b></td><td>see §3</td><td><b>17.08 GB / 15.91 GiB</b></td><td>fits, comfortably (7.67×)</td></tr>
+          <tr><td>QLoRA r=16 (NF4 base)</td><td>see §3</td><td>~4.9–7 GB / ~4.6 GiB</td><td>fits, huge headroom (19–26×)</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">Full → LoRA is <b>131.05&nbsp;GB → 17.08&nbsp;GB = 7.67×</b> on total footprint.
+        But the sharper sentence is about the <em>trainable state</em> alone (gradients + master + $m$ + $v$, the
+        14&nbsp;B/param that scales with what you train): <b>114.67&nbsp;GB → 0.61&nbsp;GB = 187×</b> — and
+        <b>187 is exactly the parameter ratio</b> $8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$, because optimizer
+        state is linear in trainable parameters.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 LoRA compresses optimizer state, not the model</span>
+      LoRA is not a model compression technique. LoRA is an <b>optimizer-state compression technique</b>. The base
+      model didn't shrink — all 16.38&nbsp;GB of it is still resident. The trainable state shrank by 187×, which is
+      exactly $8{,}190{,}735{,}360 \div 43{,}646{,}976$, because optimizer state is linear in trainable parameters.
+      That's the whole trick. (The full LoRA math is a later trunk page; this is the foreshadow — hold the 187×.)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "LoRA shrinks the model / saves activation memory."</span>
+      Neither. LoRA <b>freezes</b> the weights but still <b>backprops through the entire network</b> — the graph is
+      the same length, so the activation cache (page&nbsp;14's BP3) is <em>unchanged</em> between full FT and LoRA at
+      the same batch and sequence length. That is why, in the demo, switching to LoRA leaves the activation band
+      exactly where it was. What LoRA collapses is optimizer state, by 187×. A learner who measures LoRA's real
+      footprint finds it sitting above 17.08&nbsp;GB by precisely the activation term — and now you knew first.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Adam's state is a minor overhead."</span>
+      It is <b>50%</b> of the full-FT footprint: $m + v$ = 65.53&nbsp;GB of the 131.05&nbsp;GB total. Each moment
+      buffer alone is 4× the bf16 model. Optimizer state is not a rounding error on the weights — on a full
+      fine-tune it <em>is</em> the memory.
+    </div>
+
+    <!-- ===================== LR PRINCIPLE ===================== -->
+    <div class="box rule"><span class="box-title">📐 A principle both tracks reuse: fewer trainable params ⇒ higher learning rate</span>
+      The ledger's denominator — how many parameters you actually train — sets more than memory; it sets the
+      learning rate. Full FT moves all 8.19&nbsp;billion parameters, which already encode everything the model
+      knows, so you tiptoe: $\eta \approx 1$–$2\times10^{-5}$. The fewer you train, the harder you can push each one:
+      textual inversion trains ~768 numbers at $\eta \approx 5\times10^{-4}$–$5\times10^{-3}$; an LLM LoRA runs
+      $10^{-4}$–$3\times10^{-4}$; a diffusion LoRA runs $\eta \approx 10^{-4}$ — <b>not</b> the $10^{-6}$ full-FT
+      figure (that 100× confusion is a classic trap). One ledger, two consequences: bytes <em>and</em> step size.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why gradients accumulate by default, and how that becomes a memory trick</summary><div>
+      <p>Page&nbsp;15's <code>zero_grad()</code> lesson has a memory sequel. PyTorch <em>accumulates</em> gradients
+        into <code>.grad</code> by default rather than overwriting — that is why you must zero them each step. But
+        the same behaviour is a deliberate tool: run several small micro-batches, call <code>.backward()</code> on
+        each without zeroing, and their gradients sum into one large effective batch — then step once. This is
+        <b>gradient accumulation</b>, and it lets you train at a large effective batch size while only ever holding
+        <em>one</em> micro-batch of activations in memory. The activation cache is the term that scales with batch
+        size, so trading batch-as-one-shot for batch-as-accumulation is a pure memory win. The optimizer-state rows
+        of the ledger are unchanged; only the activation line shrinks. It is the same accumulation semantics from
+        page&nbsp;15, read as a budget lever. <b>[THREAD:MEM]</b></p>
+    </div></details>
+
+    <!-- ===================== FORESHADOW ===================== -->
+    <p>Two numbers on this page are promissory notes. The <b>187×</b> reopens on the trunk LoRA and SVD pages, where
+      "rank follows the dataset" turns the parameter ratio into a design choice. And the compute half of
+      <code>measure_your_box.py</code> — the one we did not run here — comes back on page&nbsp;43 to find your box's
+      <em>roofline</em>: the ridge where a workload flips from memory-bound to compute-bound. We only foreshadow it;
+      like your memory budget, the roofline is something you will <em>measure</em>, not assume.</p>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz18"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---------------- DEMO: the memory calculator ----------------
+     Every number is computed live from the ledger — nothing precomputed.
+     Bytes are computed in decimal (÷1e9 = GB); the capacity comparison is in
+     GiB (÷2^30), because capacity is a hardware quantity (constants §0). */
+  (function () {
+    const QWEN_P = 8190735360;               // exact, constants §1.2
+    const QWEN_ADAPTERS = 43646976;          // LoRA r=16 all-linear, constants §3
+    const ADAPTER_RATIO = QWEN_ADAPTERS / QWEN_P;   // 0.005329
+    const QWEN_LOG = Math.log10(QWEN_P);     // 9.9133...
+    const NF4_BPP = 0.515869;                // constants §3
+    const B2GiB = 1 / (2 ** 30);
+    const B2GB = 1 / 1e9;
+
+    const canvas = document.getElementById("d-mem");
+    const out = document.getElementById("d-mem-out");
+    const legEl = document.getElementById("d-mem-leg");
+    const capInput = document.getElementById("d-mem-cap");
+
+    // theme-aware colours (read live so the toggle retints on redraw)
+    const C = {
+      weights: () => vizUtils.cssVar("--accent", "#b48cff"),
+      grads:   () => vizUtils.cssVar("--good", "#5ce6a0"),
+      master:  () => "#f5a742",
+      m:       () => "#4fc3f7",
+      v:       () => "#e06ea8",
+      state:   () => "#4fc3f7",   // combined trainable state (LoRA/QLoRA)
+      act:     () => "#ff6b6b",
+      base:    () => vizUtils.cssVar("--accent", "#b48cff"),
+    };
+
+    const METHODS = ["Full AdamW (16 B/param)", "8-bit Adam (10 B/param)",
+                     "LoRA r=16 (base + adapters)", "QLoRA r=16 (NF4 base + adapters)"];
+
+    const pCtrl = makeCtrl(document.getElementById("d-mem-ctrls"), {
+      label: "parameters P", min: 8.7, max: 10.85, step: 0.001, value: QWEN_LOG,
+      fmt: v => eng(Math.pow(10, v), "", 3).replace(/ $/, "")
+    });
+    const mCtrl = makeCtrl(document.getElementById("d-mem-ctrls"), {
+      label: "method", min: 0, max: 3, step: 1, value: 0, fmt: v => METHODS[v]
+    });
+    const sCtrl = makeCtrl(document.getElementById("d-mem-ctrls"), {
+      label: "sequence length (activation [EST])", min: 512, max: 8192, step: 256, value: 2048,
+      fmt: v => v + " tok"
+    });
+
+    let snap = true;   // when true, P is pinned to the exact Qwen3-8B integer
+
+    // Activation estimate [EST]: anchored at Qwen3-8B, S=2048, ckpt on -> 4 GB
+    // (midpoint of the 2-6 GB band). Scales ~linearly in P and S. Labelled [EST].
+    function actGB(P, S) {
+      const a = 4.0 * (P / QWEN_P) * (S / 2048);
+      return Math.min(60, Math.max(0.2, a));
+    }
+
+    // Return the stacked segments (in GB) for a given P, method, S.
+    function ledger(P, method, S) {
+      const segs = [];
+      const a = actGB(P, S);
+      if (method === 0) {           // Full AdamW: 2+2+4+4+4
+        segs.push({ k: "weights", label: "weights (bf16, 2)", gb: P * 2 * B2GB, c: C.weights() });
+        segs.push({ k: "grads", label: "gradients (bf16, 2)", gb: P * 2 * B2GB, c: C.grads() });
+        segs.push({ k: "master", label: "fp32 master (4)", gb: P * 4 * B2GB, c: C.master() });
+        segs.push({ k: "m", label: "Adam m (4)", gb: P * 4 * B2GB, c: C.m() });
+        segs.push({ k: "v", label: "Adam v (4)", gb: P * 4 * B2GB, c: C.v() });
+      } else if (method === 1) {    // 8-bit Adam: 2+2+4 + ~2 (quantized m+v)
+        segs.push({ k: "weights", label: "weights (bf16, 2)", gb: P * 2 * B2GB, c: C.weights() });
+        segs.push({ k: "grads", label: "gradients (bf16, 2)", gb: P * 2 * B2GB, c: C.grads() });
+        segs.push({ k: "master", label: "fp32 master (4)", gb: P * 4 * B2GB, c: C.master() });
+        segs.push({ k: "state", label: "8-bit m+v (~2)", gb: P * 2 * B2GB, c: C.state() });
+      } else if (method === 2) {    // LoRA: base bf16 weights + 16 B/param on adapters
+        const tr = P * ADAPTER_RATIO;
+        segs.push({ k: "base", label: "base weights (bf16, frozen)", gb: P * 2 * B2GB, c: C.base() });
+        segs.push({ k: "state", label: "adapter state (16 B/trainable)", gb: tr * 16 * B2GB, c: C.state() });
+      } else {                      // QLoRA: NF4 base + 16 B/param on adapters
+        const tr = P * ADAPTER_RATIO;
+        segs.push({ k: "base", label: "base weights (NF4, frozen)", gb: P * NF4_BPP * B2GB, c: C.base() });
+        segs.push({ k: "state", label: "adapter state (16 B/trainable)", gb: tr * 16 * B2GB, c: C.state() });
+      }
+      // activations: SAME on every method (LoRA does NOT save activation memory)
+      segs.push({ k: "act", label: "activations [EST]", gb: a, c: C.act(), est: true });
+      return segs;
+    }
+
+    function currentP() {
+      return snap ? QWEN_P : Math.pow(10, pCtrl.get());
+    }
+
+    function draw() {
+      const P = currentP();
+      const method = Math.round(mCtrl.get());
+      const S = sCtrl.get();
+      const segs = ledger(P, method, S);
+      const stateGB = segs.filter(s => s.k !== "act").reduce((t, s) => t + s.gb, 0);
+      const actGBv = segs.find(s => s.k === "act").gb;
+      const totalGB = stateGB + actGBv;
+      const stateGiB = stateGB * 1e9 * B2GiB;
+      const totalGiB = totalGB * 1e9 * B2GiB;
+
+      const capRaw = parseFloat(capInput.value);
+      const cap = isFinite(capRaw) && capRaw > 0 ? capRaw : null;
+
+      // y-axis in GiB (hardware comparison). Segments drawn in GiB.
+      const ymax = Math.max(totalGiB * 1.15, cap ? cap * 1.12 : 0, 20);
+      const p = new Plot(canvas, { xmin: -1, xmax: 1, ymin: 0, ymax, ylabel: "memory (GiB)" });
+      p.clear();
+      p.grid(null, undefined);
+      const g = p.g;
+      const cx = p._tx(0), halfW = (p._tx(0.42) - p._tx(-0.42)) / 2;
+      let acc = 0;
+      for (const s of segs) {
+        const gib = s.gb * 1e9 * B2GiB;
+        const y0 = p._ty(acc), y1 = p._ty(acc + gib);
+        g.fillStyle = s.c;
+        g.fillRect(cx - halfW, y1, 2 * halfW, y0 - y1);
+        if (s.est) {  // hatch the activation estimate so it reads as "not a hard fact"
+          g.save(); g.globalAlpha = 0.35; g.strokeStyle = "#1a1f2e"; g.lineWidth = 2;
+          for (let xx = cx - halfW; xx < cx + halfW; xx += 7) {
+            g.beginPath(); g.moveTo(xx, y0); g.lineTo(xx + (y0 - y1), y1); g.stroke();
+          }
+          g.restore();
+        }
+        acc += gib;
+      }
+      // capacity line + verdict
+      if (cap) {
+        p.hline(cap, C.act(), [6, 4]);
+        g.fillStyle = C.act(); g.font = "12px Consolas, monospace"; g.textAlign = "left";
+        g.fillText("your MemTotal " + cap.toFixed(2) + " GiB", p._tx(-0.95) + 4, p._ty(cap) - 6);
+      }
+
+      // Readout. To honour the sig-fig policy (pilot §6b.4), only the EXACT
+      // Qwen3-8B / Full-AdamW state has a frozen counterpart (122.05 GiB); show it
+      // at 2 d.p. exactly there. Off-anchor P has no frozen value to contradict.
+      let msg = `state <b>${stateGB.toFixed(2)} GB</b> / ` +
+                `<b>${stateGiB.toFixed(2)} GiB</b> &nbsp;·&nbsp; + activations [EST] ` +
+                `<b>${actGBv.toFixed(1)} GB</b> &nbsp;→&nbsp; total <b>${totalGiB.toFixed(2)} GiB</b>`;
+      if (cap) {
+        const fits = totalGiB <= cap;
+        const slack = cap - totalGiB;
+        msg += `<br><b style="color:${fits ? C.grads() : C.act()}">` +
+               `${fits ? "FITS" : "DOES NOT FIT"}</b> — ` +
+               `${fits ? "+" : ""}${slack.toFixed(2)} GiB against your ${cap.toFixed(2)} GiB ` +
+               `(state alone: ${(cap - stateGiB >= 0 ? "+" : "")}${(cap - stateGiB).toFixed(2)} GiB)`;
+      } else {
+        msg += `<br><span style="color:var(--text-dim)">enter your measured MemTotal above for a live FITS/OOM verdict — don't hard-code 128</span>`;
+      }
+      out.innerHTML = msg;
+
+      // legend
+      legEl.innerHTML = segs.map(s =>
+        `<span><i style="background:${s.c}"></i>${s.label}</span>`).join("");
+    }
+
+    pCtrl.onInput(() => { snap = false; draw(); });
+    mCtrl.onInput(draw);
+    sCtrl.onInput(draw);
+    capInput.addEventListener("input", draw);
+    document.getElementById("d-mem-snap").addEventListener("click", () => {
+      snap = true; pCtrl.input.value = QWEN_LOG; pCtrl.input.dispatchEvent(new Event("input"));
+      // dispatch set snap=false via pCtrl.onInput; restore it:
+      snap = true; draw();
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz18", [
+    {
+      q: "The full-FT state (weights + grads + optimizer) of Qwen3-8B, in GiB, is:",
+      num: 122.05, tol: 0.1, unit: "GiB",
+      why: "$8{,}190{,}735{,}360 \\times 16\\,\\text{B} = 131{,}051{,}765{,}760\\,\\text{B} = 122.05\\,\\text{GiB}$ (dividing by $2^{30}$, because it will be compared to hardware capacity)."
+    },
+    {
+      q: "Bytes per parameter for bf16 mixed-precision training with AdamW:",
+      num: 16, tol: 0,
+      why: "weights 2 + gradients 2 + fp32 master 4 + Adam $m$ 4 + Adam $v$ 4 = 16. Answering 8 forgets the fp32 master and one of the moment buffers."
+    },
+    {
+      q: "Adam's two moment buffers $m + v$ are what share of the full-FT footprint?",
+      num: 50, tol: 2, unit: "%",
+      why: "$m+v = 8$ of the 16 B/param = exactly half; 65.53 GB of the 131.05 GB total. Each single buffer (32.76 GB) is already twice the bf16 model."
+    },
+    {
+      q: "Going full fine-tune → LoRA r=16, the trainable optimizer state shrinks by a factor of about:",
+      num: 187, tol: 2, unit: "×",
+      why: "114.67 GB → 0.61 GB = 187×, which is exactly the parameter ratio $8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$ — optimizer state is linear in trainable params. (224× is a retired, mismatched figure.)"
+    },
+    {
+      q: "The 131.05 GB / 122.05 GiB ledger figure includes which of these?",
+      opts: [
+        "Weights, gradients, and optimizer state — but NOT activations (those are a separate [EST] line)",
+        "Everything including activations at sequence 2048",
+        "Only the optimizer state ($m$, $v$, master)",
+        "Weights and activations, but not gradients"
+      ],
+      a: 0,
+      why: "The ledger is state-only. Activations (BP3's forward cache, page 14) are a separate, separately-labelled [EST] line — 2–6 GB with checkpointing — never folded in silently."
+    },
+    {
+      q: "What does LoRA actually compress?",
+      opts: [
+        "The optimizer state (trainable params drop 187×) — the base model stays fully resident",
+        "The model weights, which shrink to a small adapter",
+        "The activation memory, by freezing the forward pass",
+        "The gradient precision, from fp32 to bf16"
+      ],
+      a: 0,
+      why: "LoRA is optimizer-state compression, not model compression. All 16.38 GB of base weights stay resident, and activations are unchanged because you still backprop the full graph — only the trainable state shrinks, by exactly the 187× parameter ratio."
+    },
+    {
+      q: "Why does this page make you MEASURE your usable memory instead of using the 128 GB spec?",
+      opts: [
+        "Published capacity is never usable capacity — a firmware/driver carveout is invisible and unpublished",
+        "The 128 GB figure is wrong on the box and should read 131 GB",
+        "torch reports memory in GB while the OS uses GiB, so they always disagree by 7%",
+        "Measuring frees up memory that the spec sheet reserves"
+      ],
+      a: 0,
+      why: "Advertised memory is reserved-against before you allocate a byte; the carveout is unpublished, so the only honest budget is the one you read from your own MemTotal. Against a full-FT need of 122.05 GiB, a few percent decides the outcome."
+    }
+  ], "The memory ledger — self-check");
+
+});
+</script>
+</body>
+</html>

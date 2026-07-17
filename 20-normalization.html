@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>20. Normalization: The Only Question Is Which Axis — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the flagship demo pairs a heatmap (the axis question) with a
+   gradient-through-depth plot (the pre/post-norm consequence). Side by side on
+   a wide screen, stacked on a phone. Wide ledgers scroll inside their own box
+   so the page body never scrolls sideways. */
+.nx-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.nx-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.nx-btns .btn.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.nx-ribbon { font-family: var(--mono, monospace); font-size: .82rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); }
+@media (max-width: 780px) {
+  .nx-grid { grid-template-columns: 1fr; }
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="20-normalization.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Normalization: The Only Question Is Which Axis</h1>
+    <p class="subtitle">Page 19 set the per-stage gain to ~1 <em>before</em> a single data point arrives — at
+      initialization. But training moves the weights, and the gain drifts. Normalization is the operation that
+      holds the signal well-conditioned <em>during</em> training. There look to be three of them —
+      BatchNorm, LayerNorm, RMSNorm — and the whole apparent zoo collapses to one question: <b>which axis do you
+      reduce over?</b></p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:QWEN — beat]</b>. The anchor model uses RMSNorm with <code>rms_norm_eps = 1e-6</code>
+      (<code>constants.md</code> §1.1). <em>What is new here:</em> we open the config line and derive <em>why</em>
+      that operation is the one Qwen3 ships. <em>Reopen:</em> page 19's residual highway — the un-normalised
+      $+\mathbf{x}$ path that keeps the gradient magnitude ~1 through any depth. This page decides whether the
+      norm sits <em>on</em> that highway or beside it, and that bracket is the whole game.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in the "The three, precisely" section (RMSNorm
+         drops mean subtraction), stated again in the worked example, and landed in
+         the heatmap demo (RMSNorm leaves every row's mean nonzero). -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      LayerNorm and RMSNorm both stabilise activations, and RMSNorm is the one modern LLMs actually use. Yet
+      RMSNorm does <em>strictly less</em> arithmetic than LayerNorm. Before you scroll: <b>what single operation
+      does RMSNorm drop</b> — and why can it get away with it?
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>What normalization is for</h2>
+    <p>Page 19 gave you a picture: a deep network is a hundred-stage amplifier, and the per-stage gain $g$ has to
+      sit at ~1 or the signal explodes ($1.1^{100}=13{,}781$) or vanishes ($0.9^{100}=2.7\times10^{-5}$).
+      Initialization sets that gain once, at step $k=0$. Then the optimizer starts moving the weights, and nothing
+      guarantees the gain stays put. A layer that was seeing a well-scaled input at initialization can, fifty steps
+      later, be fed activations that are ten times too large or a tenth too small.</p>
+    <p>Normalization is the fix that acts <em>every forward pass</em>. It re-scales (and sometimes re-centres) each
+      layer's input so the next layer always sees a well-conditioned signal — the per-stage gain is pinned at ~1
+      not just at init but throughout training. That is the entire job. Everything below is bookkeeping about which
+      numbers you average to do it.</p>
+
+    <!-- ===================== THE THREE ===================== -->
+    <h2>The three normalizers, precisely — and the one difference between them</h2>
+    <p>Take a batch of activations $X$ with shape <code>(B, …, d)</code>: $B$ examples, each a $d$-dimensional
+      feature vector. There are two axes you could average over — <b>down the batch</b> (one statistic per feature)
+      or <b>across the features</b> (one statistic per example) — and that single choice is the entire taxonomy.</p>
+
+    <div class="nx-ribbon">X            (B=4, d=6)          # a batch of activations
+BatchNorm    reduce over B  ↓     # per feature, one mean/var per column
+LayerNorm    reduce over d  →     # per example, one mean/var per row
+RMSNorm      reduce over d  →     # per example, RMS only — no mean</div>
+
+    <div class="box rule"><span class="box-title">📐 LayerNorm and RMSNorm</span>
+      <p>LayerNorm centres then scales each example's feature vector, then applies a learned gain $\gamma$ and
+        shift $\beta$:</p>
+      $$\mathrm{LN}(\mathbf{x})_i \;=\; \gamma_i\,\frac{x_i - \mu}{\sqrt{\varsigma^2 + \varepsilon}} \;+\; \beta_i,
+        \qquad \mu = \frac1d\sum_{j} x_j, \quad \varsigma^2 = \frac1d\sum_{j}(x_j-\mu)^2.$$
+      <p>RMSNorm keeps the scaling but <b>drops the mean subtraction entirely</b> — it divides by the root-mean-square,
+        not the standard deviation:</p>
+      $$\mathrm{RMS}(\mathbf{x})_i \;=\; \gamma_i\,\frac{x_i}{\sqrt{\frac1d\sum_{j} x_j^2 + \varepsilon}}.$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape / value</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\mathbf{x}$</td><td>one example's feature vector (one row of $X$)</td><td>$(d,)$</td><td>a layer's activation</td></tr>
+          <tr><td>$\mu$</td><td>mean over the $d$ features</td><td>scalar, per row</td><td>reduce over $d$</td></tr>
+          <tr><td>$\varsigma^2$</td><td>variance over the $d$ features (biased, $1/d$)</td><td>scalar, per row</td><td>reduce over $d$</td></tr>
+          <tr><td>$\gamma_i,\ \beta_i$</td><td>learned gain and shift, per feature</td><td>$(d,)$ each</td><td>parameters</td></tr>
+          <tr><td>$\varepsilon$</td><td>stability floor (Qwen3: $\mathtt{rms\_norm\_eps}=$ 1e-6)</td><td>scalar</td><td><code>constants.md</code> §1.1 [VP]</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0"><b>The only difference between all three is which axis you reduce over</b> — and
+        RMSNorm additionally skips the $-\mu$ centring. BatchNorm reduces down $B$; LayerNorm and RMSNorm reduce
+        across $d$. Same operation, three call sites.</p>
+    </div>
+
+    <!-- ===================== WORKED NUMBER ===================== -->
+    <h2>By hand, on the course's canonical triple</h2>
+    <p>Take the vector the course reuses everywhere, $\mathbf{x} = [2.0,\ 1.0,\ 0.1]$ ($d=3$, $\gamma=1$,
+      $\beta=0$), and compute LayerNorm and RMSNorm on it so the "drops the mean" claim becomes a number.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: LayerNorm vs RMSNorm on $[2.0,\,1.0,\,0.1]$</span>
+      <p><b>LayerNorm</b> — first the mean, then centre, then scale by the standard deviation:</p>
+      <p>$$\mu = \frac{2.0+1.0+0.1}{3} = \mathbf{1.0333}, \qquad
+          \varsigma = \sqrt{\tfrac13\!\left(0.9667^2 + 0.0333^2 + 0.9333^2\right)} = 0.7760,$$</p>
+      <p>$$\mathrm{LN}(\mathbf{x}) = \frac{[\,0.9667,\ -0.0333,\ -0.9333\,]}{0.7760}
+          = [\,\mathbf{1.246},\ \mathbf{-0.043},\ \mathbf{-1.203}\,].$$</p>
+      <p><b>RMSNorm</b> — <em>no mean</em>; divide straight by the root-mean-square:</p>
+      <p>$$\mathrm{RMS} = \sqrt{\frac{2.0^2 + 1.0^2 + 0.1^2}{3}} = \sqrt{\frac{5.01}{3}} = \sqrt{1.6700} = \mathbf{1.2923},$$</p>
+      <p>$$\mathrm{RMS}(\mathbf{x}) = \frac{[\,2.0,\ 1.0,\ 0.1\,]}{1.2923}
+          = [\,\mathbf{1.548},\ \mathbf{0.774},\ \mathbf{0.077}\,].$$</p>
+      <p style="margin:.5em 0 0"><b>That resolves the PREDICT.</b> RMSNorm drops the mean subtraction — notice its
+        output still averages to a nonzero number ($1.548+0.774+0.077$ over 3 $=0.800$, not 0), whereas LayerNorm's
+        output is centred on 0 by construction. Empirically the re-centring term contributes little to a
+        transformer's quality, so Llama and Qwen simply skip it and save the arithmetic.</p>
+      <p class="readout" id="worked-check" style="margin:.4em 0 0">live engine check…</p>
+    </div>
+
+    <!-- ===================== BATCHNORM LOST ===================== -->
+    <h2>Why BatchNorm lost in transformers</h2>
+    <p>BatchNorm ruled computer vision for years. In sequence models it was quietly dropped, and the reasons are
+      concrete, not fashion:</p>
+    <div class="box rule"><span class="box-title">📐 Four reasons transformers reduce over $d$, not $B$</span>
+      <ol style="margin:.2em 0 0 1.1em; padding:0">
+        <li><b>Variable length &amp; tiny effective batch per position.</b> A sequence model has a different number
+          of real tokens at each position; the "batch" seen by one position can be small and ragged.</li>
+        <li><b>Train/eval mismatch.</b> BatchNorm keeps <em>running</em> statistics for inference that differ from
+          the per-batch statistics used in training — a whole class of silent bugs LayerNorm never has.</li>
+        <li><b>It couples examples in a batch.</b> One example's normalization depends on the others in its batch —
+          poison for autoregressive generation, where you decode one sequence at a time.</li>
+        <li><b>LayerNorm/RMSNorm are per-example and batch-independent.</b> Reduce over $d$ and every one of these
+          problems evaporates: the statistic for a token depends only on that token.</li>
+      </ol>
+    </div>
+
+    <!-- ===================== PRE VS POST ===================== -->
+    <h2>Pre-norm vs post-norm — the bracket that decides whether an 80-layer model trains</h2>
+    <p>Where you place the norm relative to the residual add is a one-character edit with an outsized consequence.
+      Write a residual block as "input, plus a function $F$ of the input." There are two places the norm can go:</p>
+    <div class="box key"><span class="box-title">🔑 The residual highway, kept or broken</span>
+      <p style="margin:0 0 .4em">$$\textbf{Post-norm:}\quad \mathbf{x} \leftarrow \mathrm{Norm}\big(\mathbf{x} + F(\mathbf{x})\big)
+          \qquad\qquad \textbf{Pre-norm:}\quad \mathbf{x} \leftarrow \mathbf{x} + F\big(\mathrm{Norm}(\mathbf{x})\big)$$</p>
+      <p>In <b>pre-norm</b>, the $+\mathbf{x}$ skip is <em>un-normalised</em>: the identity gradient path of page 19
+        ($\partial\mathbf{y}/\partial\mathbf{x} = I + \partial F/\partial\mathbf{x}$, the $+I$ that guarantees a
+        magnitude-~1 route to any depth) survives untouched to the bottom of the stack. In <b>post-norm</b>, the
+        norm sits <em>on</em> that path — every backward gradient is multiplied by the norm's Jacobian on the way
+        down, and deep post-norm stacks are hard to train without careful warmup. <b>One bracket decides whether an
+        80-layer model trains.</b> Modern LLMs — Qwen3 included — are pre-norm.</p>
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "The three normalizers are fundamentally different mechanisms."</span>
+      They are one operation — subtract a location, divide by a scale, optionally learn $\gamma,\beta$ — applied over
+      a different <b>reduction axis</b>. BatchNorm reduces down the batch; LayerNorm and RMSNorm reduce across the
+      features. That is the <em>whole</em> difference. If you can name the axis, you know the normalizer.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "RMSNorm is an approximation that sacrifices accuracy."</span>
+      It is a deliberate, near-free simplification, not a lossy shortcut. Empirically the mean-centring term
+      contributes little to model quality, so dropping it costs essentially nothing and saves a reduction and a
+      subtraction per token. Llama, Qwen, and most modern LLMs ship RMSNorm on purpose.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Normalization removes the need for good init and residuals."</span>
+      It complements them; it does not replace them. A deep net still needs the residual highway (pre-norm) and a
+      scaled init (page 19) — normalization pins the gain <em>during</em> training, but a pathological init or a
+      norm sitting on the residual path (post-norm) will still fight you. All three tools solve one problem
+      together.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: the axis is the whole story</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      The heatmap on the left is a real $4\times6$ activation matrix — 4 examples down, 6 features across. Click a
+      normalizer and watch which way the numbers flatten: <b>LayerNorm</b> makes every <em>row</em> mean-0 / std-1;
+      <b>BatchNorm</b> makes every <em>column</em> so; <b>RMSNorm</b> makes every row's <em>RMS</em> 1 but leaves
+      the mean nonzero — exactly the "drops the mean" fact from the worked example, now visible. The right panel
+      runs a real backward pass through a deep residual stack and plots the gradient norm reaching each layer:
+      drag the depth up and watch <b>post-norm</b> starve the early layers into the floor while <b>pre-norm</b>
+      keeps a strong gradient all the way to the bottom.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Which axis? · and the pre/post-norm gradient highway <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="nx-grid">
+          <div>
+            <canvas id="d-heat" height="300"></canvas>
+            <div class="nx-btns" id="d-heat-btns"></div>
+            <div class="readout" id="d-heat-out"></div>
+          </div>
+          <div>
+            <canvas id="d-grad" height="300"></canvas>
+            <div class="controls" id="d-grad-ctrls"></div>
+            <div class="readout" id="d-grad-out"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/20_norm_axes.py</code> — computes all three normalizers on a random tensor with
+      <code>torch.nn.functional.layer_norm</code> and a hand-written RMSNorm, asserts LayerNorm's rows are
+      mean-0 / var-1 and RMSNorm's rows are RMS-1, and opens Qwen3's <code>config.json</code> line
+      <code>rms_norm_eps: 1e-6</code> so the theory sits next to the config it predicts.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz20"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;19 set the per-stage gain at init and gave the residual highway this
+      page's pre-norm preserves. → Page&nbsp;21: pre-norm <em>reduces</em>, but does not remove, the need for
+      warmup. → Part&nbsp;III places RMSNorm inside the transformer block (the <em>where</em>, D-14) — it does not
+      re-derive the axis question, which is settled here.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- live engine check under the worked box: run the REAL engine on the
+     canonical triple and confirm the frozen 1.548/0.774/0.077 and 1.246/-0.043/-1.203. */
+  (function () {
+    const { Mat, layerNorm, rmsNorm } = NN;
+    const el = document.getElementById("worked-check");
+    if (!el) return;
+    const x = Mat.from([[2.0, 1.0, 0.1]]);
+    const ln = layerNorm(x, { eps: 1e-6 }).row(0);
+    const rn = rmsNorm(x, { eps: 1e-6 }).row(0);
+    const f3 = a => a.map(v => v.toFixed(3)).join(", ");
+    el.innerHTML =
+      `live engine: &nbsp;<code>NN.rmsNorm</code> → [${f3(rn)}] &nbsp;·&nbsp; ` +
+      `<code>NN.layerNorm</code> → [${f3(ln)}] — matches the pencil values.`;
+  })();
+
+  /* ---- DEMO panel 1: heatmap, the axis question. Real LN/RMS/BN, live. ----
+     BatchNorm (reduce over the batch = columns) is computed as LayerNorm of the
+     TRANSPOSE, then transposed back — literally "the same operation, a different
+     axis", using the same engine function. */
+  (function () {
+    const { Mat, RNG, layerNorm, rmsNorm } = NN;
+    const rng = new RNG(20);
+    // A 4x6 activation matrix with per-column offsets, so BatchNorm (column
+    // centring) and LayerNorm (row centring) visibly disagree.
+    const B = 4, d = 6;
+    const colMean = [1.6, -0.8, 0.4, 2.2, -1.4, 0.9];
+    const base = new Mat(B, d);
+    for (let i = 0; i < B; i++)
+      for (let j = 0; j < d; j++)
+        base.set(i, j, colMean[j] + rng.normal(0, 0.9));
+
+    function batchNorm(M, eps) { return layerNorm(M.T(), { eps }).T(); }
+
+    const modes = {
+      none:  { label: "none (raw)",  fn: M => M },
+      batch: { label: "BatchNorm ↓", fn: M => batchNorm(M, 1e-5) },
+      layer: { label: "LayerNorm →", fn: M => layerNorm(M, { eps: 1e-5 }) },
+      rms:   { label: "RMSNorm →",   fn: M => rmsNorm(M, { eps: 1e-6 }) },
+    };
+    let mode = "none";
+
+    const canvas = document.getElementById("d-heat");
+    const out = document.getElementById("d-heat-out");
+    const rowLabels = ["ex 0", "ex 1", "ex 2", "ex 3"];
+    const colLabels = ["f0", "f1", "f2", "f3", "f4", "f5"];
+    const hm = new Heatmap(canvas, {
+      data: base.toArray(), rowLabels, colLabels,
+      colormap: "diverging", cellText: v => v.toFixed(2), colorbar: true, hover: true,
+    });
+
+    function stats(M) {
+      // per-row and per-column mean / std / rms
+      const rows = M.rows, cols = M.cols;
+      const rowMean = [], rowStd = [], rowRms = [], colMeanA = [], colStd = [];
+      for (let i = 0; i < rows; i++) {
+        const r = M.row(i);
+        const m = r.reduce((a, b) => a + b, 0) / cols;
+        const v = r.reduce((a, b) => a + (b - m) * (b - m), 0) / cols;
+        const q = r.reduce((a, b) => a + b * b, 0) / cols;
+        rowMean.push(m); rowStd.push(Math.sqrt(v)); rowRms.push(Math.sqrt(q));
+      }
+      for (let j = 0; j < cols; j++) {
+        const c = M.col(j);
+        const m = c.reduce((a, b) => a + b, 0) / rows;
+        const v = c.reduce((a, b) => a + (b - m) * (b - m), 0) / rows;
+        colMeanA.push(m); colStd.push(Math.sqrt(v));
+      }
+      const rng2 = a => `${Math.min(...a).toFixed(2)}…${Math.max(...a).toFixed(2)}`;
+      return { rowMean, rowStd, rowRms, colMean: colMeanA, colStd, rng2 };
+    }
+
+    function draw() {
+      const M = modes[mode].fn(base);
+      hm.setData(M.toArray());
+      const s = stats(M);
+      let msg;
+      if (mode === "none") {
+        msg = `raw activations — every row and column has its own scale. Pick a normalizer and watch one axis flatten to mean 0 / spread 1.`;
+      } else if (mode === "layer") {
+        msg = `<b>LayerNorm</b> (reduce over d): every <b>row</b> mean ≈ <b>${s.rng2(s.rowMean)}</b>, row std ≈ <b>${s.rng2(s.rowStd)}</b>. Rows are standardised; columns are not.`;
+      } else if (mode === "batch") {
+        msg = `<b>BatchNorm</b> (reduce over B): every <b>column</b> mean ≈ <b>${s.rng2(s.colMean)}</b>, column std ≈ <b>${s.rng2(s.colStd)}</b>. Columns are standardised; rows are not.`;
+      } else {
+        msg = `<b>RMSNorm</b> (reduce over d, no mean): every row <b>RMS ≈ ${s.rng2(s.rowRms)}</b>, but row mean ≈ <b>${s.rng2(s.rowMean)}</b> — <em>not</em> 0. It scaled without centring.`;
+      }
+      out.innerHTML = msg;
+    }
+
+    // buttons
+    const btnWrap = document.getElementById("d-heat-btns");
+    const btns = {};
+    Object.keys(modes).forEach(k => {
+      const b = document.createElement("button");
+      b.className = "btn secondary" + (k === mode ? " active" : "");
+      b.type = "button";
+      b.textContent = modes[k].label;
+      b.addEventListener("click", () => {
+        mode = k;
+        Object.values(btns).forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        draw();
+      });
+      btns[k] = b; btnWrap.appendChild(b);
+    });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO panel 2: pre-norm vs post-norm gradient through depth. ----
+     A REAL backward pass over a deep residual stack, built on the Value engine.
+     Both nets share the same weights, biases, and input; the ONLY difference is
+     where LayerNorm sits relative to the residual add. We read the true .grad on
+     the input of every block and plot its norm vs depth (log-y). */
+  (function () {
+    const { Value, RNG } = NN;
+    const D = 6;                          // feature width (normalization needs >1)
+    const eps = 1e-5;
+
+    // LayerNorm over an array of Values -> array of Values (autograd handles the
+    // mean/var coupling; this is the real Jacobian, not an approximation).
+    function lnValues(xs) {
+      const n = xs.length;
+      let mu = xs[0]; for (let i = 1; i < n; i++) mu = mu.add(xs[i]); mu = mu.div(n);
+      const dev = xs.map(x => x.sub(mu));
+      let varr = dev[0].pow(2); for (let i = 1; i < n; i++) varr = varr.add(dev[i].pow(2));
+      varr = varr.div(n);
+      const inv = varr.add(eps).pow(-0.5);
+      return dev.map(dv => dv.mul(inv));
+    }
+    // One block: tanh(W·h + b), fixed (constant) W and b so we only measure flow.
+    function block(hs, W, b) {
+      const out = [];
+      for (let o = 0; o < D; o++) {
+        let z = new Value(b[o]);
+        for (let i = 0; i < D; i++) z = z.add(hs[i].mul(W[o][i]));
+        out.push(z.tanh());
+      }
+      return out;
+    }
+    function gradNorm(arr) { let s = 0; for (const v of arr) s += v.grad * v.grad; return Math.sqrt(s); }
+
+    // Build the shared, seeded parameters ONCE per (depth, gain) so pre and post
+    // see identical weights. gain sets the per-block signal the residual adds.
+    function makeParams(L, gain) {
+      const rng = new RNG(7);
+      const x0 = []; for (let i = 0; i < D; i++) x0.push(rng.normal(0, 1));
+      const Ws = [], bs = [];
+      for (let l = 0; l < L; l++) {
+        const W = [], b = [];
+        for (let o = 0; o < D; o++) {
+          const row = []; for (let i = 0; i < D; i++) row.push(rng.normal(0, 1) * gain / Math.sqrt(D));
+          W.push(row); b.push(0);
+        }
+        Ws.push(W); bs.push(b);
+      }
+      return { x0, Ws, bs };
+    }
+
+    // Run one net; return the gradient norm reaching the input of each block.
+    function run(kind, P, L) {
+      let x = P.x0.map(v => new Value(v));      // fresh leaves each run
+      const streams = [x];
+      for (let l = 0; l < L; l++) {
+        if (kind === "pre") {
+          const n = lnValues(x);
+          const f = block(n, P.Ws[l], P.bs[l]);
+          x = x.map((xi, i) => xi.add(f[i]));    // un-normalised skip
+        } else {
+          const f = block(x, P.Ws[l], P.bs[l]);
+          const s = x.map((xi, i) => xi.add(f[i]));
+          x = lnValues(s);                        // norm ON the residual path
+        }
+        streams.push(x);
+      }
+      // Loss = 1/2 * sum(x_i^2). A plain sum would be degenerate for post-norm:
+      // the last op is LayerNorm, whose output sums to 0 identically, so d(sum)/d(*)
+      // would be exactly 0 and hide the effect. Sum-of-squares flows through both.
+      let loss = x[0].pow(2);
+      for (let i = 1; i < x.length; i++) loss = loss.add(x[i].pow(2));
+      loss = loss.mul(0.5);
+      loss.backward();
+      return streams.map(gradNorm);               // length L+1, index = block input
+    }
+
+    const canvas = document.getElementById("d-grad");
+    const out = document.getElementById("d-grad-out");
+    const depth = makeCtrl(document.getElementById("d-grad-ctrls"),
+      { label: "depth (residual blocks)", min: 2, max: 40, step: 1, value: 24, fmt: v => v.toFixed(0) });
+
+    const preC = () => cssVar("--accent", "#b48cff");
+    const postC = () => cssVar("--bad", "#ff6b6b");
+
+    function draw() {
+      const L = Math.round(depth.get());
+      const P = makeParams(L, 1.6);
+      const pre = run("pre", P, L);
+      const post = run("post", P, L);
+      // x-axis = block depth from the output (0 = output side). Plot grad norm
+      // reaching each layer; log-y so vanishing is a straight fall, not a floor.
+      const xs = pre.map((_, i) => i);
+      const all = pre.concat(post).filter(v => isFinite(v) && v > 0);
+      const ymin = Math.max(1e-9, Math.min(...all) * 0.3);
+      const ymax = Math.max(...all) * 1.4;
+      const p = new Plot(canvas, {
+        xmin: 0, xmax: L, ymin, ymax, ylog: true,
+        xlabel: "block index (0 = input)", ylabel: "‖∂L/∂x‖ reaching this layer",
+      });
+      p.clear(); p.grid();
+      p.trace(xs, pre, preC(), 2.5);
+      p.trace(xs, post, postC(), 2.5);
+
+      const preIn = pre[0], postIn = post[0];
+      const ratio = postIn > 0 ? preIn / postIn : Infinity;
+      const ratioStr = !isFinite(ratio) ? "∞"
+        : ratio >= 100 ? Number(ratio.toPrecision(2)).toLocaleString() + "×"
+        : ratio.toFixed(1) + "×";
+      out.innerHTML =
+        `<b style="color:var(--accent)">pre-norm</b> gradient at the input (block 0): <b>${preIn.toExponential(2)}</b> ` +
+        `&nbsp;·&nbsp; <b style="color:var(--bad)">post-norm</b>: <b>${postIn.toExponential(2)}</b> ` +
+        `&nbsp;·&nbsp; the un-normalised skip carries <b>${ratioStr}</b> ` +
+        `more gradient to the bottom of a ${L}-layer stack.`;
+    }
+    depth.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz20", [
+    {
+      q: "BatchNorm and LayerNorm differ in exactly one thing. What is it?",
+      opts: [
+        "The reduction axis — BatchNorm averages down the batch (per feature), LayerNorm across the features (per example)",
+        "BatchNorm uses a learned gain and LayerNorm does not",
+        "LayerNorm is an approximation of BatchNorm with less accuracy",
+        "They apply to different data types — images vs text"
+      ],
+      a: 0,
+      why: "All three normalizers are the same operation over a different reduction axis. BatchNorm reduces over the batch axis B (one statistic per feature/column); LayerNorm reduces over the feature axis d (one statistic per example/row). Both learn $\\gamma,\\beta$."
+    },
+    {
+      q: "The RMS of $\\mathbf{x}=[2.0,\\,1.0,\\,0.1]$ (used by RMSNorm) is:",
+      num: 1.292, tol: 0.01, unit: "",
+      why: "$\\mathrm{RMS}=\\sqrt{(2.0^2+1.0^2+0.1^2)/3}=\\sqrt{5.01/3}=\\sqrt{1.6700}=1.2923$. RMSNorm divides by this instead of the standard deviation."
+    },
+    {
+      q: "Compared with LayerNorm, RMSNorm drops which operation?",
+      opts: [
+        "Mean-centring (the $-\\mu$ subtraction)",
+        "The learned scale $\\gamma$",
+        "The division by a spread",
+        "The stability floor $\\varepsilon$"
+      ],
+      a: 0,
+      why: "RMSNorm keeps the scale-by-a-spread and the learned $\\gamma$; it only removes the mean subtraction, dividing by the root-mean-square rather than the standard deviation. The re-centring term contributes little empirically — the visible sign is that an RMSNorm'd vector's mean is still nonzero."
+    },
+    {
+      q: "Why did transformers drop BatchNorm in favour of LayerNorm/RMSNorm?",
+      opts: [
+        "Because it is per-example and batch-independent: no train/eval statistic mismatch, no coupling of examples, and it handles variable-length sequences",
+        "Because BatchNorm has too many parameters to fit in memory",
+        "Because BatchNorm cannot be differentiated",
+        "Because RMSNorm is always more accurate on every task"
+      ],
+      a: 0,
+      why: "BatchNorm's running statistics create a train/eval mismatch, it couples examples in a batch (bad for autoregressive generation), and sequence models have small, ragged effective batches per position. Reducing over the feature axis makes each token's normalization depend only on that token."
+    },
+    {
+      q: "In a deep residual stack, what does pre-norm ($\\mathbf{x} \\leftarrow \\mathbf{x} + F(\\mathrm{Norm}(\\mathbf{x}))$) preserve that post-norm does not?",
+      opts: [
+        "A clean, un-normalised residual path — so the identity gradient route ($+I$) survives to any depth",
+        "A smaller parameter count",
+        "The ability to use a larger batch size",
+        "A guarantee that the output variance is exactly 1"
+      ],
+      a: 0,
+      why: "Pre-norm leaves the $+\\mathbf{x}$ skip un-normalised, so page 19's magnitude-~1 identity gradient path reaches the bottom of the stack intact. Post-norm puts the norm on that path, multiplying every backward gradient by the norm's Jacobian — which is why deep post-norm models are hard to train without careful warmup."
+    },
+    {
+      q: "Qwen3's config sets its RMSNorm stability floor $\\varepsilon$ (the field <code>rms_norm_eps</code>) to:",
+      opts: ["1e-6", "1e-3", "0.1", "1.0"],
+      a: 0,
+      why: "$\\mathtt{rms\\_norm\\_eps}=1\\mathrm{e}{-6}$ (constants.md §1.1, [VP] from the fetched config.json). It sits under the square root to keep the division finite when a feature vector is near zero."
+    }
+  ], "Normalization — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,555 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>8. Probability, the Gaussian &amp; μ+σε — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tags, cross-ref line, shape ribbon, and the three-panel
+     demo grid. The PREDICT prompt and Symbol Ledgers use the shared
+     .box.predict / table.ledger components in course.css. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--accent);
+            padding: 4px 0 4px 12px; margin: 1.1em 0; }
+  .thread b { color: var(--accent); }
+  .xref { font-size: .84rem; color: var(--text-dim); margin-top: 1.4em; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .8em 0; }
+  .panel-note { font-size: .82rem; color: var(--text-dim); margin: 2px 0 8px; }
+  .btnrow { margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 8px; }
+</style>
+</head>
+<body data-page="08-probability-and-the-gaussian.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · The Diffusion Handoff</span>
+    <h1>Probability, the Gaussian &amp; Sampling You Can Differentiate Through</h1>
+    <p class="subtitle">A distribution is a shape saying which values are likely; an
+      expectation is estimated by averaging samples; and the one trick
+      $x=\mu+\sigma\varepsilon$ lets you backpropagate through a random draw. Hold
+      that last one — the entire diffusion forward process is it, wearing new letters.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You draw <em>one</em> sample from a 4096-dimensional standard Gaussian
+      $\mathcal N(0, I)$. The single highest-density point of that bell is the origin.
+      How far from the origin does your sample actually land?
+      <b>[right at the origin&nbsp;/&nbsp;about distance 64&nbsp;/&nbsp;about distance 1]</b>.
+      Commit to one, then run Panel&nbsp;C below.
+    </div>
+
+    <!-- ============================ §1 ============================ -->
+    <h2>A distribution, an expectation, a sample</h2>
+    <p>Strip the jargon to three pictures. A <b>distribution</b> $p(x)$ is a shape over
+      an axis: taller where values are more likely. An <b>expectation</b>
+      $\mathbb E[X]$ is that shape's balance point — where it would sit on a pivot. A
+      <b>sample</b> is reaching in and grabbing one value, more often from where the
+      shape is tall.</p>
+
+    <p>$$\mathbb E[X]=\sum_x x\,p(x)\quad\text{or}\quad\int x\,p(x)\,dx,
+        \qquad \operatorname{Var}(X)=\mathbb E\big[(X-\mathbb E[X])^2\big]=\mathbb E[X^2]-\mathbb E[X]^2.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$X$</td><td>a random quantity — the thing you sample</td><td>scalar (here)</td><td>the process you're studying</td></tr>
+        <tr><td>$p(x)$</td><td>probability (density) that $X$ takes value $x$</td><td>$\ge 0$, integrates to 1</td><td>the distribution's shape</td></tr>
+        <tr><td>$\mathbb E[X]$</td><td>the mean — the balance point</td><td>units of $x$</td><td>weighted average over $p$</td></tr>
+        <tr><td>$\operatorname{Var}(X)$</td><td>spread — mean squared distance from the mean</td><td>units of $x^2$</td><td>expectation of $(X-\mathbb E[X])^2$</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 Key idea — an expectation is estimated by averaging samples</span>
+      $$\mathbb E[f(X)]\approx\frac1N\sum_{n=1}^{N}f(x_n),\qquad x_n\sim p.$$
+      <b>This is what a mini-batch <em>is.</em></b> The true loss is an expectation over
+      your whole dataset; a batch of $B$ examples is a $B$-sample Monte-Carlo estimate
+      of it. That is the entire reason you can train on batches at all. <em>How much
+      the estimate wobbles — the $1/\sqrt B$ law, and why that noise turns out to be a
+      feature — is page&nbsp;16; here just hold that a batch is a sample average.</em>
+    </div>
+
+    <!-- ============================ §2 ============================ -->
+    <h2>The Gaussian — because diffusion is built from it</h2>
+    <p>One distribution earns its own section, because you will meet it on every page
+      of the diffusion track. The Gaussian (normal) density is</p>
+
+    <p>$$p(x)=\frac{1}{\sigma\sqrt{2\pi}}\,\exp\!\left(-\frac{(x-\mu)^2}{2\sigma^2}\right).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mu$</td><td>mean — where the bell is centred</td><td>units of $x$</td><td>a chosen parameter</td></tr>
+        <tr><td>$\sigma$</td><td>standard deviation — the bell's width</td><td>units of $x$</td><td>a chosen parameter</td></tr>
+        <tr><td>$\sigma^2$</td><td>variance</td><td>units of $x^2$</td><td>$\sigma$ squared</td></tr>
+        <tr><td>$x$</td><td>the value whose likelihood you're reading off</td><td>units of $x$</td><td>the input to $p$</td></tr>
+      </tbody>
+    </table>
+
+    <p>The width sets the famous coverage rule — derivable by integrating the bell
+      ([DER]): $\pm1\sigma$ holds <b>68.3&nbsp;%</b> of the mass, $\pm2\sigma$ holds
+      <b>95.4&nbsp;%</b>, $\pm3\sigma$ holds <b>99.7&nbsp;%</b>. In several dimensions
+      the only version this course ever needs is the <b>isotropic</b> multivariate
+      Gaussian $\mathcal N(\mathbf x;\boldsymbol\mu,\sigma^2 I)$: a round fuzzy ball,
+      the same spread in every direction, no correlations between axes. Its covariance
+      $\Sigma=\sigma^2 I$ has no off-diagonal structure — which is exactly <em>why</em>
+      this course never needs eigen-decomposition of a covariance: there is nothing to
+      diagonalize.</p>
+
+    <!-- ============================ §3  — SPINE BEAT ============================ -->
+    <div class="box key"><span class="box-title">🔑 Key idea — the reparameterization trick: sampling you can differentiate through</span>
+      <p style="margin:.2em 0 .6em">Drawing a Gaussian sample is the same as scaling and
+        shifting a <em>standard</em> one:</p>
+      $$x\sim\mathcal N(\mu,\sigma^2)\iff x=\mu+\sigma\varepsilon,\qquad \varepsilon\sim\mathcal N(0,1).$$
+      <p style="margin:.6em 0 .2em">Sample the randomness <em>once</em>, from a fixed
+        standard bell, then <b>shift by $\mu$ and stretch by $\sigma$</b> — a plain
+        deterministic map. Here is why that matters for training. You <em>cannot</em>
+        backpropagate through "draw a sample from a distribution whose parameters depend
+        on $\theta$" — a draw is not a function of $\mu$, so there is no derivative to
+        take. The trick <b>moves the randomness out of the path</b>: $\varepsilon$
+        becomes an external input, rolled once and held fixed, and $x=\mu+\sigma\varepsilon$
+        is now an ordinary differentiable function with
+        $\dfrac{\partial x}{\partial\mu}=1$ and $\dfrac{\partial x}{\partial\sigma}=\varepsilon$.
+        The dice are still rolled — just outside the graph. Gradients flow straight
+        through.</p>
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$x$</td><td>the sample you wanted</td><td>units of $x$</td><td>computed: $\mu+\sigma\varepsilon$</td></tr>
+        <tr><td>$\mu$</td><td>mean (may depend on $\theta$)</td><td>units of $x$</td><td>the model / a knob</td></tr>
+        <tr><td>$\sigma$</td><td>std (may depend on $\theta$)</td><td>units of $x$</td><td>the model / a knob</td></tr>
+        <tr><td>$\varepsilon$</td><td>a standard-normal draw — the <b>only</b> randomness</td><td>scalar, $\mathcal N(0,1)$</td><td>rolled once, external to the graph</td></tr>
+      </tbody>
+    </table>
+
+    <p>Announce the payoff without spending it: this exact move is (a) how you sample a
+      Gaussian in code, (b) how a VAE gets gradients through its sampling step
+      (page&nbsp;53), and (c) <em>literally</em> the diffusion forward process
+      $\mathbf x_t=\sqrt{\bar\alpha_t}\,\mathbf x_0+\sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon$.
+      You will recognize that on page&nbsp;54 as an old friend with new letters:
+      $\mu=\sqrt{\bar\alpha_t}\,\mathbf x_0$, $\sigma=\sqrt{1-\bar\alpha_t}$.</p>
+
+    <div class="thread">
+      <b>[THREAD:reparameterization beat 1/… — ★ diffusion handoff]</b> — $x=\mu+\sigma\varepsilon$,
+      taught here in the trunk and taught early. Same object, first encounter. It returns
+      as VAE sampling and as the forward noising process; the entire diffusion arc
+      (pages&nbsp;<b>53–57</b>) leans on what you just did — nothing there re-derives it.
+    </div>
+
+    <!-- ============================ §4 ============================ -->
+    <h2>Concentration of measure: a high-D Gaussian is a shell, not a ball</h2>
+    <p>Now the fact the PREDICT asked about. Take one draw
+      $\mathbf x\sim\mathcal N(0,I_d)$ and measure its distance from the origin,
+      $\lVert\mathbf x\rVert=\sqrt{\sum_i x_i^2}$. It is a sum of $d$ independent
+      unit-variance terms, so it concentrates hard ([DER]):</p>
+
+    <p>$$\mathbb E\,\lVert\mathbf x\rVert\approx\sqrt{d},\qquad
+        \operatorname{std}\lVert\mathbf x\rVert\approx\frac{1}{\sqrt2}\approx0.71.$$</p>
+
+    <div class="ribbon">ε        (d,)            one standard-normal draw per axis
+μ, σ     scalars         the knobs (may depend on θ)
+x = μ + σ·ε   (d,)       a plain differentiable function of μ, σ
+‖x‖      scalar          concentrates at √d   (d = 4096  →  64.0)</div>
+
+    <p>At $d=4096$ that is $\sqrt{4096}=\mathbf{64}$ with a spread of only about $0.71$.
+      <b>Essentially no sample lands near the origin — even though the origin is the
+      densest single point.</b> All the volume is out in a thin spherical shell at
+      radius $\sqrt d$. This is the same $\mathcal N(0,1/d)$ arithmetic you saw on
+      page&nbsp;03, where two random 4096-D vectors were almost always orthogonal:
+      high dimensions are geometrically weird in one consistent way. It is <em>why</em>
+      diffusion starts sampling from a shell of noise rather than from a point, and why
+      "the model just outputs the mean" is not a thing that happens.</p>
+
+    <div class="box rule"><span class="box-title">📐 Hold this for page 12 — MSE is secretly a Gaussian</span>
+      Plain squared-error loss (MSE) is <em>exactly</em> the negative log-likelihood of
+      a Gaussian with fixed variance — drop $\mathcal N(\mu,\sigma^2)$ into $-\ln p(x)$
+      and the $(x-\mu)^2$ falls straight out. That is how the LLM track's cross-entropy
+      and the diffusion track's MSE turn out to be one principle. The derivation is
+      <b>page&nbsp;12</b>; here just hold that "MSE" and "a Gaussian" are the same story.
+    </div>
+
+    <!-- ============================ MISCONCEPTIONS ============================ -->
+    <div class="box warn"><span class="box-title">⚠️ Watch out — four traps that bite when you read a diffusion paper</span>
+      <ul style="margin:.3em 0 0; padding-left:1.2em">
+        <li><b>"The CLT means my data is Gaussian."</b> No. The Gaussian is <em>chosen</em>
+          in diffusion for two engineering reasons — it is closed under addition (a sum
+          of Gaussians is Gaussian, which is what makes the closed-form $\mathbf x_t$
+          from $\mathbf x_0$ possible) and its score has a clean form. A design decision,
+          not a discovered fact about images.</li>
+        <li><b>"100× the samples, 100× the accuracy."</b> It is $1/\sqrt N$: 100× the
+          samples buys 10× the precision. (Page&nbsp;16 makes this the mini-batch story.)</li>
+        <li><b>"Variance and std are interchangeable."</b> Units differ — $\sigma$ carries
+          $x$'s units, $\sigma^2$ carries them squared. This bites directly: diffusion
+          papers write $\beta_t$ (variances) and $\sigma_t$ (stds) and rarely say which.</li>
+        <li><b>"Sampling means the model is uncertain."</b> Sampling is a decision
+          procedure applied to the model's deterministic output distribution — the same
+          point as page&nbsp;01's temperature knob.</li>
+      </ul>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why a high-D Gaussian is a soap bubble</summary><div>
+      <p>Write $\lVert\mathbf x\rVert^2=\sum_{i=1}^{d}x_i^2$. Each $x_i^2$ has mean $1$
+        (unit variance, zero mean) and is independent of the others. By the law of large
+        numbers the average $\frac1d\sum x_i^2\to1$, so $\lVert\mathbf x\rVert^2\approx d$
+        and $\lVert\mathbf x\rVert\approx\sqrt d$. The <em>relative</em> spread shrinks
+        like $1/\sqrt d$: at $d=4096$ the shell is razor-thin around radius $64$. The
+        density is still highest at the origin, but there is almost no <em>volume</em>
+        there — volume is what a sample lives in. This is the whole intuition; the
+        distance number in the section above is the load-bearing fact.</p>
+    </div></details>
+
+    <!-- ============================ DEMO — SAMPLING BENCH ============================ -->
+    <h2>Sampling Bench — three panels, all live</h2>
+
+    <!-- ---- Panel A ---- -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Panel&nbsp;A: set $\mu$ and $\sigma$, then hit <b>draw 100</b> and <b>draw 10000</b>.
+      Watch the histogram fill the formula's bell, the sample mean crawl toward the true
+      $\mu$, and the 95&nbsp;% confidence band shrink like $1/\sqrt N$ — never faster.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Panel A · a Gaussian, sampled <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p class="panel-note">The curve is $p(x)=\frac{1}{\sigma\sqrt{2\pi}}e^{-(x-\mu)^2/2\sigma^2}$
+          evaluated directly; the bars are your actual draws.</p>
+        <canvas id="pa" height="300"></canvas>
+        <div class="controls" id="pa-ctrls"></div>
+        <div class="btnrow">
+          <button class="btn secondary" id="pa-1">draw 1</button>
+          <button class="btn secondary" id="pa-100">draw 100</button>
+          <button class="btn secondary" id="pa-1e4">draw 10000</button>
+          <button class="btn secondary" id="pa-clr">clear</button>
+        </div>
+        <div class="readout" id="pa-out"></div>
+      </div>
+    </div>
+
+    <!-- ---- Panel B (flagship) ---- -->
+    <div class="box try"><span class="box-title">Try it — the one that matters</span>
+      Panel&nbsp;B: the top row of dots is a cloud of $\varepsilon$ values,
+      <b>drawn once and frozen</b>. Now drag $\sigma$ from $0$ to $3$ and watch
+      <em>every one of those same points</em> slide outward together as
+      $x=\mu+\sigma\varepsilon$. The randomness never moves — only the deterministic
+      map does. That is backprop-through-a-sample, made visible.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Panel B · reparameterization: the same ε cloud, shifted &amp; stretched <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="pb" height="260"></canvas>
+        <div class="controls" id="pb-ctrls"></div>
+        <div class="readout" id="pb-out"></div>
+      </div>
+    </div>
+
+    <!-- ---- Panel C (resolves PREDICT) ---- -->
+    <div class="box try"><span class="box-title">Try it — this settles your prediction</span>
+      Panel&nbsp;C: slide the dimension $d$ from $1$ up to $4096$ and watch the histogram
+      of $\lVert\mathbf x\rVert$ march away from the origin and pile up in a tight spike
+      at $\sqrt d$.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Panel C · concentration of ‖x‖ for x ∼ N(0, Iₔ) <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p class="panel-note">Each sample draws $d$ independent standard normals and takes
+          the norm — real draws, no stored curve.</p>
+        <canvas id="pc" height="300"></canvas>
+        <div class="controls" id="pc-ctrls"></div>
+        <div class="readout" id="pc-out"></div>
+      </div>
+    </div>
+
+    <p>There is your prediction, resolved: the answer is <b>about distance 64</b>. At
+      $d=4096$ the norm sits at $\sqrt{4096}=64.0$ with a spread near $0.7$ — a thin
+      shell, not a ball, and never the origin. If you guessed "at the origin" you trusted
+      the density; the volume lives out on the shell. This is the geometry the diffusion
+      track starts its sampler from.</p>
+
+    <!-- ============================ CODE ARTIFACT ============================ -->
+    <div class="box try"><span class="box-title">Try it — <code>code/reparam.py</code></span>
+      Draw $\mathcal N(\mu,\sigma^2)$ two ways and confirm the histograms match — then
+      the payoff: make $\mu,\sigma$ require gradients, build $x=\mu+\sigma\varepsilon$
+      with a <em>detached</em> $\varepsilon$, and backprop through the sample. Runs on CPU
+      in under a second.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line">torch.<span class="tok-fn">manual_seed</span>(<span class="tok-num">0</span>)</span>
+<span class="line">mu, sigma, n = <span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>, <span class="tok-num">100_000</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># two ways to draw N(mu, sigma^2) — they agree</span></span>
+<span class="line">a = mu + sigma * torch.<span class="tok-fn">randn</span>(n)          <span class="tok-com"># reparameterized</span></span>
+<span class="line">b = torch.<span class="tok-fn">normal</span>(mu, sigma, (n,))          <span class="tok-com"># direct draw</span></span>
+<span class="line"><span class="tok-fn">print</span>(a.<span class="tok-fn">mean</span>().<span class="tok-fn">item</span>(), a.<span class="tok-fn">std</span>().<span class="tok-fn">item</span>())    <span class="tok-com"># ~1.0, ~2.0</span></span>
+<span class="line"><span class="tok-fn">print</span>(b.<span class="tok-fn">mean</span>().<span class="tok-fn">item</span>(), b.<span class="tok-fn">std</span>().<span class="tok-fn">item</span>())    <span class="tok-com"># ~1.0, ~2.0</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># now the payoff: gradients flow through the sample</span></span>
+<span class="line">mu = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">1.0</span>, requires_grad=<span class="tok-kw">True</span>)</span>
+<span class="line">sig = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">2.0</span>, requires_grad=<span class="tok-kw">True</span>)</span>
+<span class="line">eps = torch.<span class="tok-fn">randn</span>(<span class="tok-num">4</span>)                       <span class="tok-com"># external, no grad — rolled once</span></span>
+<span class="line">x = mu + sig * eps                        <span class="tok-com"># a differentiable function of mu, sig</span></span>
+<span class="line">x.<span class="tok-fn">sum</span>().<span class="tok-fn">backward</span>()</span>
+<span class="line"><span class="tok-fn">print</span>(mu.grad)     <span class="tok-com"># tensor(4.)  =  sum of dx/dmu = 1 each</span></span>
+<span class="line"><span class="tok-fn">print</span>(sig.grad)    <span class="tok-com"># tensor(eps.sum())  =  dx/dsig = eps</span></span></code></pre>
+    </div>
+    <p class="panel-note">You just backpropagated through randomness. That single trick is
+      the whole VAE and the whole diffusion forward process.</p>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-08"></div>
+
+    <!-- ============================ THREADS ============================ -->
+    <div class="thread"><b>[THREAD:probability beat 1]</b> — distribution / expectation /
+      sampling, formally named. The load-bearing fact: an expectation is a sample average,
+      which is what a mini-batch is. Its $1/\sqrt B$ payoff reopens on page&nbsp;16.</div>
+    <div class="thread"><b>[THREAD:loss-unification beat 0]</b> — MSE = Gaussian NLL,
+      planted here as a seed; page&nbsp;12 derives it and joins it to cross-entropy.</div>
+    <div class="thread"><b>[THREAD:dot-product beat —]</b> — the $\mathcal N(0,1/d)$ shell
+      here is the same arithmetic as page&nbsp;03's near-orthogonality of random 4096-D
+      vectors. Same fact, two faces.</div>
+
+    <p class="xref"><b>Where this goes:</b>
+      → 03 (variance-adds; the $\mathcal N(0,1/d)$ shell) ·
+      → 12 (MSE and cross-entropy from one principle) ·
+      → 16 (the $1/\sqrt B$ mini-batch noise) ·
+      → 53 (VAE reparameterization, reopened) ·
+      → 54 (the forward process <em>is</em> $x=\mu+\sigma\varepsilon$, trig payoff #3) ·
+      → 55 (the reverse process / ELBO leans on it).</p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const { RNG } = NN;
+  const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+  const hist   = () => vizUtils.cssVar("--accent2", "#4fc3f7");
+  const good   = () => vizUtils.cssVar("--good", "#6fcf7f");
+  const bad    = () => vizUtils.cssVar("--bad", "#ff6b6b");
+  const dim    = () => vizUtils.cssVar("--text-dim", "#8391ab");
+
+  // draw a density histogram of `data` over [x0,x1] onto a Plot instance
+  function drawBars(p, data, x0, x1, nb, color) {
+    if (!data.length) return;
+    const w = (x1 - x0) / nb, counts = new Array(nb).fill(0);
+    for (const v of data) { const b = Math.floor((v - x0) / w); if (b >= 0 && b < nb) counts[b]++; }
+    const N = data.length, g = p.g, pad = p.o.pad;
+    g.save();
+    g.beginPath(); g.rect(pad.l, pad.t, p.W - pad.l - pad.r, p.H - pad.t - pad.b); g.clip();
+    g.fillStyle = color; g.globalAlpha = 0.5;
+    const y0 = p._ty(0);
+    for (let b = 0; b < nb; b++) {
+      if (!counts[b]) continue;
+      const dens = counts[b] / (N * w);
+      const xl = p._tx(x0 + b * w), xr = p._tx(x0 + (b + 1) * w), yt = p._ty(dens);
+      g.fillRect(xl, yt, Math.max(1, xr - xl - 1), y0 - yt);
+    }
+    g.restore();
+  }
+  function mean(a) { return a.reduce((s, v) => s + v, 0) / a.length; }
+  function std(a) { const m = mean(a); return Math.sqrt(a.reduce((s, v) => s + (v - m) * (v - m), 0) / a.length); }
+
+  /* ---------------- PANEL A: a Gaussian, sampled ---------------- */
+  (function () {
+    const canvas = document.getElementById("pa"), out = document.getElementById("pa-out");
+    const rng = new RNG(11);
+    const cMu = makeCtrl(document.getElementById("pa-ctrls"),
+      { label: "mean μ", min: -3, max: 3, step: 0.1, value: 1, fmt: v => v.toFixed(1) });
+    const cSg = makeCtrl(document.getElementById("pa-ctrls"),
+      { label: "std σ", min: 0.2, max: 3, step: 0.05, value: 2, fmt: v => v.toFixed(2) });
+    let samples = [];
+    const X0 = -8, X1 = 8;
+
+    function draw() {
+      const mu = cMu.get(), sg = cSg.get();
+      const peak = 1 / (sg * Math.sqrt(2 * Math.PI));
+      const p = new Plot(canvas, { xmin: X0, xmax: X1, ymin: 0, ymax: Math.max(0.55, peak * 1.18), xlabel: "x", ylabel: "density" });
+      p.clear(); p.grid();
+      drawBars(p, samples, X0, X1, 48, hist());
+      const xs = [], ys = [];
+      for (let x = X0; x <= X1; x += 0.04) { xs.push(x); ys.push((1 / (sg * Math.sqrt(2 * Math.PI))) * Math.exp(-((x - mu) * (x - mu)) / (2 * sg * sg))); }
+      p.trace(xs, ys, accent(), 2.5);
+      p.vline(mu, dim(), [4, 4]);
+      let msg = `curve: N(μ=<b>${mu.toFixed(1)}</b>, σ=<b>${sg.toFixed(2)}</b>)`;
+      if (samples.length) {
+        const sm = mean(samples), ci = 1.96 * sg / Math.sqrt(samples.length);
+        p.vline(sm, good(), null);
+        msg += ` · N=<b>${samples.length}</b> draws · sample mean <b>${sm.toFixed(3)}</b> ` +
+               `(true μ ${mu.toFixed(1)}) · 95% CI ±<b>${ci.toFixed(3)}</b> = ±1.96·σ/√N`;
+      } else {
+        msg += ` · no draws yet — press a draw button`;
+      }
+      out.innerHTML = msg;
+    }
+    function drawN(n) { const mu = cMu.get(), sg = cSg.get(); for (let i = 0; i < n; i++) samples.push(mu + sg * rng.normal(0, 1)); draw(); }
+    cMu.onInput(() => { samples = []; draw(); });
+    cSg.onInput(() => { samples = []; draw(); });
+    document.getElementById("pa-1").addEventListener("click", () => drawN(1));
+    document.getElementById("pa-100").addEventListener("click", () => drawN(100));
+    document.getElementById("pa-1e4").addEventListener("click", () => drawN(10000));
+    document.getElementById("pa-clr").addEventListener("click", () => { samples = []; draw(); });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- PANEL B: reparameterization (flagship) ---------------- */
+  (function () {
+    const canvas = document.getElementById("pb"), out = document.getElementById("pb-out");
+    // fixed epsilon cloud, drawn ONCE and frozen
+    const rng = new RNG(7), M = 48, eps = [];
+    for (let i = 0; i < M; i++) eps.push(rng.normal(0, 1));
+    // pick a representative point (nearest to +1.30) to highlight the map
+    let hiIdx = 0, hiBest = 1e9;
+    for (let i = 0; i < M; i++) { const dd = Math.abs(eps[i] - 1.30); if (dd < hiBest) { hiBest = dd; hiIdx = i; } }
+    const cMu = makeCtrl(document.getElementById("pb-ctrls"),
+      { label: "shift μ", min: -3, max: 3, step: 0.1, value: 1, fmt: v => v.toFixed(1) });
+    const cSg = makeCtrl(document.getElementById("pb-ctrls"),
+      { label: "stretch σ", min: 0, max: 3, step: 0.05, value: 2, fmt: v => v.toFixed(2) });
+    const X0 = -10, X1 = 10, yEps = 0.72, yX = 0.30;
+
+    function draw() {
+      const mu = cMu.get(), sg = cSg.get();
+      const p = new Plot(canvas, { xmin: X0, xmax: X1, ymin: 0, ymax: 1, xlabel: "value" });
+      p.clear(); p.grid(null, []); // no y gridlines
+      const g = p.g;
+      // labels
+      g.save(); g.fillStyle = dim(); g.font = "12px system-ui"; g.textAlign = "left";
+      g.fillText("ε ~ N(0,1)  — drawn once, FROZEN", p._tx(X0) + 4, p._ty(yEps) - 16);
+      g.fillText("x = μ + σ·ε — shifts & stretches", p._tx(X0) + 4, p._ty(yX) + 22);
+      g.restore();
+      // connecting maps (thin) for every point
+      g.save(); g.strokeStyle = dim(); g.globalAlpha = 0.30; g.lineWidth = 1;
+      for (let i = 0; i < M; i++) {
+        const x = mu + sg * eps[i];
+        g.beginPath(); g.moveTo(p._tx(eps[i]), p._ty(yEps) + 6); g.lineTo(p._tx(x), p._ty(yX) - 6); g.stroke();
+      }
+      g.restore();
+      // epsilon dots (fixed) + x dots (live)
+      for (let i = 0; i < M; i++) {
+        const x = mu + sg * eps[i], on = (i === hiIdx);
+        g.save();
+        g.fillStyle = on ? bad() : dim();
+        g.beginPath(); g.arc(p._tx(eps[i]), p._ty(yEps), on ? 5 : 3.2, 0, 2 * Math.PI); g.fill();
+        g.fillStyle = on ? bad() : accent();
+        g.beginPath(); g.arc(p._tx(x), p._ty(yX), on ? 5 : 3.2, 0, 2 * Math.PI); g.fill();
+        g.restore();
+      }
+      const e = eps[hiIdx], xh = mu + sg * e;
+      out.innerHTML = `x = μ + σ·ε = <b>${mu.toFixed(2)}</b> + <b>${sg.toFixed(2)}</b>·ε` +
+        ` — the highlighted point ε=<b>${e.toFixed(2)}</b> maps to x=<b>${xh.toFixed(2)}</b>.` +
+        ` ∂x/∂μ = 1, ∂x/∂σ = ε = <b>${e.toFixed(2)}</b>. The ε cloud never changed.`;
+    }
+    cMu.onInput(draw); cSg.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- PANEL C: concentration (resolves the PREDICT) ---------------- */
+  (function () {
+    const canvas = document.getElementById("pc"), out = document.getElementById("pc-out");
+    const dims = [1, 2, 8, 64, 512, 4096];
+    const cD = makeCtrl(document.getElementById("pc-ctrls"),
+      { label: "dimension d", min: 0, max: 5, step: 1, value: 5, fmt: v => "" + dims[v] });
+
+    function draw() {
+      const d = dims[cD.get()], sd = Math.sqrt(d);
+      const nSamp = d >= 2048 ? 900 : 1600;
+      const rng = new RNG(20); // reseed → same d gives same histogram
+      const norms = [];
+      for (let s = 0; s < nSamp; s++) {
+        let acc = 0;
+        for (let i = 0; i < d; i++) { const g = rng.normal(0, 1); acc += g * g; }
+        norms.push(Math.sqrt(acc));
+      }
+      const m = mean(norms), sg = std(norms);
+      const lo = Math.max(0, sd - 8), hi = sd + 8;
+      const p = new Plot(canvas, { xmin: lo, xmax: hi, ymin: 0, ymax: 1, xlabel: "‖x‖", ylabel: "density" });
+      p.clear();
+      // rescale ymax to the histogram peak
+      const nb = 44, w = (hi - lo) / nb, counts = new Array(nb).fill(0);
+      for (const v of norms) { const b = Math.floor((v - lo) / w); if (b >= 0 && b < nb) counts[b]++; }
+      const peakDens = Math.max(...counts) / (nSamp * w) || 1;
+      const p2 = new Plot(canvas, { xmin: lo, xmax: hi, ymin: 0, ymax: peakDens * 1.2, xlabel: "‖x‖", ylabel: "density" });
+      p2.clear(); p2.grid();
+      drawBars(p2, norms, lo, hi, nb, hist());
+      p2.vline(sd, accent(), null);
+      p2.label(sd, peakDens * 1.12, " √d = " + sd.toFixed(1), accent());
+      out.innerHTML = `d = <b>${d}</b> · √d = <b>${sd.toFixed(2)}</b> · ` +
+        `measured mean ‖x‖ = <b>${m.toFixed(2)}</b>, std = <b>${sg.toFixed(2)}</b> ` +
+        `(over ${nSamp} samples) — ${d >= 64 ? "a thin shell at √d, not a ball" : "spreading out toward the shell"}.`;
+    }
+    cD.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz-08", [
+    {
+      q: "You draw one sample from $\\mathcal N(0, I_d)$ at $d = 4096$. Its expected distance from the origin is (nearest integer):",
+      num: 64, tol: 2, unit: "",
+      why: "$\\mathbb E\\lVert x\\rVert \\approx \\sqrt d = \\sqrt{4096} = 64$. High-D Gaussians are thin shells — almost no sample lands near the origin, even though the origin is the densest point."
+    },
+    {
+      q: "What fraction of a Gaussian's mass lies within $\\pm 2\\sigma$ of the mean?",
+      num: 95.4, tol: 0.5, unit: "%",
+      why: "The 68/95/99.7 rule: $\\pm1\\sigma\\!\\to\\!68.3\\%$, $\\pm2\\sigma\\!\\to\\!95.4\\%$, $\\pm3\\sigma\\!\\to\\!99.7\\%$."
+    },
+    {
+      q: "$x = \\mu + \\sigma\\varepsilon$ lets you backpropagate through a sample because:",
+      opts: [
+        "it removes the randomness entirely",
+        "the randomness lives in the external $\\varepsilon$, so $x$ is a differentiable function of $\\mu,\\sigma$",
+        "autograd approximates the random draw with a smooth surrogate"
+      ],
+      a: 1,
+      why: "The dice are still rolled — but $\\varepsilon$ is drawn once, outside the graph. With $\\varepsilon$ fixed, $x=\\mu+\\sigma\\varepsilon$ is a plain function: $\\partial x/\\partial\\mu=1$, $\\partial x/\\partial\\sigma=\\varepsilon$. Distractor 1 is the 'it removes the randomness' trap — the randomness is relocated, not deleted."
+    },
+    {
+      q: "In $x = \\mu + \\sigma\\varepsilon$, what is $\\partial x / \\partial\\mu$?",
+      num: 1, tol: 0, unit: "",
+      why: "$\\partial x/\\partial\\mu = 1$ (and $\\partial x/\\partial\\sigma = \\varepsilon$). Constant, clean gradients straight through the sample."
+    },
+    {
+      q: "A diffusion paper's forward equation $\\mathbf x_t = \\sqrt{\\bar\\alpha_t}\\,\\mathbf x_0 + \\sqrt{1-\\bar\\alpha_t}\\,\\boldsymbol\\epsilon$ looks brand new. It is really:",
+      opts: [
+        "a fresh derivation unrelated to anything in Part I",
+        "the reparameterization trick $x=\\mu+\\sigma\\varepsilon$ with $\\mu=\\sqrt{\\bar\\alpha_t}\\mathbf x_0$ and $\\sigma=\\sqrt{1-\\bar\\alpha_t}$",
+        "a weighted average that happens to look similar"
+      ],
+      a: 1,
+      why: "Same object, new letters. $\\mu=\\sqrt{\\bar\\alpha_t}\\mathbf x_0$, $\\sigma=\\sqrt{1-\\bar\\alpha_t}$. You'll recognize it on page 54. Distractor 3 is the 'looks similar but isn't' trap — it is exactly the same trick."
+    },
+    {
+      q: "Why does this course only ever need the isotropic Gaussian $\\mathcal N(\\mu, \\sigma^2 I)$?",
+      opts: [
+        "real data is always spherically symmetric",
+        "$\\Sigma = \\sigma^2 I$ has no cross-correlations, so there is nothing to eigen-decompose",
+        "it's only an approximation we tolerate for speed"
+      ],
+      a: 1,
+      why: "$\\sigma^2 I$ is diagonal and equal in every direction — no off-diagonal structure. That is precisely why eigen-decomposition of a covariance was cut from the course: there is nothing to diagonalize. Distractor 1 is the 'everything is Gaussian/round' misconception."
+    },
+    {
+      q: "Squared-error loss (MSE) is secretly:",
+      opts: [
+        "unrelated to probability — just a convenient penalty",
+        "the negative log-likelihood of a Gaussian with fixed variance",
+        "only valid for regression, never for generative models"
+      ],
+      a: 1,
+      why: "Drop $\\mathcal N(\\mu,\\sigma^2)$ into $-\\ln p(x)$ and the $(x-\\mu)^2$ term falls out — MSE is Gaussian NLL. Page 12 derives it and unifies it with cross-entropy. Distractor 1 is the 'loss is arbitrary' misconception."
+    }
+  ], "Probability & the Gaussian — self-check");
+
+});
+</script>
+</body>
+</html>

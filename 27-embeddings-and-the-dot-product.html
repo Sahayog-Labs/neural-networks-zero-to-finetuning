@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>27. Embeddings and the Dot Product — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. Flagship demo is a draggable-vector similarity meter (Panel 1)
+   plus a live near-orthogonality histogram (Panel 2). Both are custom canvas
+   draws (no Plot needed for Panel 1; Plot's grid + manual fillRect bars for
+   Panel 2's histogram) so wide artifacts never force page-level horizontal
+   scroll — everything sizes off canvas.clientWidth like the rest of the course. */
+.dp-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.dp-btns .btn.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.dp-ribbon { font-family: var(--mono, monospace); font-size: .82rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); }
+#d-dot { cursor: grab; touch-action: none; }
+#d-dot:active { cursor: grabbing; }
+h3.dp-panel { margin: 22px 0 6px; font-size: 1rem; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; }
+.ledger-wrap { max-width: 100%; overflow-x: auto; margin: 1em 0; }
+.ledger-wrap table.ledger { margin: 0; }
+</style>
+</head>
+<body data-page="27-embeddings-and-the-dot-product.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Embeddings and the Dot Product</h1>
+    <p class="subtitle">This is where attention is won or lost. Not because the dot product is hard — you know it
+      cold — but because everything on pages 29–37 is a variation on one question: <em>how much does this vector
+      point along that one?</em> If that question doesn't have a physical feel by the end of this page, $QK^\top$
+      will read as symbol-shuffling instead of arithmetic you can see.</p>
+
+    <!-- ===================== THREAD ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product beat 3/…]</b>. <em>Same object</em> you've met twice already — a neuron's weighted sum
+      is a dot product, and a matmul is a batch of dot products computed at once. <em>What's new:</em> here the dot
+      product stops being "a computation" and becomes a <b>similarity meter</b> — its sign and size say something
+      about meaning, not just arithmetic. <em>Next beat:</em> page 29, where $QK^\top$ turns out to be exactly this
+      meter run $S\times S$ times in one matmul.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Take two random unit vectors in $4096$ dimensions — Qwen3-8B's residual-stream width. Is their typical angle
+      closer to <b>0°</b>, <b>45°</b>, or <b>90°</b>? Commit before you scroll.
+    </div>
+    <p>Almost everyone's intuition says 45° — "random" feels like "somewhat aligned." The honest answer is
+      <b>~90°</b>, and by the time you've dragged the $d$ slider in Panel 2 below, you'll have watched why.</p>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>An address, and a meter that reads it</h2>
+    <p>An embedding is a learned <em>address</em> — a point in a few-thousand-dimensional space. Once a token has
+      been looked up, its identity as a token is gone; all that's left is its coordinates. Everything downstream —
+      attention, the residual stream, the final softmax — only ever asks questions <em>about those coordinates</em>.
+      The dot product is the question: <em>"how much of this vector points along that one?"</em> — a similarity
+      meter with a needle. Positive: aligned. Zero: unrelated. Negative: opposed. You already use this instrument
+      every time you read a cosine-similarity score off an embedding search; this page is where it gets a hand.</p>
+
+    <!-- ===================== THE MATH ===================== -->
+    <h2>The math</h2>
+    <p>Token lookup is a matmul in disguise: represent token $v$ as a one-hot row $\mathbf{o}_v \in \{0,1\}^V$, and
+      the embedding is $\mathbf{e}_v = E^\top\mathbf{o}_v$ — literally selecting row $v$ of $E$. Writing it as a
+      matmul (rather than "array indexing") is not pedantry: it is the reason gradients flow back into the
+      embedding table at all — <code>nn.Embedding</code>'s backward pass is exactly this matmul's backward pass,
+      accumulated over every position that used token $v$ in the batch.</p>
+
+    <div class="dp-ribbon">shape ribbon (embedding lookup):
+  o_v   (V,)            one-hot at index v
+  E     (V, d)          the whole table            — (out, in) reads oddly here; E is a LOOKUP TABLE, not a Linear
+  e_v = E.T @ o_v        (d,)            = row v of E, selected</div>
+
+    <p><b>Qwen3-8B [VP, constants §1.1]:</b> $V = 151{,}936$, $d = 4096$, so $E \in \mathbb{R}^{151{,}936\times4096}$
+      holds</p>
+    <p>$$P_E = 151{,}936 \times 4096 = \mathbf{622{,}329{,}856} \approx 622\text{M}$$</p>
+    <p>— <b>7.6%</b> of the model's 8,190,735,360 total parameters [VP, constants §1.1], sitting in a pure lookup
+      table with no computation attached. <span style="color:var(--text-dim)">[THREAD:Qwen3-8B] this number recurs
+      whole on page 36's parameter count.]</span></p>
+
+    <p>Now the meter itself. For vectors $\mathbf{a},\mathbf{b}$:</p>
+    <p>$$\mathbf{a}\cdot\mathbf{b} = \sum_i a_i b_i = \|\mathbf{a}\|\,\|\mathbf{b}\|\,\cos\vartheta, \qquad
+      \cos\vartheta \in [-1, 1]$$</p>
+
+    <div class="ledger-wrap">
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{a},\mathbf{b}$</td><td>two embedding (or query/key) vectors</td><td>$(d,)$</td><td>the two things being compared</td></tr>
+        <tr><td>$\mathbf{a}\cdot\mathbf{b}$</td><td>the raw dot product — sum of elementwise products</td><td>scalar</td><td>computed</td></tr>
+        <tr><td>$\|\mathbf{a}\|,\|\mathbf{b}\|$</td><td>Euclidean lengths</td><td>scalar</td><td>computed</td></tr>
+        <tr><td>$\vartheta$</td><td>the angle between them — <b>geometric angle, never $\theta$</b> (notation §5.4)</td><td>radians/degrees</td><td>computed</td></tr>
+        <tr><td>$\cos\vartheta$</td><td>the dot product with length divided out — a calibrated similarity</td><td>$[-1,1]$</td><td>computed</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <p>Then attention's whole score matrix is nothing more than this meter, run in bulk. <span
+      style="color:var(--text-dim)">(Notice the overload: $S$ names the score <em>matrix</em> here and the sequence
+      <em>length</em> in the shape ribbon below — the field does this too; context always disambiguates, since one
+      is a matrix and the other a scalar.)</span></p>
+    <p>$$S = QK^\top, \qquad S_{ij} = \mathbf{q}_i\cdot\mathbf{k}_j$$</p>
+
+    <div class="ledger-wrap">
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$Q$</td><td>queries — one row per sequence position $i$</td><td>$(S, d_{\text{head}})$</td><td>a learned projection (page 29)</td></tr>
+        <tr><td>$K$</td><td>keys — one row per sequence position $j$</td><td>$(S, d_{\text{head}})$</td><td>a learned projection (page 29)</td></tr>
+        <tr><td>$S$</td><td>the raw (pre-softmax) score matrix</td><td>$(S,S)$ — <b>overloaded with seq-length $S$, see note above</b></td><td>computed, $=QK^\top$</td></tr>
+        <tr><td>$i,j$</td><td>query / key position — <b>not $t$</b> (notation §3)</td><td>$1..S$ each</td><td>indexing $Q,K$'s rows</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <div class="dp-ribbon">shape ribbon ($QK^\top$, one head, batch omitted):
+  Q     (S, d_head)         one query row per sequence position i
+  K     (S, d_head)         one key row per sequence position j
+  S = Q @ K.T                (S, S)          S_ij = q_i · k_j — a table of dot products</div>
+
+    <p>Say it plainly: <b>$QK^\top$ is not mysterious. It is $S\times S$ dot products computed at once, because
+      that is what a matmul <em>is</em>.</b> Page 29 opens exactly here.</p>
+
+    <!-- ===================== WORKED EXAMPLE ===================== -->
+    <h2>A worked example — three toy embeddings</h2>
+    <div class="box worked"><span class="box-title">✍️ Worked example</span>
+      Toy 3-D embeddings (these three vectors recur in page 29's attention widget):
+      $\mathbf{v}_{\text{king}} = (0.9, 0.8, 0.1)$, $\mathbf{v}_{\text{queen}} = (0.85, -0.7, 0.15)$,
+      $\mathbf{v}_{\text{bicycle}} = (-0.4, 0.05, 0.9)$.<br><br>
+      <b>king · queen</b> $= (0.9)(0.85) + (0.8)(-0.7) + (0.1)(0.15) = 0.765 - 0.560 + 0.015 = \mathbf{0.220}$.<br>
+      $\|\text{king}\| = \sqrt{1.46} = 1.208$, $\|\text{queen}\| = \sqrt{1.235} = 1.111$, so
+      $\cos\vartheta = 0.220 / 1.342 = \mathbf{0.164} \Rightarrow \vartheta = 80.6°$.<br><br>
+      <b>king · bicycle</b> $= -0.360 + 0.040 + 0.090 = \mathbf{-0.230}$, $\|\text{bicycle}\| = \sqrt{0.9725}=0.986$,
+      $\cos\vartheta = -0.230/1.192 = \mathbf{-0.193} \Rightarrow \vartheta = 101.1°$.<br><br>
+      <b>The lesson:</b> king and queen are <em>nearly orthogonal here</em> — 0.164 is barely off zero — because
+      this toy space disagrees hard on the second axis (0.8 vs $-0.7$). Similarity is a <b>projection</b>; which
+      directions you weight decides the answer. Plant the seed: $Q$ and $K$ are <em>learned</em> projections that
+      choose exactly those directions (harvested on pages 29–30).<br><br>
+      Now scale king by 10: the raw dot goes to $10\times0.220=\mathbf{2.20}$ — but $\cos\vartheta$ stays
+      <b>0.164</b>, unchanged. The raw dot product conflates <em>direction</em> (meaning) with <em>magnitude</em>
+      (confidence). That conflation is precisely why 2026-era models add a normalization step to $Q$ and $K$ before
+      scoring — Qwen3 ships <code>q_norm</code>/<code>k_norm</code> [VP] for this exact reason (pages 30/34).
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Try the meter yourself</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      <b>Panel 1:</b> drag either vector's tip. Rotate <span style="color:var(--accent2)">b</span> until it's
+      perpendicular to <span style="color:var(--accent)">a</span> and watch the dot hit exactly 0. Switch to
+      "raw dot" mode, then press <b>scale a ×2</b> a few times — the number balloons while the needle in
+      "cosine" mode never moves. <b>Panel 2:</b> drag $d$ from 2 up toward 512 and watch the histogram of 2000
+      random-pair cosines collapse from a broad spread onto a spike at zero — that's the PREDICT, resolving live.
+    </div>
+    <div class="demo">
+      <div class="demo-head">The Dot-Product Similarity Meter <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+
+        <h3 class="dp-panel">Panel 1 — drag the vectors</h3>
+        <canvas id="d-dot" height="360"></canvas>
+        <div class="dp-btns">
+          <button class="btn secondary" id="d-dot-mode-cos">show: cosine</button>
+          <button class="btn secondary" id="d-dot-mode-raw">show: raw dot</button>
+          <button class="btn secondary" id="d-dot-rot90">rotate b +90°</button>
+          <button class="btn secondary" id="d-dot-scale">scale a ×2</button>
+          <button class="btn secondary" id="d-dot-reset">reset</button>
+        </div>
+        <div class="readout" id="d-dot-out"></div>
+
+        <h3 class="dp-panel">Panel 2 — near-orthogonality at scale</h3>
+        <canvas id="d-orth" height="280"></canvas>
+        <div class="controls" id="d-orth-ctrls"></div>
+        <div class="readout" id="d-orth-out"></div>
+      </div>
+    </div>
+
+    <p>The histogram answers the PREDICT directly: even at $d=64$ the spread is already visibly tighter than the
+      flat, everything-goes distribution at $d=2$; by $d=512$ (still an eighth of Qwen3's actual width) it is a
+      narrow spike hugging zero. At Qwen3-8B's real $d=4096$ — beyond this demo's slider range, but the same
+      formula — the predicted spread is $1/\sqrt{4096} = 1/64 = \mathbf{0.0156}$ <span
+      style="color:var(--text-dim)">[DER]</span>. Two random directions in a few-thousand dimensions are, for all
+      practical purposes, always at ~90°.</p>
+
+    <!-- ===================== WHAT EMBEDDING SPACE LOOKS LIKE ===================== -->
+    <h2>What embedding space actually looks like</h2>
+    <p>Near-orthogonality is the quantitative core of a bigger, honest picture — worth stating plainly before the
+      deep dive so it isn't mistaken for decoration: raw cosine similarity is a poorly calibrated ruler on real
+      contextual embeddings, and that miscalibration is a live bug source, not a curiosity.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: anisotropy, analogies, and why 4096 dimensions hold more than 4096 concepts</summary><div>
+      <p><b>(1) Anisotropy</b> <span style="color:var(--text-dim)">[M]</span> — real contextual embeddings don't
+        spread uniformly over the sphere; they occupy a narrow cone. Random-pair cosine among them runs
+        <em>high</em> (~0.5–0.9), not near zero the way this page's random-unit-vector demo shows. This is
+        <em>the</em> reason production RAG systems use contrastively-trained embedders rather than raw LLM hidden
+        states — a raw hidden-state space isn't calibrated the way this page's toy vectors are (forward-ref RAG,
+        Part IV).</p>
+      <p><b>(2) The <code>king − man + woman ≈ queen</code> analogy</b> <span style="color:var(--text-dim)">[M]</span>
+        is real but oversold — it only works reliably once you exclude the input words themselves from the
+        nearest-neighbor search. Treat it as a suggestive party trick, not a load-bearing property.</p>
+      <p><b>(3) The linear-representation hypothesis</b> <span style="color:var(--text-dim)">[D]</span> — features
+        as directions in activation space, not individual coordinates. This is the implicit justification for why a
+        low-rank additive update (LoRA, forward-ref) can steer behavior at all: if a concept is one direction, a
+        rank-1 nudge along it is enough.</p>
+      <p><b>(4) Near-orthogonality, quantitatively</b> — in $d=4096$, $\mathbb{E}[\cos\vartheta]=0$ with
+        std $\approx 1/\sqrt{d} = 0.0156$; exponentially many almost-orthogonal directions fit in a space of only
+        thousands of dimensions (the Johnson–Lindenstrauss lemma <span style="color:var(--text-dim)">[VP]</span> is
+        solid; calling this "superposition" is a framing <span style="color:var(--text-dim)">[M]</span>, not a
+        theorem). This is the actual storage-capacity argument for why $d=4096$ can encode vastly more than 4096
+        independent "concepts."</p>
+    </div></details>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Each embedding dimension means something."</span>
+      Meaning lives in <em>directions</em>, generally not axis-aligned ones, and the linear-representation
+      hypothesis implies there are more meaningful directions than there are dimensions to hold them
+      one-per-axis. The Johnson–Lindenstrauss count above is the fix for this intuition, not a hand-wave.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Token X always has vector V."</span>
+      Only true of <b>layer 0</b>, the raw input lookup. One transformer block later the vector is
+      <em>contextual</em> — "bank" in "river bank" and "bank account" diverge immediately, because attention has
+      already mixed in neighboring tokens. The table $E$ is an address book, not the final answer.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Higher cosine means more related." — this one actively breaks RAG systems.</span>
+      Only inside a <em>calibrated</em> space. Anisotropic embedding spaces (the deep-dive above) can put the
+      random-pair floor at cosine ≈ 0.7 — a retrieved-and-irrelevant document can score higher than a genuinely
+      relevant one scores in a calibrated space. Compare any retrieval score against that embedder's own
+      random-pair distribution before trusting an absolute threshold.
+    </div>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>Run it yourself</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/dot_product_geometry.py</code> reproduces the king/queen/bicycle numbers above exactly, then
+      samples random unit vectors at $d\in\{2,64,4096\}$ and prints the mean and std of 5,000 pairwise cosines —
+      the same measurement Panel 2 makes live, extended to Qwen3's actual width.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line">torch.manual_seed(<span class="tok-num">42</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># king/queen/bicycle: the page's worked example, verified bit-for-bit</span></span>
+<span class="line">king    = torch.tensor([<span class="tok-num">0.9</span>, <span class="tok-num">0.8</span>, <span class="tok-num">0.1</span>])</span>
+<span class="line">queen   = torch.tensor([<span class="tok-num">0.85</span>, -<span class="tok-num">0.7</span>, <span class="tok-num">0.15</span>])</span>
+<span class="line">bicycle = torch.tensor([-<span class="tok-num">0.4</span>, <span class="tok-num">0.05</span>, <span class="tok-num">0.9</span>])</span>
+<span class="line">cos = torch.nn.<span class="tok-fn">CosineSimilarity</span>(dim=<span class="tok-num">0</span>)</span>
+<span class="line hl">print(king @ queen, cos(king, queen))   <span class="tok-com"># 0.2200, 0.1639</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-27"></div>
+
+    <p style="margin-top:28px; color:var(--text-dim); font-size:.9rem">
+      Next: page 29 turns this exact meter into attention — $QK^\top$ is $S\times S$ of these dot products, computed
+      in one matmul. → RAG (Part IV) inherits the anisotropy warning above; → page 36 folds the 622M embedding
+      table back into the full parameter count.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==================== PANEL 1: draggable dot-product meter ==================== */
+  (function () {
+    const canvas = document.getElementById("d-dot");
+    const out = document.getElementById("d-dot-out");
+    const DOMAIN = 2.6;     // half-width of the drawn plane, in data units
+    const DRAW_CLAMP = 2.4; // vectors are drawn clamped to this length even if the true value (via "scale a") exceeds it
+
+    let a = { x: 1.4, y: 0.5 };
+    let b = { x: 0.4, y: 1.3 };
+    let mode = "cos";     // 'cos' | 'raw'
+    let dragging = null;  // 'a' | 'b' | null
+
+    function planeGeom(W, H) {
+      const gaugeH = 70;
+      const topH = H - gaugeH;
+      const originX = W / 2, originY = topH / 2;
+      const scale = Math.max(20, Math.min(W, topH) / 2 / DOMAIN - 4);
+      return { topH, gaugeH, originX, originY, scale };
+    }
+    function toScreen(v, geom) { return { x: geom.originX + v.x * geom.scale, y: geom.originY - v.y * geom.scale }; }
+    function toData(px, py, geom) { return { x: (px - geom.originX) / geom.scale, y: -(py - geom.originY) / geom.scale }; }
+    function clampLen(v, maxLen) {
+      const len = Math.hypot(v.x, v.y);
+      if (len <= maxLen || len < 1e-9) return v;
+      const s = maxLen / len;
+      return { x: v.x * s, y: v.y * s };
+    }
+
+    // REAL math, computed live from whatever a/b currently are (drag or button).
+    function compute() {
+      const dot = a.x * b.x + a.y * b.y;
+      const na = Math.hypot(a.x, a.y), nb = Math.hypot(b.x, b.y);
+      const cos = (na > 1e-9 && nb > 1e-9) ? dot / (na * nb) : 0;
+      const denom = a.x * a.x + a.y * a.y;
+      const proj = denom > 1e-9 ? { x: a.x * (dot / denom), y: a.y * (dot / denom) } : { x: 0, y: 0 };
+      const angDeg = Math.acos(Math.max(-1, Math.min(1, cos))) * 180 / Math.PI;
+      return { dot, cos, na, nb, proj, angDeg };
+    }
+
+    function drawArrow(g, x0, y0, x1, y1, color) {
+      g.strokeStyle = color; g.fillStyle = color; g.lineWidth = 2.5;
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      const ang = Math.atan2(y1 - y0, x1 - x0), hs = 9;
+      g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x1 - hs * Math.cos(ang - 0.35), y1 - hs * Math.sin(ang - 0.35));
+      g.lineTo(x1 - hs * Math.cos(ang + 0.35), y1 - hs * Math.sin(ang + 0.35));
+      g.closePath(); g.fill();
+    }
+
+    function draw() {
+      const th = vizUtils.themeColors();
+      const { g, W, H } = vizUtils.fitCanvas(canvas, 360);
+      g.clearRect(0, 0, W, H);
+      const geom = planeGeom(W, H);
+      const { originX, originY, scale, topH, gaugeH } = geom;
+
+      g.fillStyle = th.bgCanvas; g.fillRect(0, 0, W, topH);
+      g.strokeStyle = th.border; g.lineWidth = 1;
+      [1, 2].forEach(r => { g.beginPath(); g.arc(originX, originY, r * scale, 0, Math.PI * 2); g.stroke(); });
+      g.beginPath(); g.moveTo(0, originY); g.lineTo(W, originY); g.moveTo(originX, 0); g.lineTo(originX, topH); g.stroke();
+
+      const { dot, cos, na, nb, proj, angDeg } = compute();
+      const aDraw = clampLen(a, DRAW_CLAMP), bDraw = clampLen(b, DRAW_CLAMP);
+      const projDraw = clampLen(proj, DRAW_CLAMP);
+      const pA = toScreen(aDraw, geom), pB = toScreen(bDraw, geom), pProj = toScreen(projDraw, geom);
+
+      // projection: dashed segment origin->proj (along a), dashed perpendicular drop from b's tip
+      g.setLineDash([4, 4]); g.strokeStyle = th.textDim; g.lineWidth = 1.5;
+      g.beginPath(); g.moveTo(originX, originY); g.lineTo(pProj.x, pProj.y); g.stroke();
+      g.beginPath(); g.moveTo(pB.x, pB.y); g.lineTo(pProj.x, pProj.y); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = th.textDim; g.beginPath(); g.arc(pProj.x, pProj.y, 3, 0, Math.PI * 2); g.fill();
+
+      drawArrow(g, originX, originY, pA.x, pA.y, th.accent);
+      drawArrow(g, originX, originY, pB.x, pB.y, th.accent2);
+      g.fillStyle = th.accent; g.beginPath(); g.arc(pA.x, pA.y, 7, 0, Math.PI * 2); g.fill();
+      g.fillStyle = th.accent2; g.beginPath(); g.arc(pB.x, pB.y, 7, 0, Math.PI * 2); g.fill();
+
+      g.font = "13px system-ui"; g.textAlign = "left"; g.textBaseline = "bottom";
+      g.fillStyle = th.accent; g.fillText("a", pA.x + 10, pA.y - 6);
+      g.fillStyle = th.accent2; g.fillText("b", pB.x + 10, pB.y - 6);
+
+      // gauge strip
+      const gy0 = topH + 10, gx0 = 56, gx1 = W - 56;
+      g.strokeStyle = th.border; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(gx0, gy0); g.lineTo(gx1, gy0); g.stroke();
+      let val, lo, hi, label;
+      if (mode === "cos") { val = cos; lo = -1; hi = 1; label = "cosine ϑ"; }
+      else { val = dot; lo = -6; hi = 6; label = "raw dot"; }
+      const t = Math.max(0, Math.min(1, (val - lo) / (hi - lo)));
+      const px = gx0 + t * (gx1 - gx0);
+      g.fillStyle = vizUtils.cssVar("--plot-tick", "#8391ab"); g.font = "10px system-ui"; g.textAlign = "center"; g.textBaseline = "top";
+      g.fillText(lo.toFixed(1), gx0, gy0 + 4);
+      g.fillText("0", gx0 + (gx1 - gx0) / 2, gy0 + 4);
+      g.fillText(hi.toFixed(1), gx1, gy0 + 4);
+      g.strokeStyle = th.accent; g.lineWidth = 3;
+      g.beginPath(); g.moveTo(px, gy0 - 9); g.lineTo(px, gy0 + 9); g.stroke();
+      g.fillStyle = vizUtils.cssVar("--plot-label", "#a8b4cc"); g.font = "12px system-ui"; g.textAlign = "center"; g.textBaseline = "top";
+      g.fillText(`${label}: ${val.toFixed(3)}`, (gx0 + gx1) / 2, gy0 + 16);
+
+      out.innerHTML = `dot = a·b = <b>${dot.toFixed(3)}</b> · cos ϑ = <b>${cos.toFixed(3)}</b> · ϑ ≈ <b>${angDeg.toFixed(1)}°</b> · ` +
+        `‖a‖=${na.toFixed(2)}, ‖b‖=${nb.toFixed(2)} — meter reading: <b>${mode === "cos" ? "cosine" : "raw dot"}</b>` +
+        (na > DRAW_CLAMP || nb > DRAW_CLAMP ? ` <span style="color:var(--text-dim)">(arrow pinned at the edge — the true vector is longer)</span>` : "");
+    }
+
+    function getPos(evt) {
+      const rect = canvas.getBoundingClientRect();
+      const cx = evt.touches ? evt.touches[0].clientX : evt.clientX;
+      const cy = evt.touches ? evt.touches[0].clientY : evt.clientY;
+      return { x: cx - rect.left, y: cy - rect.top };
+    }
+    function hitTest(pos, W, H) {
+      const geom = planeGeom(W, H);
+      const pA = toScreen(clampLen(a, DRAW_CLAMP), geom), pB = toScreen(clampLen(b, DRAW_CLAMP), geom);
+      if (Math.hypot(pos.x - pA.x, pos.y - pA.y) < 16) return "a";
+      if (Math.hypot(pos.x - pB.x, pos.y - pB.y) < 16) return "b";
+      return null;
+    }
+    function currentWH() {
+      return { W: canvas.clientWidth || 600, H: +canvas.dataset.baseH || 360 };
+    }
+
+    canvas.addEventListener("pointerdown", e => {
+      const pos = getPos(e), { W, H } = currentWH();
+      dragging = hitTest(pos, W, H);
+      if (dragging) { canvas.setPointerCapture(e.pointerId); e.preventDefault(); }
+    });
+    canvas.addEventListener("pointermove", e => {
+      if (!dragging) return;
+      const pos = getPos(e), { W, H } = currentWH();
+      const geom = planeGeom(W, H);
+      let d = toData(pos.x, pos.y, geom);
+      const len = Math.hypot(d.x, d.y);
+      if (len > DRAW_CLAMP) { d.x *= DRAW_CLAMP / len; d.y *= DRAW_CLAMP / len; }
+      else if (len < 0.15) { const ang = Math.atan2(d.y, d.x) || 0; d = { x: 0.15 * Math.cos(ang), y: 0.15 * Math.sin(ang) }; }
+      if (dragging === "a") a = d; else b = d;
+      draw();
+    });
+    window.addEventListener("pointerup", () => { dragging = null; });
+
+    function setActive() {
+      document.getElementById("d-dot-mode-cos").classList.toggle("active", mode === "cos");
+      document.getElementById("d-dot-mode-raw").classList.toggle("active", mode === "raw");
+    }
+    document.getElementById("d-dot-mode-cos").addEventListener("click", () => { mode = "cos"; setActive(); draw(); });
+    document.getElementById("d-dot-mode-raw").addEventListener("click", () => { mode = "raw"; setActive(); draw(); });
+    document.getElementById("d-dot-rot90").addEventListener("click", () => { b = { x: -b.y, y: b.x }; draw(); });
+    document.getElementById("d-dot-scale").addEventListener("click", () => { a = { x: a.x * 2, y: a.y * 2 }; draw(); });
+    document.getElementById("d-dot-reset").addEventListener("click", () => {
+      a = { x: 1.4, y: 0.5 }; b = { x: 0.4, y: 1.3 }; mode = "cos"; setActive(); draw();
+    });
+
+    setActive();
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==================== PANEL 2: near-orthogonality histogram ==================== */
+  (function () {
+    const canvas = document.getElementById("d-orth");
+    const out = document.getElementById("d-orth-out");
+    const ctrlsHost = document.getElementById("d-orth-ctrls");
+
+    const dCtrl = makeCtrl(ctrlsHost,
+      { label: "dimensions d", min: 2, max: 512, step: 1, value: 8, fmt: v => v.toFixed(0) });
+
+    function sampleUnit(d, rng) {
+      const v = new Array(d);
+      let ss = 0;
+      for (let i = 0; i < d; i++) { const z = rng.normal(0, 1); v[i] = z; ss += z * z; }
+      const inv = 1 / Math.sqrt(ss || 1e-12);
+      for (let i = 0; i < d; i++) v[i] *= inv;
+      return v;
+    }
+    function dot(u, v) { let s = 0; for (let i = 0; i < u.length; i++) s += u[i] * v[i]; return s; }
+
+    function draw() {
+      const d = Math.round(dCtrl.get());
+      const rng = new NN.RNG(20260716);   // fixed seed: same d always reproduces the same histogram
+      const N = 2000;
+      const cosines = new Array(N);
+      let sum = 0, sum2 = 0;
+      for (let i = 0; i < N; i++) {
+        const u = sampleUnit(d, rng), v = sampleUnit(d, rng);   // REAL sampling, two fresh random unit vectors per pair
+        const c = dot(u, v);
+        cosines[i] = c; sum += c; sum2 += c * c;
+      }
+      const mean = sum / N;
+      const variance = Math.max(0, sum2 / N - mean * mean);
+      const sd = Math.sqrt(variance);
+
+      const BINS = 40, lo = -1, hi = 1, wBin = (hi - lo) / BINS;
+      const counts = new Array(BINS).fill(0);
+      for (const c of cosines) { let bi = Math.floor((c - lo) / wBin); if (bi < 0) bi = 0; if (bi >= BINS) bi = BINS - 1; counts[bi]++; }
+      const maxCount = Math.max(...counts, 1);
+
+      const p = new Plot(canvas, { xmin: lo, xmax: hi, ymin: 0, ymax: maxCount * 1.15, xlabel: "cosine ϑ between two random unit vectors", ylabel: "count / 2000" });
+      p.clear(); p.grid();
+      const accent = vizUtils.cssVar("--accent", "#b48cff");
+      for (let i = 0; i < BINS; i++) {
+        const x0 = lo + i * wBin, x1 = x0 + wBin;
+        const px0 = p._tx(x0), px1 = p._tx(x1), py0 = p._ty(0), py1 = p._ty(counts[i]);
+        p.g.fillStyle = accent;
+        p.g.fillRect(px0, py1, Math.max(1, px1 - px0 - 1), py0 - py1);
+      }
+      p.vline(0, vizUtils.cssVar("--text-dim", "#9a90b5"), [3, 3]);
+
+      const predSd = 1 / Math.sqrt(d);
+      out.innerHTML = `d = <b>${d}</b> · sampled mean <b>${mean.toFixed(4)}</b> · sampled std <b>${sd.toFixed(4)}</b> ` +
+        `· predicted std $1/\\sqrt{d}$ = <b>${predSd.toFixed(4)}</b> — 2000 pairs, fixed seed, so dragging back to the ` +
+        `same $d$ reproduces this exactly.`;
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+    dCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==================== QUIZ ==================== */
+  renderQuiz("quiz-27", [
+    {
+      q: "For the frozen vectors $\\mathbf{v}_{\\text{king}}=(0.9,0.8,0.1)$, $\\mathbf{v}_{\\text{queen}}=(0.85,-0.7,0.15)$, what is king · queen?",
+      num: 0.220, tol: 0.005,
+      why: "$(0.9)(0.85)+(0.8)(-0.7)+(0.1)(0.15) = 0.765 - 0.560 + 0.015 = 0.220$."
+    },
+    {
+      q: "$\\cos\\vartheta$ between king and queen (same vectors)?",
+      num: 0.164, tol: 0.005,
+      why: "$0.220 / (\\|\\text{king}\\|\\|\\text{queen}\\|) = 0.220/(1.208\\times1.111) = 0.220/1.342 = 0.164$."
+    },
+    {
+      q: "You scale the king vector by 10 and recompute against queen. What changes?",
+      opts: ["The raw dot product (×10); cosine is unchanged", "Cosine (×10); the raw dot is unchanged",
+        "Both scale by 10", "Neither changes — scaling a vector never affects a dot product"],
+      a: 0,
+      why: "Raw dot is bilinear in magnitude — scaling one input by 10 scales the dot by 10 exactly. Cosine divides that magnitude back out, so it's invariant to it. This is the direction-vs-confidence conflation the worked example makes explicit."
+    },
+    {
+      q: "Typical standard deviation of the cosine between two random unit vectors in $d=4096$ (Qwen3-8B's width)?",
+      num: 0.0156, tol: 0.003,
+      why: "std $\\approx 1/\\sqrt{d} = 1/\\sqrt{4096} = 1/64 = 0.015625$ — the near-orthogonality result Panel 2's histogram approaches as $d$ grows."
+    },
+    {
+      q: "How many parameters does Qwen3-8B's <code>embed_tokens</code> table have?",
+      opts: ["4,096", "151,936", "622,329,856", "8,190,735,360"],
+      a: 2,
+      why: "$V\\times d = 151{,}936\\times4096 = 622{,}329{,}856$ — 7.6% of the model, in a pure lookup table. The distractors are $d$ alone, $V$ alone, and the model's TOTAL parameter count."
+    },
+    {
+      q: "Diagnosis: your RAG pipeline retrieves garbage, and every candidate's cosine similarity to the query sits around 0.8, correct or not. Most likely cause and fix?",
+      opts: [
+        "The embedding dimension is too small — switch to a bigger model",
+        "Anisotropy: the raw hidden-state space isn't calibrated; use a contrastively-trained embedder and compare against its random-pair baseline",
+        "The documents need more overlapping keywords with the query",
+        "Cosine similarity is broken; switch to Euclidean distance"
+      ],
+      a: 1,
+      why: "Anisotropic embedding spaces put the random-pair cosine floor well above 0 — 0.8 may mean 'unrelated,' not 'relevant.' Raw LLM hidden states are exactly this kind of uncalibrated space; contrastively-trained embedders exist specifically to fix it."
+    }
+  ], "Embeddings & the dot product — self-check");
+
+});
+</script>
+</body>
+</html>

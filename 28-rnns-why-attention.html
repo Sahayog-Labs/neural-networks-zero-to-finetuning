@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>28. RNNs &amp; Why Attention Had to Exist — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the decay-vs-highway plot and its two-slider control row need
+   room to breathe on narrow screens without the page body scrolling sideways. */
+.inner .demo-body { overflow-x: auto; }
+</style>
+</head>
+<body data-page="28-rnns-why-attention.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>RNNs and the Sequential Bottleneck: Why Attention Had to Exist</h1>
+    <p class="subtitle">You will never write an LSTM from scratch, and this page will not teach you to. It has two
+      jobs: make the pain that killed recurrent networks visceral enough that attention arrives as relief, not
+      novelty — and install three words (hidden state, step, BPTT) the diffusion sampling loop reuses without
+      re-explaining them. Two failures, cleanly separated: one is a <em>learning</em> problem, one is a
+      <em>hardware</em> problem, and only one of them killed RNNs.</p>
+
+    <!-- ===================== PREDICT (opens the page) ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Why did transformers beat RNNs — because attention is <b>(a)</b> smarter, more expressive; <b>(b)</b> cheaper
+      per token; or <b>(c)</b> parallelizable across the sequence? Commit to one before you scroll.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>Reading one token at a time, carrying a running summary</h2>
+    <p>An RNN reads the way you read: one token at a time, updating a running summary as it goes. At every step it
+      folds the new input into a fixed-size <b>hidden state</b> — a vector that is, by construction, the network's
+      <em>entire</em> memory of everything that came before. That compression is both the elegance and, as this
+      page derives, the death sentence: everything the network will ever know about token 1 has to survive being
+      squeezed through the same fixed-size bottleneck at every step between then and now.</p>
+
+    <p>Weights are shared across every step — the same update rule applies whether you're at position 3 or position
+      3,000. That sharing is the RNN's installed inductive bias: <em>time-invariance</em>, a bet that "the rule for
+      updating your summary shouldn't depend on how far into the sequence you are." (Recall page 25's table: every
+      architecture is a bet like this.)</p>
+
+    <!-- ===================== THE MATH ===================== -->
+    <h2>The recurrence, stated once</h2>
+    <p>$$\mathbf{h}_i=\tanh\!\left(W_{hh}\mathbf{h}_{i-1}+W_{xh}\mathbf{x}_i+\mathbf{b}\right),\qquad
+       \mathbf{y}_i=W_{hy}\mathbf{h}_i$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{h}_i$</td><td>hidden state after step $i$ — the network's <em>entire</em> memory of everything before it</td><td>$(d_h,1)$</td><td>computed, recurrent</td></tr>
+        <tr><td>$W_{hh}$</td><td>recurrent weight, $(d_{\text{out}},d_{\text{in}})=(d_h,d_h)$ (notation §1) — the <em>same matrix</em> at every step</td><td>$(d_h,d_h)$</td><td>learned, shared across all $i$</td></tr>
+        <tr><td>$\mathbf{h}_{i-1}$</td><td>hidden state one step back — the only channel the past travels through</td><td>$(d_h,1)$</td><td>previous step, the recursion</td></tr>
+        <tr><td>$W_{xh}$</td><td>input-to-hidden weight</td><td>$(d_h,d_{\text{in}})$</td><td>learned, shared across all $i$</td></tr>
+        <tr><td>$\mathbf{x}_i$</td><td>input at step $i$</td><td>$(d_{\text{in}},1)$</td><td>given</td></tr>
+        <tr><td>$\mathbf{b}$</td><td>bias</td><td>$(d_h,1)$</td><td>learned</td></tr>
+        <tr><td>$W_{hy}$</td><td>output weight</td><td>$(d_{\text{out}},d_h)$</td><td>learned</td></tr>
+        <tr><td>$i$</td><td><b>sequence position</b>, $1..S$ — <b>not $t$</b> (notation §3: $t$ is reserved for the diffusion timestep, $k$ for the optimizer step)</td><td>index</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">Shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">h_{i-1}          (d_h, 1)</span>
+<span class="line">W_hh             (d_h, d_h)     # (out, in) — the SAME matrix every step</span>
+<span class="line">W_hh @ h_{i-1}   (d_h, 1)</span>
+<span class="line">x_i              (d_in, 1)</span>
+<span class="line">W_xh             (d_h, d_in)   # (out, in) — SAME matrix every step</span>
+<span class="line">W_xh @ x_i       (d_h, 1)</span>
+<span class="line">tanh(sum + b)    (d_h, 1)       → h_i, fed into step i+1</span></code></pre>
+    </div>
+
+    <p><b>Translation note:</b> papers universally write this recurrence with $t$ for the step. This course reserves
+      $t$ for the diffusion timestep and $i$ for sequence position (notation §3) — you'll meet $\mathbf{h}_t$
+      everywhere in the literature; read it as $\mathbf{h}_i$.</p>
+
+    <!-- ===================== FAILURE 1 — LEARNING ===================== -->
+    <h2>Failure 1 — vanishing and exploding gradients (a learning problem)</h2>
+    <p><b>[THREAD:chain-rule — the verb, reopened from pages 5, 14, 15]</b> Backprop through a recurrence is called
+      <b>BPTT</b> (backpropagation through time), and it is nothing new — it is the exact same chain rule you hand-
+      derived on TN-1, applied $S{-}1$ times in a row because the recurrence makes every hidden state depend on the
+      one before it:</p>
+
+    <p>$$\frac{\partial\mathcal L}{\partial\mathbf h_1}=\frac{\partial\mathcal L}{\partial\mathbf h_S}\prod_{i=2}^{S}\frac{\partial\mathbf h_i}{\partial\mathbf h_{i-1}},
+       \qquad \frac{\partial\mathbf h_i}{\partial\mathbf h_{i-1}}=\operatorname{diag}\!\left(1-\mathbf h_i^2\right)W_{hh}^\top$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\partial\mathcal L/\partial\mathbf h_1$</td><td>how much the loss would change if step 1's hidden state nudged — the gradient that has to travel the whole sequence</td><td>$(d_h,1)$</td><td>what we're solving for</td></tr>
+        <tr><td>$\partial\mathcal L/\partial\mathbf h_S$</td><td>the gradient at the last step, where the loss lives</td><td>$(d_h,1)$</td><td>already known — backprop's starting point</td></tr>
+        <tr><td>$\partial\mathbf h_i/\partial\mathbf h_{i-1}$</td><td>one step's local Jacobian — the same chain-rule link from page 5, now one of $S{-}1$ multiplied in a row</td><td>$(d_h,d_h)$</td><td>tanh's local slope × the recurrent weight</td></tr>
+        <tr><td>$\operatorname{diag}(1-\mathbf h_i^2)$</td><td>tanh's derivative at the value it actually took in the forward pass — always $\le 1$</td><td>$(d_h,d_h)$ diagonal</td><td>cached from the forward pass</td></tr>
+        <tr><td>$S$</td><td>sequence length — the number of factors in the product</td><td>scalar</td><td>given</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — the product decays, by default</span>
+      <p>Collapse the Jacobian product to a single scalar decay rate $\gamma$ per step (the largest eigenvalue of
+        $\operatorname{diag}(1-\mathbf h_i^2)W_{hh}^\top$, in spirit) and track $\gamma^{S-1}$, the fraction of the
+        step-$S$ gradient that survives to reach step 1.</p>
+      <p><b>$\gamma=0.9$, $S=100$:</b> $0.9^{99}=\mathbf{2.951\times10^{-5}}$ — under 0.003% of the gradient at step
+        100 survives to reach step 1.</p>
+      <p><b>$\gamma=0.9$, $S=1000$:</b> $0.9^{999}\approx\mathbf{1.94\times10^{-46}}$ — <b>below bf16's smallest
+        normal number, $2^{-126}\approx1.18\times10^{-38}$</b> (bf16 shares fp32's 8-bit exponent field, constants
+        §9.7). That gradient doesn't just get small. It <b>underflows to exactly zero</b> and stops updating
+        anything upstream of it.</p>
+      <p><b>$\gamma=1.1$, $S=100$:</b> $1.1^{99}\approx\mathbf{1.25\times10^{4}}$ — explodes instead. Exploding
+        gradients are <em>fixable</em> (clip the norm); vanishing gradients are not, because clipping a number
+        that's already zero does nothing.</p>
+      <p>And $\tanh'(z)=1-\tanh^2(z)\le1$ <em>always</em> — the diagonal factor in every Jacobian can only shrink,
+        never grow, a norm-1 matrix at best. <b>The product is structurally biased toward decay: vanishing is the
+        default outcome, not an unlucky accident.</b></p>
+    </div>
+
+    <p>LSTMs and GRUs fix this with a near-additive cell-state path whose local Jacobian is close to
+      $\operatorname{diag}(\mathbf f_i)$ with the forget gate $\mathbf f_i\to1$ — a gradient <em>highway</em> that
+      bypasses the $\tanh$ squashing almost entirely. <b>That is the same idea as a residual connection</b> (page
+      34's $I$-term): an additive path the gradient can ride at norm $\approx1$ instead of a multiplicative path
+      that decays it every step. Same problem, same fix, two different decades.</p>
+
+    <!-- ===================== FAILURE 2 — HARDWARE ===================== -->
+    <h2>Failure 2 — the sequential dependency (this is what actually killed RNNs)</h2>
+    <p>LSTMs mostly solved Failure 1. RNNs still died. Here's why: computing $\mathbf h_i$ needs $\mathbf h_{i-1}$ —
+      not approximately, not usually, <em>structurally</em>. $S$ steps, each waiting on the last, none
+      overlappable. A GPU with thousands of cores sits there running one step at a time.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — same FLOPs, radically different traffic</span>
+      <p>Take a hidden width $d_h=4096$ (Qwen3-8B's residual width, constants §4.2 — a realistic scale) and a
+        sequence $S=2048$, weights in bf16 (2 bytes/param).</p>
+      <p><b>The RNN path.</b> Each step is one matrix–vector product $W_{hh}\mathbf h_{i-1}$:
+        $$\text{FLOPs/step}=2d_h^2=2\times4096^2=\mathbf{33.55\ MFLOP},\qquad
+          \text{bytes read/step}=d_h^2\times2=\mathbf{33.55\ MB}$$
+        $$I_{\text{RNN}}=\frac{33.55\text{ MFLOP}}{33.55\text{ MB}}=\mathbf{1.0\ FLOP/byte}$$
+        Every step is a <em>separate kernel launch</em> that must wait for the previous step's output, so the full
+        $33.55$ MB weight matrix is re-read from memory <b>2,048 times</b> — once per step, because nothing can be
+        batched across a dependency chain.</p>
+      <p><b>The transformer path.</b> The same total work, done as <em>one</em> matmul over all $S{=}2048$ positions
+        at once — $(2048{\times}4096)\times(4096{\times}4096)$:
+        $$\text{FLOPs}=2\times2048\times4096^2=2{,}048\times33.55\text{ MFLOP}=\mathbf{6.87\times10^{10}\ FLOP}$$
+        — <em>exactly</em> $2{,}048\times$ the RNN's per-step FLOPs, because it's doing $2{,}048$ token-updates
+        worth of arithmetic. But the weight matrix is read <b>once</b> and reused for every row:
+        $$I_{\text{xform}}=\frac{6.87\times10^{10}\text{ FLOP}}{33.55\text{ MB}}=\mathbf{2{,}048\ FLOP/byte}$$</p>
+      <p><b>Identical total FLOPs. $2{,}048\times$ the arithmetic intensity</b> — because the transformer reuses one
+        weight-memory fetch across every position instead of paying for it $S$ times. This is exactly constants.md
+        §6.5's formula, $I\approx S_{\text{fwd}}$ FLOP/byte at bf16, landing on its own frozen prefill row
+        ($S{=}2048\Rightarrow I{=}2048$).</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The sentence to keep</span>
+      RNNs didn't lose because they couldn't represent language. They lost because a matrix–vector product wastes
+      a GPU and a matrix–matrix product doesn't. The transformer traded a sequential $O(S)$ dependency for a
+      parallel $O(S^2)$ one — and paying $S^2$ FLOPs you can spend beats paying $S$ FLOPs you can't.
+    </div>
+
+    <p>This resolves the PREDICT above: the answer is <b>(c) parallelizable</b> — and it's <em>dumber</em> (a much
+      weaker inductive bias than the RNN's time-invariant update, page 25's table) and <em>more expensive</em>
+      ($O(S^2)$ vs $O(S)$) per token. It won anyway, because $S^2$ FLOPs a GPU can actually spend beat $S$ FLOPs a
+      GPU has to idle through. <b>[THREAD:memory-budget — the reality check, seed]</b> — arithmetic intensity is
+      the tool that will price the KV cache (page 37), the parameter ledger (page 36), and the roofline (page 43);
+      this is its first appearance.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: recurrence came back in 2026 — because Failure 2, specifically, got fixed</summary><div>
+      <p>Recurrent and linear-attention architectures are back, <b>hybridized</b> with regular attention — reported
+        examples in the 2026 architecture-survey literature (not a <code>constants.md</code> figure; label it as
+        such) include Gated-DeltaNet/gated-attention hybrids at roughly a 3:1 linear-to-full-attention ratio, and
+        mixed Lightning-Attention/MLA designs at frontier scale. What changed isn't the math of Failure 1 — it's
+        that the <em>training-time</em> sequential dependency was solved via an associative-scan / chunked-matmul
+        reformulation of the recurrence, which parallelizes across chunks the way attention does, while keeping the
+        $O(1)$-per-token inference memory a plain RNN always had (no growing KV cache).</p>
+      <p><b>The lesson generalizes past this one architecture fad:</b> the sequential <em>training</em> dependency
+        was the specific thing that killed RNNs — not vanishing gradients (LSTMs fixed that in the '90s and RNNs
+        still died a decade later), not representational weakness. Remove the training-time dependency and
+        recurrence is viable again. That said, plain full attention is still the default choice for most frontier
+        models as of this writing — nobody has declared victory for hybrids either way; treat this as an honest
+        "still moving" caveat, not a verdict.</p>
+    </div></details>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three ways this goes wrong in your head</h2>
+
+    <div class="box warn"><span class="box-title">⚠️ "LSTMs solved long-range dependencies."</span>
+      LSTMs solved the <em>gradient</em> problem (Failure 1). They did nothing about the fixed-size hidden-state
+      bottleneck (everything before step $i$ is still squeezed through one vector of width $d_h$) or the sequential
+      dependency (Failure 2). Two of the three problems remained — and Failure 2 is the one that actually ended the
+      architecture's dominance.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Transformers won because attention is smarter."</span>
+      Attention's inductive bias is <em>weaker</em> than an RNN's time-invariant update (page 25), and it's
+      <em>more expensive</em> per token — $O(S^2)$ against the RNN's $O(S)$. It won on parallelism, not
+      cleverness: 1 FLOP/byte forced through a sequential bottleneck versus 2,048 FLOP/byte a GPU can actually
+      chew through at once.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "RNNs are just obsolete now."</span>
+      See the deep dive above — 2026 hybrids resurrect recurrence specifically because the training-time
+      parallelism problem, and only that problem, got solved. The idea wasn't wrong; the <em>hardware fit</em> was.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: gradient decay vs. the highway</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag $\gamma$ from 1.0 down toward 0.9 and watch the curve dive below the bf16 underflow line well before
+      $S=1000$. Snap $\gamma$ back near 1 (the LSTM-style highway) and the curve barely moves — that flatness
+      <em>is</em> the residual/gate fix, visually, a preview of page 34.
+    </div>
+    <div class="demo">
+      <div class="demo-head">$\gamma^{i}$ vs. the bf16 underflow floor <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-decay" height="320"></canvas>
+        <div class="controls" id="d-decay-ctrls"></div>
+        <div class="readout" id="d-decay-out">Ready.</div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/rnn_bottleneck.py</code> — times a real Python/PyTorch loop of 2,048 sequential matrix-vector
+      products against one batched matmul doing <em>identical total FLOPs</em>, and prints the wall clock for each.
+      The point isn't FLOPs (they're equal by construction) — it's that the loop is dramatically slower anyway,
+      because the bottleneck was never arithmetic.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz28"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;25's inductive-bias table named the RNN's "time-invariant update" and
+      forward-referenced this page for why it fails; pages 5/14/15 are the chain-rule beats BPTT reopens. →
+      Page&nbsp;30 continues the chain-rule thread with softmax's own Jacobian. → Page&nbsp;34 shows the residual
+      $I$-term is the same highway idea as the LSTM cell state. → Page&nbsp;37 collects on "$S^2$ FLOPs you can
+      spend" with the real $O(S^2)$/KV-cache arithmetic; → page&nbsp;43's roofline shows LLM <em>decode</em>
+      ironically lands back at the RNN's own $I\approx1$ economics.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: gamma^i decay vs. bf16 underflow floor vs. an LSTM-like highway ---- */
+  (function () {
+    const canvas = document.getElementById("d-decay");
+    const out = document.getElementById("d-decay-out");
+    const ctrls = document.getElementById("d-decay-ctrls");
+
+    const BF16_MIN_NORMAL = Math.pow(2, -126); // 8 exponent bits = fp32's range, constants.md §9.7
+    const HIGHWAY_GAMMA = 0.999; // an LSTM-like near-additive path: decay per step is almost none
+
+    const gammaCtrl = makeCtrl(ctrls, { label: "γ (per-step decay/gain)", min: 0.5, max: 1.2, step: 0.01, value: 0.9, fmt: v => v.toFixed(2) });
+    // S is dragged on a log scale: the control itself ranges over log10(S) in [log10(2), log10(1000)].
+    const sCtrl = makeCtrl(ctrls, { label: "sequence length S (log)", min: Math.log10(2), max: 3, step: 0.01, value: 2, fmt: v => Math.round(Math.pow(10, v)).toLocaleString() });
+
+    const accentMain = () => vizUtils.cssVar("--accent", "#b48cff");
+    const accentHighway = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    const accentBad = () => vizUtils.cssVar("--bad", "#ff6b6b");
+
+    function draw() {
+      const gamma = gammaCtrl.get();
+      const S = Math.round(Math.pow(10, sCtrl.get()));
+
+      const p = new Plot(canvas, {
+        xmin: 2, xmax: 1000, xlog: true,
+        ymin: 1e-50, ymax: 10, ylog: true,
+        xlabel: "sequence length S", ylabel: "γ^(S-1) (log scale)"
+      });
+      p.clear(); p.grid();
+
+      // REAL math, live: sample every integer S from 2 to 1000 — nothing precomputed.
+      // Exponent is (S-1), matching the BPTT product above: S states, S-1 chain-rule
+      // links between them (the product runs i = 2..S), so at S=100 this is gamma^99 —
+      // exactly the worked example's frozen 0.9^99 = 2.951e-5.
+      const xs = [], ysMain = [], ysHighway = [];
+      for (let n = 2; n <= 1000; n++) {
+        xs.push(n);
+        ysMain.push(Math.pow(gamma, n - 1));
+        ysHighway.push(Math.pow(HIGHWAY_GAMMA, n - 1));
+      }
+      p.trace(xs, ysHighway, accentHighway(), 2);
+      p.trace(xs, ysMain, accentMain(), 2.5);
+      p.hline(BF16_MIN_NORMAL, accentBad(), [4, 3]);
+      p.label(3, BF16_MIN_NORMAL * 3, "bf16 underflow floor", accentBad());
+      p.vline(S, "#8391ab", [2, 2]);
+
+      const valAtS = Math.pow(gamma, S - 1);
+      const highwayAtS = Math.pow(HIGHWAY_GAMMA, S - 1);
+      const underflowed = valAtS < BF16_MIN_NORMAL;
+
+      out.innerHTML =
+        `at S = <b>${S.toLocaleString()}</b>: γ<sup>S-1</sup> = <b>${eng(valAtS, "", 3)}</b> ` +
+        (underflowed
+          ? `— <b style="color:${accentBad()}">below bf16's min normal (${eng(BF16_MIN_NORMAL, "", 3)}) — this gradient has underflowed to exactly zero.</b>`
+          : `— still representable in bf16 (floor is ${eng(BF16_MIN_NORMAL, "", 3)}).`) +
+        ` &nbsp;·&nbsp; the highway (γ≈${HIGHWAY_GAMMA}) at the same S: <b>${eng(highwayAtS, "", 3)}</b> — ` +
+        `${highwayAtS > 0.1 ? "still healthy." : "even the highway eventually decays, just far slower."}`;
+    }
+    gammaCtrl.onInput(draw);
+    sCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz28", [
+    {
+      q: "$0.9^{99}$, to 3 significant figures:",
+      num: 2.951e-5, tol: 0.3e-5, unit: "(dimensionless)",
+      why: "$0.9^{99}=2.951\\times10^{-5}$ — under $0.003\\%$ of the gradient at step 100 survives to reach step 1."
+    },
+    {
+      q: "What actually killed RNNs as the dominant sequence architecture?",
+      opts: [
+        "The sequential training dependency — a hardware/parallelism problem",
+        "Vanishing gradients, which no fix could solve",
+        "Attention being fundamentally smarter and cheaper",
+        "RNNs never worked well on any task"
+      ],
+      a: 0,
+      why: "LSTMs mostly fixed vanishing gradients (Failure 1) in the '90s; RNNs still died a decade later. What killed them was Failure 2 — $h_i$ needs $h_{i-1}$, so $S$ steps can never be parallelized across a GPU's cores, no matter how healthy the gradients are."
+    },
+    {
+      q: "A batch-1 matrix-vector product reads 33.5 MB of bf16 weights to do 33.5 MFLOP. Its arithmetic intensity, in FLOP/byte, is:",
+      num: 1.0, tol: 0.2, unit: "FLOP/byte",
+      why: "$33.55\\text{ MFLOP}/33.55\\text{ MB}=1.0$ FLOP/byte — exactly constants.md §6.5's formula ($I\\approx S_{\\text{fwd}}$ at bf16) evaluated at $S_{\\text{fwd}}=1$. This is also exactly LLM decode's problem later (page 43)."
+    },
+    {
+      q: "The LSTM's near-additive cell-state fix for vanishing gradients is the same underlying idea as —",
+      opts: [
+        "a residual (skip) connection",
+        "gradient clipping",
+        "a larger learning rate",
+        "batch normalization"
+      ],
+      a: 0,
+      why: "Both replace a multiplicative path (which decays by construction, since $\\tanh'\\le1$) with an additive path the gradient can ride at norm ≈1 — an LSTM's forget gate and a residual's identity skip are the same highway, invented in different decades."
+    },
+    {
+      q: "In 2026, recurrent/linear-attention hybrids became viable again mainly because —",
+      opts: [
+        "training-time parallelism was solved (associative-scan / chunked-matmul reformulations)",
+        "vanishing gradients were finally solved for the first time",
+        "GPUs got fast enough that sequential steps stopped mattering",
+        "attention turned out to be a passing trend"
+      ],
+      a: 0,
+      why: "The gradient problem was never the blocker after LSTMs — the training-time sequential dependency was. Chunked/scan reformulations parallelize training the way attention does, while keeping recurrence's O(1)-per-token inference memory."
+    },
+    {
+      q: "Diagnosis: your from-scratch RNN's loss won't drop, and layer-1 gradients measure around 1e-40. Gradient clipping doesn't help. Best next step:",
+      opts: [
+        "Add a gated or residual (near-additive) path — clipping only fixes exploding gradients, not vanishing ones",
+        "Lower the learning rate further",
+        "Increase the sequence length so there's more signal",
+        "Switch the loss function"
+      ],
+      a: 0,
+      why: "1e-40 is a vanished, likely-underflowed gradient (Failure 1) — clipping caps large values, it cannot rescue a gradient that's already collapsed to ~0. The fix is an additive gradient highway: an LSTM/GRU gate or a residual connection."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>15. Autograd &amp; the Float That Isn't Zero — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the assertion / float codeblocks and the ledger carry wide
+   monospace and KaTeX matrices. Let each scroll inside its own box on narrow
+   screens so the page body never scrolls horizontally. Desktop untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="15-autograd-float-reality.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns · ⭐ The Float That Isn't Zero</span>
+    <h1>What PyTorch Actually Does: Autograd, and the Float That Isn't Zero</h1>
+    <p class="subtitle">On page 14 you found TN-1's nine gradients with a pencil. Now you hand the same network to
+      PyTorch's <code>.backward()</code> and it returns the same nine numbers — <em>almost</em>. One of them, the
+      one you proved was <b>exactly zero</b>, comes back as <code>1.4e-08</code>. This is the page where autograd
+      stops being magic, and where the gap between the math on paper and the math in the machine becomes something
+      you can see.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:TN1 — the object]</b> · <b>[THREAD:CHAIN — the verb, now running inside PyTorch]</b>. Same TN-1,
+      same chain rule. Page 14 executed the reverse pass by hand; this page watches a framework execute it on a
+      recorded graph, reconciles its output with your pencil to the last decimal — and finds the one place they
+      disagree is the place that teaches the most.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: answered in "THE FLOAT THAT ISN'T ZERO" below,
+         where the exact float32 value 1.4020191230201817e-08 is stated. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      On page 14 you computed $\partial\mathcal{L}/\partial W_2$'s first entry (Input 1) as <b>exactly 0</b> by
+      hand — the dead unit made $a_{1,1}=0$, so $\delta^{(2)}a_{1,1}=0$. Now PyTorch computes the same gradient in
+      float32. <b>What will it print?</b> Commit to an answer — <em>"0.0"</em>, or something else — before you scroll.
+    </div>
+
+    <!-- ===================== WHAT .backward() IS ===================== -->
+    <h2>Three things people confuse autograd with — and what it actually is</h2>
+    <div class="box rule"><span class="box-title">📐 Autograd is none of the first two</span>
+      <p><b>(a) It is not symbolic differentiation.</b> It never produces a <em>formula</em> for the gradient. There
+        is no <code>d/dx</code> algebra engine inside PyTorch rewriting $\tanh$ into $1-\tanh^2$ as a symbol.</p>
+      <p><b>(b) It is not numerical (finite) differences.</b> It never perturbs a weight by a tiny $\epsilon$ and
+        re-runs the forward pass. No $\epsilon$, no re-run, no approximation error from step size.</p>
+      <p><b>(c) It <em>is</em> the chain rule, executed on a recorded graph, in reverse.</b> Every operation you run
+        forward silently records its inputs and a rule for its local derivative. <code>.backward()</code> walks that
+        record backward, multiplying and accumulating local slopes — exactly the four equations you applied by hand
+        on page 14, ordered by a machine instead of by you. <b>[THREAD:CHAIN]</b>
+      </p>
+    </div>
+
+    <p>The recording is called the <b>tape</b> (or the computation graph). Each elementary op — a multiply, an add,
+      a $\tanh$ — stores two things when it runs forward: the input values it consumed, and a small closure
+      <code>_backward</code> that knows how to convert an incoming gradient into gradients for its inputs. Calling
+      <code>loss.backward()</code> visits the ops in reverse topological order, seeding the output with
+      $\partial\mathcal{L}/\partial\mathcal{L}=1$ and pushing gradients backward until every leaf
+      (every parameter) has its <code>.grad</code> filled. <b>nn.js's <code>Value</code> engine — the one running
+      every demo in this course — does literally this;</b> you can open <code>assets/nn.js</code> and read the
+      <code>_backward</code> closures.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: reverse mode returns all $P$ gradients in one pass; forward mode would cost $P$ passes</summary><div>
+      <p>A chain of derivatives can be walked two ways. <b>Forward mode</b> pushes $\partial\cdot/\partial\theta_j$
+        forward from one input $\theta_j$: one pass gives how <em>every</em> quantity depends on that <em>one</em>
+        input. <b>Reverse mode</b> pulls $\partial\mathcal{L}/\partial\cdot$ backward from the one scalar output:
+        one pass gives how the loss depends on <em>every</em> input at once.</p>
+      <p>Training has exactly one scalar loss and millions-to-billions of parameters. So reverse mode is the only
+        affordable choice: <b>one</b> backward pass yields all $P$ gradients, where forward mode would need $P$
+        separate passes. That asymmetry — one output, many inputs — is the entire reason <code>.backward()</code>
+        exists and runs the graph the direction it does. (Page 14 proved the same cost story for the pencil:
+        one backward pass, not $P$ forward perturbations.)</p>
+    </div></details>
+
+    <!-- ===================== VERIFY THE NINE ===================== -->
+    <h2>The nine pencil numbers, reproduced by <code>.backward()</code></h2>
+    <p>Build TN-1 as a two-layer network in PyTorch, load the frozen weights, run one forward pass to the loss, and
+      call <code>loss.backward()</code>. Out come nine <code>.grad</code> tensors. Eight of them match page 14's
+      pencil values to every printed decimal. The ninth is the story of this page.</p>
+
+    <div class="box rule"><span class="box-title">📐 The mandated cross-checks — and why the tolerances differ</span>
+      <p><b>Input 1</b> ($x=[1.0,2.0]$, the dead-unit case, <code>constants.md</code> §8.5):</p>
+      <div class="codeblock" data-lang="python">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">assert torch.<span class="tok-fn">allclose</span>(model[<span class="tok-num">0</span>].weight.grad,</span>
+<span class="line">    torch.<span class="tok-fn">tensor</span>([[-<span class="tok-num">0.3764</span>, -<span class="tok-num">0.7527</span>], [<span class="tok-num">0.2028</span>, <span class="tok-num">0.4056</span>]]), atol=<span class="tok-num">1e-4</span>)</span></code></pre>
+      </div>
+      <p style="margin:.4em 0 0">Note <b>$-0.7527$, not $-0.7528$</b>. With the brief's old $-0.7528$ the error is
+        $9.66\times10^{-5}$ against a budget of $1.075\times10^{-4}$ — a <b>10% margin</b> that survives only because
+        <code>atol=1e-4</code> happens to be loose enough to swallow a rounding slip. Fixing the last digit drops the
+        error to $3.4\times10^{-6}$, a 30× margin — a nine-page thread that no longer leans on a coincidence.</p>
+      <p style="margin:.8em 0 0"><b>Input 2</b> ($x=[0.60,-0.20]$, the healthy case, <code>constants.md</code> §8.7)
+        — carried to <b>5 decimals</b> at <code>atol=1e-5</code>, <em>not</em> <code>1e-4</code>:</p>
+      <div class="codeblock" data-lang="python">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">assert torch.<span class="tok-fn">allclose</span>(model[<span class="tok-num">0</span>].weight.grad,</span>
+<span class="line">    torch.<span class="tok-fn">tensor</span>([[-<span class="tok-num">0.13475</span>, <span class="tok-num">0.04492</span>], [<span class="tok-num">0.22140</span>, -<span class="tok-num">0.07380</span>]]), atol=<span class="tok-num">1e-5</span>)</span></code></pre>
+      </div>
+      <p style="margin:.4em 0 0">Why the tighter tolerance? Input 2's smallest gradient is
+        $\partial\mathcal{L}/\partial W_1[0][1]=+0.0449$. At 4 decimals, a check on a number that small has a margin
+        of only $\sim\!2\times$ — the same trap as Input 1. Five decimals at <code>1e-5</code> restores real
+        headroom. <b>The precision you assert at must match the magnitude you are asserting about.</b></p>
+    </div>
+
+    <!-- ===================== THE FLOAT THAT ISN'T ZERO ===================== -->
+    <h2>★ The float that isn't zero</h2>
+    <p>Eight gradients matched. The ninth — Input 1's $\partial\mathcal{L}/\partial W_2[0]$, the dead-unit entry you
+      proved was exactly $0$ — comes back from float32 autograd as <code>1.4020191230201817e-08</code>. This is the
+      answer to the PREDICT, and it is not a bug:</p>
+
+    <div class="box key"><span class="box-title">🔑 Both are right</span>
+      By hand you got exactly 0. Torch prints <code>1.4e-08</code>. <b>Both are right.</b> <code>0.5&nbsp;−&nbsp;0.6&nbsp;+&nbsp;0.1</code>
+      is not zero in binary floating point — it is the textbook non-associativity demo, and you just hit it for free.
+      This is the lesson of the logsumexp page come back around: <b>the math on paper and the math in the
+      machine are not the same math.</b> The gradient is zero to seven decimals, the unit is dead, and the lesson
+      stands — but the number on your screen will not be <code>0.0</code>, and a course that told you it would be is
+      a course that has never run its own code.
+    </div>
+
+    <p>Trace it to the source. The dead unit was dead because its pre-activation was
+      $z_{1,1}=0.5(1.0)+(-0.3)(2.0)+0.1$ — algebraically $0.5-0.6+0.1=0$. But in binary floating point, $0.3$, $0.6$,
+      and $0.1$ are each already rounded (none is representable exactly), and the three-term sum is evaluated
+      left-to-right, so a rounding residue survives:</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python · constants.md §8.4</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">z_11 = <span class="tok-num">0.5</span>*<span class="tok-num">1.0</span> + (-<span class="tok-num">0.3</span>)*<span class="tok-num">2.0</span> + <span class="tok-num">0.1</span>        <span class="tok-com"># the classic 0.5 - 0.6 + 0.1</span></span>
+<span class="line">  float64  →   <span class="tok-num">2.7755575615628914e-17</span>       <span class="tok-com"># not 0.0</span></span>
+<span class="line">  float32  →  -<span class="tok-num">2.2351742e-08</span>              <span class="tok-com"># not 0.0</span></span>
+<span class="line"></span>
+<span class="line">torch float32  dW2 → [<span class="tok-num">1.4020191230201817e-08</span>, -<span class="tok-num">0.5021151900291443</span>]</span></code></pre>
+    </div>
+
+    <p>The dead-unit entry is <code>1.4020191230201817e-08</code> — the "exactly zero" gradient, alive at the
+      eighth decimal because $a_{1,1}=\tanh(z_{1,1})$ was fed a $z_{1,1}$ that was itself $\sim\!10^{-8}$, not $0$.
+      Propagate that through <code>.backward()</code> and the local products, accumulated in reverse-topological
+      order, preserve the residue. The second entry, $-0.5021151900291443$, rounds to page 14's printed
+      $-0.5021$ — it is the same number, seen at full float precision. <b>The paper value is the idealisation; the
+      float value is what actually ran.</b> <b>[THREAD:CHAIN]</b></p>
+
+    <div class="box key"><span class="box-title">🔑 Where you have met this before</span>
+      Page 12's LogSumExp — and Part I page 9 before it — taught the same paper-vs-machine gap by preventing an
+      overflow that only exists in the machine. That was the lesson stated as a precaution. This is the lesson made
+      literal on a number <em>you computed by hand</em>: not a warning about a value you might have seen, but the
+      value itself, off by <code>1.4e-08</code>, on your own box.
+    </div>
+
+    <!-- ===================== ZERO_GRAD ===================== -->
+    <h2>Why <code>zero_grad()</code> exists — and what happens when you forget it</h2>
+    <p>PyTorch does not overwrite <code>.grad</code> on each backward pass — it <b>accumulates</b> into it. That is a
+      deliberate feature: it lets you split one large effective batch across several backward passes and sum their
+      gradients before stepping, which is how you train a batch that does not fit in memory in one shot (page 18's
+      <b>gradient accumulation</b>). <b>[THREAD:MEM]</b> — the same mechanism, seen here as a footgun, is reopened
+      there as a memory trick.</p>
+
+    <p>The price of that feature: if you forget to call <code>zero_grad()</code> between steps, step $k$ does not use
+      the gradient of batch $k$ — it uses the running sum of every gradient so far. Over $k$ steps of roughly
+      similar magnitude the used gradient grows like</p>
+    <p>$$\tilde{\mathbf g}_k \;=\; \sum_{j=1}^{k} \mathbf g_j \;\approx\; k\,\mathbf g,$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\tilde{\mathbf g}_k$</td><td>the gradient actually used at step $k$ — the un-cleared running sum in <code>.grad</code></td><td>$(P,)$</td><td>what accumulates when <code>zero_grad()</code> is skipped</td></tr>
+        <tr><td>$\mathbf g_j$</td><td>the correct mini-batch gradient at step $j$</td><td>$(P,)$</td><td>each backward pass</td></tr>
+        <tr><td>$k$</td><td>optimizer step index</td><td>scalar</td><td>the step counter (notation §3 — <b>not</b> $t$)</td></tr>
+        <tr><td>$\mathbf g$</td><td>a typical single-step gradient magnitude</td><td>$(P,)$</td><td>stand-in for the $\mathbf g_j$'s, similar in size</td></tr>
+      </tbody>
+    </table>
+    <p>so the <em>effective</em> learning rate climbs with every step, and the update turns into a runaway. Instead
+      of descending, the loss <b>thrashes</b> — an oversized, stale gradient yanks the weights across the landscape,
+      so the curve dips and then spikes by orders of magnitude, over and over. It is not training; it is being
+      thrown around.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "You will see the gradient come out as exactly 0.0."</span>
+      False in every float precision. The dead-unit gradient is $0$ on paper and <code>1.4e-08</code> in float32;
+      both are correct, and the second is what your machine reports. A related trap: <em>"a nonzero float means the
+      computation is wrong."</em> It is correct to seven digits — the paper $0$ is the idealisation, the float is
+      the measurement.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Forgetting zero_grad() has no effect — I saw a run converge without it."</span>
+      That is the <b>full-batch illusion</b>. On full batches every accumulated gradient points the <em>same</em>
+      way, so the growing sum just acts like a rising learning rate along a consistent descent direction — it can
+      even converge <em>faster</em>. The bug only reveals itself with <b>mini-batches</b>, where each accumulated
+      gradient is a stale sum over <em>different</em> batches pointing in different directions. The demo below is
+      mini-batch for exactly this reason.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Watch it happen — two identical trainers, one missing <code>zero_grad()</code></h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Press <b>Train</b>. Two <em>identical</em> networks train on the same 200-point <code>moons</code> set with the
+      same seed, batch size 16, and SGD — the only difference is that the red one never calls
+      <code>zero_grad()</code>. The teal loss descends; the red loss refuses to settle — it spikes by orders of
+      magnitude past the random-guess line within tens of steps, dips, and spikes again. <b>Reset</b> re-seeds. Both
+      curves are real: this is <code>nn.js</code>'s <code>Trainer</code> stepping live, not a stored animation.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Forgot <code>zero_grad()</code> · mini-batch SGD <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <canvas id="d-loss" height="300"></canvas>
+        <p style="margin:12px 0 0">
+          <button class="btn" id="d-go">Train</button>
+          <button class="btn secondary" id="d-reset">Reset</button>
+        </p>
+        <div class="readout" id="d-out">Ready.</div>
+      </div>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 An honest note on "then NaN"</span>
+      The classic telling of this bug ends "...the loss rises, then goes <code>NaN</code>." The <em>rises</em> half
+      reproduces exactly and you just watched it. The <code>NaN</code> half does <b>not</b> happen here, and the
+      reason is itself a page-12 callback: this course's loss is the <em>stable</em> <code>bceWithLogits</code>,
+      whose $\text{softplus}$ grows only <em>linearly</em> in $|z|$, so it can produce a huge loss but never an
+      infinite one. The literal <code>NaN</code> in the old story comes from a <em>naive</em> BCE — a $\log$ of a
+      probability that saturated to exactly $0$ or $1$. Same paper-vs-machine theme, one more time: the symptom you
+      get depends on which formulation actually runs.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/15_autograd_check.py</code> — builds TN-1 as an <code>nn.Sequential</code>, sets the frozen weights,
+      runs <code>loss.backward()</code> for both inputs, prints the nine gradients, runs both mandated asserts, and
+      prints <code>1.4020191230201817e-08</code> so you see the float that isn't zero on <b>your</b> box.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz15"></div>
+
+    <p style="margin-top:2em;font-size:.9rem;color:var(--text-dim)">
+      <b>Where this connects.</b> ← page 14 (the nine pencil numbers being verified) ·
+      ← page 12 &amp; Part I page 9 (LogSumExp — the same paper-vs-machine lesson, stated first as a precaution) ·
+      → page 18 (this <code>zero_grad</code> accumulation, reopened as the gradient-accumulation memory trick).
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---------------- DEMO: forgot zero_grad(), mini-batch ----------------
+     Two identical trainers on the SAME moons set and seed; the only
+     difference is skipZeroGrad. This config matches nn.test.html's verified
+     divergence case (MLP[2,16,16,1] relu, moons 200 rng5 noise0.15, SGD lr0.1,
+     batchSize 16, batch-sampler rng1): the buggy run blows past the ln2
+     random-guess line inside ~100 steps while the correct run descends. The
+     loss is the STABLE bceWithLogits, so the buggy run rises but stays finite
+     (see the honest-note box) — we plot both live on one log-y axis. */
+  (function () {
+    const { MLP, SGD, Trainer, makeDataset, RNG } = NN;
+    const canvas = document.getElementById("d-loss");
+    const out = document.getElementById("d-out");
+    const goBtn = document.getElementById("d-go");
+    const resetBtn = document.getElementById("d-reset");
+
+    const TARGET_STEPS = 200;
+    const LN2 = Math.log(2);                 // 0.6931 — the coin-flip / random-guess loss
+    let good, bad, gxs, gys, bxs, bys, badBlew, badPeak, raf = null, seed = 5;
+
+    const okColor = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    const badColor = () => vizUtils.cssVar("--bad", "#ff6b6b");
+    const dimColor = () => vizUtils.cssVar("--text-dim", "#888");
+
+    function mk(skip) {
+      // Same seed for weights (99) and batch sampler so the two runs are
+      // identical except for the zero_grad() call — the honest comparison.
+      const net = new MLP([2, 16, 16, 1], { act: "relu", rng: new RNG(99) });
+      const ds = makeDataset("moons", 200, { rng: new RNG(seed), noise: 0.15 });
+      const opt = new SGD(net.parameters(), { lr: 0.1 });
+      return new Trainer({ model: net, X: ds.X, y: ds.y, loss: "bce", opt,
+        batchSize: 16, rng: new RNG(1), skipZeroGrad: skip });
+    }
+
+    function build() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      good = mk(false); bad = mk(true);
+      gxs = []; gys = []; bxs = []; bys = []; badBlew = -1; badPeak = 0;
+      goBtn.disabled = false;
+      out.textContent = "Ready (seed " + seed + "). Press Train.";
+      draw();
+    }
+
+    function draw() {
+      const finite = gys.concat(bys).filter(v => isFinite(v) && v > 0);
+      let ymin = 0.02, ymax = 2;
+      if (finite.length) {
+        ymin = Math.max(Math.min.apply(null, finite) * 0.7, 1e-3);
+        ymax = Math.max(Math.max.apply(null, finite) * 1.3, LN2 * 1.4);
+      }
+      const xmax = Math.max(gxs.length ? gxs[gxs.length - 1] : 1,
+                            bxs.length ? bxs[bxs.length - 1] : 1, 10);
+      const p = new Plot(canvas, { xmin: 0, xmax: xmax, ymin: ymin, ymax: ymax,
+        ylog: true, xlabel: "optimizer step k", ylabel: "loss (nats, log scale)" });
+      p.clear(); p.grid();
+      // ln 2 baseline: a curve resting here has learned nothing (page 12).
+      p.hline(LN2, dimColor(), [4, 4]);
+      p.label(xmax * 0.5, LN2, "ln 2 = 0.6931 (random guess)", dimColor());
+      if (gxs.length) p.trace(gxs, gys, okColor(), 2.5);
+      if (bxs.length > 1) {
+        // Only trace the finite prefix so the runaway curve renders cleanly.
+        const n = bys.findIndex(v => !isFinite(v));
+        const end = n < 0 ? bxs.length : n;
+        p.trace(bxs.slice(0, end), bys.slice(0, end), badColor(), 2.5);
+      }
+    }
+
+    function report(done) {
+      const gL = gys.length ? gys[gys.length - 1] : NaN;
+      const bL = bys.length ? bys[bys.length - 1] : NaN;
+      const peakX = badPeak > 0 ? (badPeak / LN2).toFixed(0) : "—";
+      out.innerHTML =
+        `<span style="color:${okColor()}"><b>with zero_grad()</b>: loss ${isFinite(gL) ? gL.toFixed(3) : "—"}${done ? " (learned)" : ""}</span>` +
+        ` &nbsp;·&nbsp; ` +
+        `<span style="color:${badColor()}"><b>without</b>: now ${isFinite(bL) ? bL.toFixed(2) : "—"}, peaked at <b>${badPeak.toFixed(1)}</b> (${peakX}× the ln 2 line)</span>` +
+        (badBlew >= 0 ? ` &nbsp;·&nbsp; first blew past ln 2 at step <b>${badBlew}</b>` : ``) +
+        (done ? ` — it never settled. That thrashing is the accumulating gradient.` : ``);
+    }
+
+    function run() {
+      goBtn.disabled = true;
+      const loop = () => {
+        for (let s = 0; s < 2; s++) {
+          const g = good.step(), b = bad.step();
+          gxs.push(good.step_); gys.push(g);
+          bxs.push(bad.step_); bys.push(b);
+          if (isFinite(b) && b > badPeak) badPeak = b;
+          if (badBlew < 0 && (!isFinite(b) || b > LN2 * 2)) badBlew = bad.step_;
+        }
+        draw(); report(false);
+        if (good.step_ < TARGET_STEPS) raf = requestAnimationFrame(loop);
+        else { raf = null; report(true); }
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    goBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", () => { seed = (seed % 97) + 6; build(); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    build();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz15", [
+    {
+      q: "PyTorch's <code>.backward()</code> computes gradients by:",
+      opts: [
+        "Symbolic differentiation — it derives a formula for each gradient",
+        "Finite differences — it perturbs each weight by a small \\(\\epsilon\\) and re-runs the forward pass",
+        "Reverse-mode autodiff — the chain rule executed on a recorded graph, in reverse",
+        "Solving the normal equations for the whole network at once"
+      ],
+      a: 2,
+      why: "Autograd records each op's inputs and a local-derivative closure on the forward pass, then walks that tape in reverse accumulating gradients. No formula is produced (not symbolic) and no weight is perturbed (not finite differences)."
+    },
+    {
+      q: "Input 1's dead-unit gradient \\(\\partial\\mathcal{L}/\\partial W_2[0]\\) is exactly 0 on paper. In float32, PyTorch prints (to 2 s.f.):",
+      num: 1.4e-8, tol: 5e-9, unit: "",
+      why: "It prints 1.4020191230201817e-08 — not 0.0. \\(z_{1,1}=0.5-0.6+0.1\\) is not zero in binary floating point (non-associativity), so the 'dead' unit's input is ~1e-8, and that residue survives the backward pass. Zero to seven decimals, but not 0.0."
+    },
+    {
+      q: "Why isn't that gradient exactly 0.0?",
+      opts: [
+        "Binary floating-point non-associativity: \\(0.5 - 0.6 + 0.1\\) does not round to exactly zero",
+        "PyTorch adds a small \\(\\epsilon\\) to every gradient for numerical stability",
+        "The autograd graph has a bug that leaks a tiny value",
+        "tanh'(0) is slightly less than 1 in float32"
+      ],
+      a: 0,
+      why: "0.3, 0.6, 0.1 are each already rounded in binary, and the left-to-right sum keeps a ~1e-8 residue. It is the textbook non-associativity demo — the same paper-vs-machine gap as LogSumExp, made literal on a gradient you computed by hand."
+    },
+    {
+      q: "Input 2 is cross-checked at <code>atol=1e-5</code> rather than <code>1e-4</code>. Why the tighter tolerance?",
+      opts: [
+        "Input 2 has more parameters, so more rounding accumulates",
+        "Its smallest gradient (+0.0449) is so small that a 4-d.p. check has only a ~2× margin — a tolerance coincidence, not a real check",
+        "float32 is less accurate for positive numbers",
+        "1e-4 would reject the correct answer"
+      ],
+      a: 1,
+      why: "The precision you assert at must match the magnitude you assert about. On a 0.0449-scale gradient, 4 decimals leaves ~2× headroom (the same trap that let the brief's -0.7528 survive on Input 1); 5 decimals at 1e-5 restores a real margin."
+    },
+    {
+      q: "You forget <code>zero_grad()</code> while training with mini-batches. What happens?",
+      opts: [
+        "Nothing — the optimizer overwrites <code>.grad</code> each step anyway",
+        "The gradients accumulate into a growing stale sum, the effective learning rate climbs, and the loss rises and blows up",
+        "Training is exactly 2× slower but still converges",
+        "Only the bias gradients are affected"
+      ],
+      a: 1,
+      why: "PyTorch accumulates into .grad by default (a feature — it enables gradient accumulation, page 18). Skip zero_grad() and step k uses the sum of ~k different-batch gradients (~k·g), so the effective LR runs away and the loss climbs. The 'no effect' answer is the full-batch illusion — full batches hide the bug."
+    },
+    {
+      q: "Why is reverse mode, not forward mode, used to get gradients for training?",
+      opts: [
+        "Forward mode is numerically unstable",
+        "Reverse mode returns all \\(P\\) gradients in one backward pass; forward mode would need one pass per parameter",
+        "Reverse mode uses less memory",
+        "Forward mode cannot differentiate through tanh"
+      ],
+      a: 1,
+      why: "Training has one scalar loss and P parameters. Reverse mode delivers ∂L/∂(everything) in a single pass; forward mode gives ∂(everything)/∂(one input) per pass, so it would cost P passes. One output, many inputs — reverse wins."
+    }
+  ], "Autograd &amp; the float that isn't zero — self-check");
+
+});
+</script>
+</body>
+</html>

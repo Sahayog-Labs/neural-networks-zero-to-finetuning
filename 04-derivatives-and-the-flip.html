@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4. Derivatives &amp; the θ-vs-x Flip — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: math-bearing ledgers carry KaTeX fractions wider than a phone.
+   Let each scroll inside its own box on narrow screens so the page body never
+   scrolls sideways. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+.twopanel { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 760px) { .twopanel { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="04-derivatives-and-the-flip.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · Flagship</span>
+    <h1>Derivatives, the $\vartheta$-vs-$x$ Flip, and the Downhill Direction</h1>
+    <p class="subtitle">A derivative is a sensitivity: nudge the input, read how much the output moves. This page
+      turns that one idea into the seven slopes the whole course needs, states in symbols what page&nbsp;1 called
+      "flipping the machine over," and — using nothing but the dot product from page&nbsp;3 — proves which way is
+      uphill. Then it lets you drive a learning rate off a cliff.</p>
+
+    <div class="box key"><span class="box-title">🧵 Threads reopened here</span>
+      <b>[THREAD:dot-product beat 2/…]</b> — the atom from page&nbsp;3 returns to do structural work: it is what
+      <em>proves</em> the gradient points uphill. <b>[THREAD:chain-rule beat 0]</b> — the seven-derivative table
+      below is the toolkit page&nbsp;5 will chain together. <b>[THREAD:memory beat 2]</b> — the learning-rate rule
+      names the <em>trainable-parameter count</em>, the subject of the page-18 ledger.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: answered by the LR Playground below AND restated
+         in one sentence directly under it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You have a working training run at some learning rate $\eta$. You <b>double</b> it. Does the loss reach the
+      minimum <b>(a) twice as fast</b>, <b>(b) roughly as fast</b>, or <b>(c) not at all — it diverges</b>? Commit to
+      one letter, then run the LR Playground near the bottom of this page. (The exact rate at which stability
+      snaps is page&nbsp;13's; today you just need to <em>feel</em> that speed and stability trade off.)
+    </div>
+
+    <!-- ===================== SENSITIVITY ===================== -->
+    <h2>A derivative is a sensitivity</h2>
+    <p>Forget "slope of a tangent line" for a moment and hold onto the thing that makes derivatives matter to a
+      network: a derivative answers <em>"if I nudge this input a hair, how much does the output move, and in which
+      direction?"</em> That is the entire question training asks, a few billion times.</p>
+
+    <p>$$f'(x) \;=\; \frac{df}{dx} \;=\; \lim_{h\to 0}\frac{f(x+h) - f(x)}{h}.$$</p>
+
+    <p>Read the limit as plain notation for "make $h$ small enough that shrinking it further stops changing the
+      answer." We will never need an epsilon-delta argument in this course. What we <em>will</em> need constantly is
+      the reading: $f'(x)$ big and positive means "$f$ is very sensitive here, and moving $x$ up moves $f$ up";
+      $f'(x)$ near zero means "$f$ barely notices you"; $f'(x)$ negative means "up in $x$ is down in $f$."</p>
+
+    <div class="box rule"><span class="box-title">📐 Units — the honest answer to "why is $\eta = 3\times10^{-4}$?"</span>
+      Derivatives carry units. If the loss $\mathcal{L}$ is in nats and a weight $w$ is dimensionless, then
+      $\partial\mathcal{L}/\partial w$ is <em>nats per unit weight</em>. The learning rate $\eta$ that multiplies it
+      must carry the inverse units for $\eta\,\partial\mathcal{L}/\partial w$ to be a weight-sized change. That is
+      the whole reason a sensible $\eta$ is $10^{-5}$ and not $0.5$: it is a units-carrying step size, not a magic
+      dial. We make this precise on page&nbsp;13; plant the intuition now.
+    </div>
+
+    <!-- ===================== THE FLIP ===================== -->
+    <h2>The $\vartheta$-vs-$x$ flip, now in symbols</h2>
+    <p>Page&nbsp;1 said it in English: at inference the knobs are fixed and you feed data; at training the data is
+      fixed and you turn the knobs. Here is the same sentence in one line of calculus. A network is a function with
+      <em>two kinds of argument</em>,</p>
+
+    <p>$$f(\mathbf{x};\,\boldsymbol\theta),$$</p>
+
+    <p>the data $\mathbf{x}$ and the parameters $\boldsymbol\theta$. It has two derivatives, and the course cares
+      about exactly one of them:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Question</th><th>Derivative</th><th>Who holds still</th><th>How often the course needs it</th></tr></thead>
+      <tbody>
+        <tr><td><b>Inference</b>: how does the output move if the input changes?</td><td>$\partial f/\partial\mathbf{x}$</td><td>knobs $\boldsymbol\theta$ fixed, data varies</td><td>almost never</td></tr>
+        <tr><td><b>Training</b>: how does the loss move if a knob changes?</td><td>$\partial\mathcal{L}/\partial\boldsymbol\theta$</td><td>data $\mathbf{x}$ fixed, knobs vary</td><td>the course is <em>about</em> it</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The flip</span>
+      <b>We hold $\mathbf{x}$ constant and differentiate the loss with respect to $\boldsymbol\theta$.</b> That one
+      choice is every downstream mechanism: <code>requires_grad</code>, <code>param.grad</code>, backprop, autograd.
+      Page&nbsp;1's "training turns the knobs" was not a metaphor — the knobs are literally the differentiation
+      variable, and the inputs usually carry no gradient at all.
+    </div>
+
+    <!-- ===================== SEVEN DERIVATIVES ===================== -->
+    <h2>The only derivatives you need</h2>
+    <p>Here is a claim the rest of the course will keep proving: you need seven derivative rules. Everything else is
+      these seven, plus the chain rule (page&nbsp;5), plus shape bookkeeping (page&nbsp;2).</p>
+
+    <div class="box rule"><span class="box-title">📐 The seven</span>
+      <table class="ledger">
+        <thead><tr><th>$f(x)$</th><th>$f'(x)$</th><th>Where it bites</th></tr></thead>
+        <tbody>
+          <tr><td>$c$ (constant)</td><td>$0$</td><td>biases have no self-slope</td></tr>
+          <tr><td>$x^n$</td><td>$n\,x^{n-1}$</td><td>MSE loss uses $n=2$</td></tr>
+          <tr><td>$e^{x}$</td><td>$e^{x}$</td><td>softmax, Gaussians</td></tr>
+          <tr><td>$\ln x$</td><td>$1/x$</td><td>cross-entropy, log-likelihood</td></tr>
+          <tr><td>$\sigma(x)$</td><td>$\sigma(x)\bigl(1-\sigma(x)\bigr)$</td><td>sigmoid gate — <b>max $0.25$</b></td></tr>
+          <tr><td>$\tanh x$</td><td>$1-\tanh^2 x$</td><td>TN-1's hidden units (page&nbsp;6)</td></tr>
+          <tr><td>$\max(0,x)$</td><td>$\mathbb{1}[x>0]$</td><td>ReLU — a <b>switch</b>, not a scale</td></tr>
+        </tbody>
+      </table>
+      That table is complete. The last one is worth staring at: ReLU's derivative is $1$ or $0$ — it either passes a
+      gradient through untouched or blocks it entirely. It never <em>shrinks</em> one. Hold that thought until
+      page&nbsp;11.
+    </div>
+
+    <p>The sigmoid slope pays for itself, so derive it once. With $\sigma(x) = (1+e^{-x})^{-1}$, the quotient/chain
+      rule gives</p>
+
+    <p>$$\sigma'(x) \;=\; \frac{e^{-x}}{\bigl(1+e^{-x}\bigr)^2}
+        \;=\; \frac{1}{1+e^{-x}}\cdot\frac{e^{-x}}{1+e^{-x}}
+        \;=\; \sigma(x)\bigl(1-\sigma(x)\bigr).$$</p>
+
+    <div class="box worked"><span class="box-title">✍️ The number that kills deep sigmoid nets</span>
+      $\sigma'$ is a product of two things that sum to $1$, so it is largest when both are $\tfrac12$ — at $x=0$:
+      $$\sigma'(0) \;=\; \sigma(0)\bigl(1-\sigma(0)\bigr) \;=\; 0.5 \times 0.5 \;=\; \mathbf{0.25}.$$
+      That is the <em>maximum</em>. A sigmoid can never pass more than a quarter of a gradient through, and usually
+      far less. Remember $0.25$ — on page&nbsp;5 you will multiply it by itself thirty-two times and watch a deep
+      network's gradient vanish to $5.4\times10^{-20}$, and on page&nbsp;11 that number is why ReLU won.
+      <span style="color:var(--text-dim)">($\sigma'(0)=0.25$, <code>constants.md §9.3</code> [DER].)</span>
+    </div>
+
+    <!-- ===================== GRADIENT + STEEPEST ASCENT ===================== -->
+    <h2>From one slope to the gradient — and which way is uphill</h2>
+    <p>A network has millions of knobs, so we need all the partial derivatives at once. Stack them:</p>
+
+    <p>$$\nabla_{\boldsymbol\theta}\mathcal{L}
+        \;=\; \left[\frac{\partial\mathcal{L}}{\partial\theta_1},\;\dots,\;\frac{\partial\mathcal{L}}{\partial\theta_P}\right]^{\!\top}
+        \;\in\; \mathbb{R}^{P}.$$</p>
+
+    <div class="box rule"><span class="box-title">📐 The gradient has the same shape as $\boldsymbol\theta$</span>
+      $\nabla_{\boldsymbol\theta}\mathcal{L}$ is a vector with one entry per parameter — exactly $\boldsymbol\theta$'s
+      shape. This is not a coincidence you memorize; it is <em>why</em> <code>param.grad</code> always has
+      <code>param.shape</code>, and it makes every optimizer's update line readable at a glance. (The rule is
+      universal; <code>notation.md §8</code>.)
+    </div>
+
+    <p>Now the payoff. The gradient's <em>direction</em> is the direction of steepest ascent — and the proof is the
+      dot product you met on page&nbsp;3, doing structural work rather than decoration. Ask: among all unit
+      directions $\mathbf{u}$, which one increases $f$ fastest? The rate of change along $\mathbf{u}$ is the
+      directional derivative, and by page&nbsp;3's second form of the dot product,</p>
+
+    <p>$$\nabla f \cdot \mathbf{u} \;=\; \lVert\nabla f\rVert\,\lVert\mathbf{u}\rVert\cos\vartheta
+        \;=\; \lVert\nabla f\rVert\cos\vartheta \qquad(\lVert\mathbf{u}\rVert = 1).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\nabla f$</td><td>the gradient — every partial slope, stacked</td><td>$(P,1)$</td><td>defined just above</td></tr>
+        <tr><td>$\mathbf{u}$</td><td>a candidate step direction, unit length</td><td>$(P,1)$</td><td>what we vary</td></tr>
+        <tr><td>$\vartheta$</td><td>the geometric angle between $\nabla f$ and $\mathbf{u}$</td><td>scalar (radians)</td><td>page&nbsp;3's atom — <b>not $\theta$</b></td></tr>
+        <tr><td>$\lVert\nabla f\rVert$</td><td>the gradient's length</td><td>scalar</td><td>$\sqrt{\textstyle\sum_i (\partial f/\partial\theta_i)^2}$</td></tr>
+      </tbody>
+    </table>
+
+    <p>$\lVert\nabla f\rVert$ is fixed by where you stand; the only free quantity is $\cos\vartheta$, which is largest
+      — exactly $1$ — when $\vartheta = 0$, i.e. when $\mathbf{u}$ points <em>along</em> $\nabla f$. So the gradient
+      is the steepest-uphill direction, and $-\nabla f$ is steepest downhill. <b>The spine is a spine: the atom from
+      page&nbsp;3 just told us which way to walk.</b></p>
+
+    <div class="box key"><span class="box-title">🔑 One dot product, two jobs</span>
+      The same operation that scores "how much of $\mathbf{x}$ resembles the template $\mathbf{w}$" (page&nbsp;3) also
+      decides "which nudge to the knobs most reduces the loss." Steepest descent is not a new idea; it is the dot
+      product, read for its angle.
+    </div>
+
+    <!-- ===================== THE STEP ===================== -->
+    <h2>Taking the step — and why $\eta$ is a step size, not a speed</h2>
+    <p>A first-order Taylor expansion says that for a small move $\boldsymbol\Delta$,
+      $f(\boldsymbol\theta + \boldsymbol\Delta) \approx f(\boldsymbol\theta) + \nabla f\cdot\boldsymbol\Delta$.
+      Choose $\boldsymbol\Delta = -\eta\,\nabla f$ and the loss drops by about $\eta\lVert\nabla f\rVert^2$ — a
+      guaranteed decrease, <em>as long as the step is small enough that the linear approximation still holds.</em>
+      That "small enough" is the whole story, and it is where the predict lives. The update, written with the
+      optimizer step index $k$:</p>
+
+    <p>$$\boldsymbol\theta_{k+1} \;=\; \boldsymbol\theta_{k} - \eta\,\nabla_{\boldsymbol\theta}\mathcal{L}(\boldsymbol\theta_k).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\boldsymbol\theta_k$</td><td>all parameters at optimizer step $k$</td><td>$(P,1)$</td><td>the knobs (page&nbsp;1's "flip")</td></tr>
+        <tr><td>$k$</td><td>optimizer step index — <b>not $t$</b></td><td>integer</td><td>counts updates; see translation note below</td></tr>
+        <tr><td>$\eta$</td><td>learning rate — the step size, and nothing else</td><td>scalar</td><td>units carry the inverse of the loss/param units</td></tr>
+        <tr><td>$\nabla_{\boldsymbol\theta}\mathcal{L}$</td><td>the loss gradient — every partial slope, stacked</td><td>$(P,1)$</td><td>defined above; $-\nabla$ is steepest downhill</td></tr>
+        <tr><td>$\boldsymbol\Delta$</td><td>the move we make, $=-\eta\,\nabla_{\boldsymbol\theta}\mathcal{L}$</td><td>$(P,1)$</td><td>the Taylor step</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box rule"><span class="box-title">📐 Translation note — we write $k$, papers write $t$</span>
+      This course indexes the optimizer step with $k$ ($\boldsymbol\theta_{k+1} = \boldsymbol\theta_k - \eta\mathbf{g}_k$),
+      because $t$ is reserved for diffusion time. Optimization papers almost universally write $t$ for this same
+      counter. A side benefit: $k$ makes "step vs epoch" typographically obvious — learning-rate schedules are
+      indexed by <em>step</em> $k$, not epoch, and that is a top-five real bug. (<code>notation.md §3.2</code>.)
+    </div>
+
+    <p>Treat $\eta$ as a step <em>size</em>, not a learning speed. Take a step that is too big and the linear picture
+      is a lie — you overshoot the valley and land on the far wall, higher than you started. Do that repeatedly and
+      the loss doesn't slow down; it explodes. Speed and stability trade off against each other. You are about to
+      watch a loss go to <code>NaN</code> from a learning rate only about $3.5\times$ too large.</p>
+
+    <p>Some real numbers to keep, because you will reuse them for the rest of your life. These are practitioner
+      estimates, not published constants — <b>label them estimates</b> (<code>constants.md §9.4</code> [EST]):</p>
+
+    <table class="ledger">
+      <thead><tr><th>What you're training</th><th>Typical $\eta$ [EST]</th><th>Trainable params</th></tr></thead>
+      <tbody>
+        <tr><td>LLM full fine-tune (8B)</td><td>$1\text{–}2\times10^{-5}$</td><td>$8.19\times10^{9}$</td></tr>
+        <tr><td><b>LLM LoRA</b></td><td>$1\text{–}3\times10^{-4}$ (~10× higher)</td><td>$4.4\times10^{7}$</td></tr>
+        <tr><td>Diffusion full FT / DreamBooth</td><td>$1\text{–}5\times10^{-6}$</td><td>$1.2\times10^{10}$</td></tr>
+        <tr><td><b>Diffusion LoRA</b></td><td>$1\times10^{-4}$</td><td>$3\times10^{7}$</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The rule that generates that table</span>
+      <b>Fewer trainable parameters ⇒ higher learning rate.</b> Full fine-tuning nudges 8&nbsp;billion parameters
+      that already encode everything the model knows; it must tiptoe. LoRA trains tens of millions that start as a
+      no-op; it can stride. Both tracks reuse this principle, and the full table lives on the page-18 memory ledger —
+      the same trainable-param count is what the <b>[THREAD:memory]</b> reality-check is counting.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The days-burning trap</span>
+      A diffusion LoRA runs at $\eta \approx 1\times10^{-4}$. Its <em>full</em> fine-tune runs at $\sim2\times10^{-6}$
+      — a $100\times$ difference. Grab the wrong row and set a diffusion LoRA to $2\times10^{-6}$ and it trains about
+      $100\times$ too slowly — and the noise-dominated diffusion loss curve is so flat it will <em>not</em> tell you
+      anything is wrong. You lose days to a curve that looks fine. (<code>decisions.md D-09</code>,
+      <code>constants.md §9.4</code>.)
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three things that feel true and aren't</h2>
+    <div class="box warn"><span class="box-title">⚠️ "The gradient points toward the minimum."</span>
+      No — it points locally <em>uphill</em>, so $-\nabla f$ points locally downhill, which in a curved valley points
+      at the <em>wall</em>, not the exit. Follow it literally and you zig-zag across the valley floor instead of
+      running down it. This is precisely why momentum and Adam exist. Words alone never fix this intuition — the
+      zig-zag has to be seen, and you will see it on page&nbsp;13.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "A bigger gradient means you're closer to the answer."</span>
+      Magnitude says nothing about distance. A zero gradient could be a minimum, a maximum, a saddle, or a flat
+      plateau — and in a space of $8\times10^{9}$ dimensions, saddles vastly outnumber true minima. The gradient
+      tells you the local direction and steepness, never "how far to go." (The saddle count is page&nbsp;13.)
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Learning rate is how fast you learn."</span>
+      It is a step size. Past a threshold set by the local curvature, a larger $\eta$ makes you overshoot and
+      diverge — you learn <em>slower</em>, then not at all. Speed and stability are in tension, and the whole craft
+      of schedules and warmup (page&nbsp;21) is negotiating that tension.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why gradient descent finds solutions that generalize is not settled in 2026</summary><div>
+      <p>It is tempting to think there must be a clean theorem explaining why following $-\nabla f$ on a wildly
+        non-convex loss lands on parameters that work on <em>unseen</em> data. There isn't one everybody agrees on.
+        Competing accounts — implicit regularization (SGD's noise quietly prefers flat, simple minima), the
+        lottery-ticket hypothesis (training mostly discovers a good sparse subnetwork that was there at init), and
+        loss-landscape connectivity (the good minima form one big connected basin) — all have evidence and
+        adherents, none is decisive. This is a real open problem, not a gap in your understanding. The engineering
+        works anyway; the theory is genuinely incomplete, and a course that pretended otherwise would be lying.</p>
+    </div></details>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Demo — Slope Explorer &amp; LR Playground</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Left: drag $x$ and watch the tangent line — its slope <em>is</em> $f'(x)$, computed live from the polynomial.
+      Right: pick a starting point and a learning rate, hit <b>Run descent</b>, and watch real iterates walk the
+      curve. Set $\eta = 0.01$ and it crawls smoothly downhill; $\eta = 0.1$ converges fast; $\eta = 0.35$ oscillates
+      and blows up to <code>Inf</code> — that is the predict, resolved. Then leave $\eta$ small and move the start
+      from $-2$ to $+2$: same function, same optimizer, <em>different</em> minimum.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">$f(x) = x^4 - 3x^2 + x + 2$ &nbsp;·&nbsp; a sensitivity you can see <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="twopanel">
+          <div>
+            <canvas id="d-slope" height="300"></canvas>
+            <div class="controls" id="d-slope-ctrls"></div>
+            <div class="readout" id="d-slope-out"></div>
+          </div>
+          <div>
+            <canvas id="d-gd" height="300"></canvas>
+            <div class="controls" id="d-gd-ctrls"></div>
+            <p style="margin:10px 0 0">
+              <button class="btn" id="d-gd-go">Run descent</button>
+              <button class="btn secondary" id="d-gd-reset">Reset</button>
+            </p>
+            <div class="readout" id="d-gd-out">Ready. Pick a start and a learning rate, then run.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <p>The right panel resolves the predict: doubling a good $\eta$ does <b>not</b> get you there twice as fast —
+      answer <b>(c)</b>. Below a curvature-set threshold, a bigger step helps; above it, the linear approximation
+      breaks and you diverge. Speed and stability trade off. (Page&nbsp;13 names the exact threshold,
+      $\eta_{\text{crit}} = 2/\lambda_{\max}$.)</p>
+
+    <!-- ===================== CODE ===================== -->
+    <div class="box try"><span class="box-title">Run this — <code>code/descend.py</code></span>
+      The playground, in ~20 lines of Python: the same quartic, its derivative, and a descent loop with a
+      <code>--lr</code> flag. Run it at <code>--lr 0.35</code> and it blows up exactly like the demo. CPU, under a
+      second. The <code>NaN</code> in your real training logs later is this, at scale.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> argparse, math</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">f</span>(x):  <span class="tok-com"># the quartic from the demo</span></span>
+<span class="line">    <span class="tok-kw">return</span> x**<span class="tok-num">4</span> - <span class="tok-num">3</span>*x**<span class="tok-num">2</span> + x + <span class="tok-num">2</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">df</span>(x):  <span class="tok-com"># f'(x) = 4x^3 - 6x + 1</span></span>
+<span class="line">    <span class="tok-kw">return</span> <span class="tok-num">4</span>*x**<span class="tok-num">3</span> - <span class="tok-num">6</span>*x + <span class="tok-num">1</span></span>
+<span class="line"></span>
+<span class="line">p = argparse.<span class="tok-fn">ArgumentParser</span>()</span>
+<span class="line">p.<span class="tok-fn">add_argument</span>(<span class="tok-str">"--lr"</span>, <span class="tok-kw">type</span>=<span class="tok-fn">float</span>, default=<span class="tok-num">0.1</span>)</span>
+<span class="line">p.<span class="tok-fn">add_argument</span>(<span class="tok-str">"--x0"</span>, <span class="tok-kw">type</span>=<span class="tok-fn">float</span>, default=-<span class="tok-num">2.0</span>)</span>
+<span class="line">a = p.<span class="tok-fn">parse_args</span>()</span>
+<span class="line"></span>
+<span class="line">x = a.x0</span>
+<span class="line"><span class="tok-kw">for</span> k <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">200</span>):                 <span class="tok-com"># k = optimizer step</span></span>
+<span class="line">    x = x - a.lr * <span class="tok-fn">df</span>(x)      <span class="tok-com"># the update, θ_{k+1} = θ_k - η f'(θ_k)</span></span>
+<span class="line">    <span class="tok-kw">if</span> <span class="tok-kw">not</span> math.<span class="tok-fn">isfinite</span>(x):        <span class="tok-com"># the loss went to Inf/NaN</span></span>
+<span class="line">        <span class="tok-fn">print</span>(<span class="tok-str">f"diverged at step {k}"</span>); <span class="tok-kw">break</span></span>
+<span class="line"><span class="tok-kw">else</span>:</span>
+<span class="line">    <span class="tok-fn">print</span>(<span class="tok-str">f"x={x:.4f}  f(x)={f(x):.4f}"</span>)</span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-04"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2rem">
+      <b>Next:</b> the seven slopes above are useless in isolation — a network is functions <em>composed</em>. Page 5
+      is the chain rule, the one sentence that turns this table into backpropagation.
+    </p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  // The polynomial and its derivative — the page's real equation, computed live.
+  const f   = (x) => x*x*x*x - 3*x*x + x + 2;
+  const df  = (x) => 4*x*x*x - 6*x + 1;
+  const ddf = (x) => 12*x*x - 6;           // f''(x), for locating the minima
+  // The two minima are the roots of f'(x) = 4x³ − 6x + 1 = 0 with f'' > 0.
+  // Solve them live from df itself (Newton's method, same ±2 seeds the descent
+  // uses) so the basin label can never drift from the derivative the demo runs.
+  // Converges to MIN_L ≈ −1.3008, MIN_R ≈ 1.1309.
+  const newtonRoot = (x) => { for (let i = 0; i < 60; i++) x -= df(x) / ddf(x); return x; };
+  const MIN_L = newtonRoot(-2.0), MIN_R = newtonRoot(2.0);
+
+  /* ---- LEFT PANEL: Slope Explorer — tangent line = f'(x), live ---- */
+  (function () {
+    const canvas = document.getElementById("d-slope");
+    const out = document.getElementById("d-slope-out");
+    const xc = makeCtrl(document.getElementById("d-slope-ctrls"),
+      { label: "point x", min: -2.4, max: 2.4, step: 0.02, value: -1.6, fmt: v => v.toFixed(2) });
+    const accent  = () => vizUtils.cssVar("--accent", "#b48cff");
+    const accent2 = () => vizUtils.cssVar("--accent2", "#45e0b8");
+
+    function draw() {
+      const x0 = xc.get(), y0 = f(x0), slope = df(x0);
+      const p = new Plot(canvas, { xmin: -2.5, xmax: 2.5, ymin: -2.5, ymax: 6, xlabel: "x", ylabel: "f(x)" });
+      p.clear(); p.grid();
+      // the curve, sampled live
+      const xs = [], ys = [];
+      for (let x = -2.5; x <= 2.5; x += 0.02) { xs.push(x); ys.push(f(x)); }
+      p.trace(xs, ys, accent(), 2.5);
+      // the tangent line through (x0, y0) with slope f'(x0)
+      const txs = [-2.5, 2.5], tys = txs.map(x => y0 + slope * (x - x0));
+      p.trace(txs, tys, accent2(), 2);
+      p.hline(0, "#555", [3, 3]);
+      // the point itself
+      p.label(x0, y0, "●", accent2());
+      const sign = slope >= 0 ? "+" : "−";
+      out.innerHTML =
+        `at x = <b>${x0.toFixed(2)}</b>: f(x) = <b>${y0.toFixed(3)}</b>, and the tangent's slope is the derivative<br>` +
+        `f'(x) = 4x³ − 6x + 1 = 4(${x0.toFixed(2)})³ − 6(${x0.toFixed(2)}) + 1 = <b>${slope.toFixed(3)}</b> ` +
+        `<span style="color:var(--text-dim)">(${sign === "+" ? "uphill to the right" : "downhill to the right"})</span>`;
+    }
+    xc.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- RIGHT PANEL: LR Playground — REAL gradient descent, honest divergence ---- */
+  (function () {
+    const canvas = document.getElementById("d-gd");
+    const out = document.getElementById("d-gd-out");
+    const goBtn = document.getElementById("d-gd-go");
+    const resetBtn = document.getElementById("d-gd-reset");
+    const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+    const good   = () => vizUtils.cssVar("--good", "#5ce6a0");
+    const bad    = () => vizUtils.cssVar("--bad", "#ff6b6b");
+
+    // LR slider carries the base-10 exponent; η = 10**value.
+    const lrCtrl = makeCtrl(document.getElementById("d-gd-ctrls"),
+      { label: "learning rate η", min: -3, max: 0, step: 0.02, value: -1,
+        fmt: v => { const e = Math.pow(10, v); return "" + (+e.toPrecision(2)); } });
+    const x0Ctrl = makeCtrl(document.getElementById("d-gd-ctrls"),
+      { label: "start x₀", min: -2.4, max: 2.4, step: 0.05, value: -2.0, fmt: v => v.toFixed(2) });
+
+    let raf = null, traj = [], drawIdx = 0, diverged = -1;
+
+    function compute() {
+      const lr = Math.pow(10, lrCtrl.get());
+      let x = x0Ctrl.get();
+      traj = [x]; diverged = -1;
+      for (let k = 0; k < 200; k++) {
+        x = x - lr * df(x);                 // the real update — no clamping
+        if (!isFinite(x) || Math.abs(x) > 1e6) { diverged = k; break; }
+        traj.push(x);
+      }
+    }
+
+    function drawBase() {
+      const p = new Plot(canvas, { xmin: -2.5, xmax: 2.5, ymin: -2.5, ymax: 6, xlabel: "x", ylabel: "f(x)" });
+      p.clear(); p.grid();
+      const xs = [], ys = [];
+      for (let x = -2.5; x <= 2.5; x += 0.02) { xs.push(x); ys.push(f(x)); }
+      p.trace(xs, ys, "#6b6480", 1.6);
+      return p;
+    }
+
+    function drawUpTo(n) {
+      const p = drawBase();
+      // trail of visited points on the curve
+      for (let i = 0; i <= n && i < traj.length; i++) {
+        const x = traj[i];
+        if (!isFinite(x) || Math.abs(x) > 2.5) continue;
+        p.label(x, f(x), i === Math.min(n, traj.length - 1) ? "●" : "·",
+                i === Math.min(n, traj.length - 1) ? good() : accent());
+      }
+    }
+
+    function report(n) {
+      const lr = Math.pow(10, lrCtrl.get());
+      const k = Math.min(n, traj.length - 1);
+      const x = traj[k];
+      if (diverged >= 0 && n >= diverged) {
+        out.innerHTML = `<span style="color:var(--bad)"><b>Inf</b> — diverged at step ${diverged}.</span> ` +
+          `η = ${(+lr.toPrecision(2))} overshot the valley; each step landed higher, and the update ` +
+          `x ← x − η·f'(x) ran away. A loss went NaN from a step only a few× too large.`;
+        return;
+      }
+      const nextx = x - lr * df(x);
+      const near = Math.abs(x - MIN_L) < Math.abs(x - MIN_R) ? "left" : "right";
+      const settled = k >= traj.length - 1;
+      out.innerHTML =
+        `step <b>${k}</b> · x = <b>${x.toFixed(4)}</b> · f(x) = <b>${f(x).toFixed(4)}</b><br>` +
+        `update: x ← ${x.toFixed(3)} − ${(+lr.toPrecision(2))}·(${df(x).toFixed(3)}) = <b>${nextx.toFixed(3)}</b>` +
+        (settled ? ` <span style="color:var(--good)">— settled in the <b>${near}</b> basin` +
+                   ` (x* ≈ ${(near === "left" ? MIN_L : MIN_R).toFixed(4)}).</span>` : ``);
+    }
+
+    function stop() { if (raf != null) { cancelAnimationFrame(raf); raf = null; } }
+
+    function run() {
+      stop(); compute(); drawIdx = 0; goBtn.disabled = true;
+      const loop = () => {
+        drawUpTo(drawIdx); report(drawIdx);
+        const end = diverged >= 0 ? diverged : traj.length - 1;
+        if (drawIdx < end) { drawIdx += 1; raf = requestAnimationFrame(loop); }
+        else { raf = null; goBtn.disabled = false; }
+      };
+      loop();
+    }
+
+    function reset() { stop(); compute(); drawUpTo(0); goBtn.disabled = false;
+      out.innerHTML = "Ready. Pick a start and a learning rate, then run."; }
+
+    goBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", reset);
+    lrCtrl.onInput(reset);
+    x0Ctrl.onInput(reset);
+    document.getElementById("theme-toggle")?.addEventListener("click",
+      () => setTimeout(() => drawUpTo(drawIdx), 0));
+    compute(); drawUpTo(0);
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-04", [
+    {
+      q: "The maximum value of the sigmoid derivative, $\\sigma'(0) = \\sigma(0)(1-\\sigma(0))$, is:",
+      num: 0.25, tol: 0.001,
+      why: "$\\sigma(0) = 0.5$, so $\\sigma'(0) = 0.5\\times0.5 = 0.25$. It is the largest a sigmoid slope ever gets — the number that kills deep sigmoid nets (constants.md §9.3)."
+    },
+    {
+      q: "For $f(x) = x^4 - 3x^2 + x + 2$, the derivative is $f'(x) = 4x^3 - 6x + 1$. Evaluate $f'(1)$:",
+      num: -1, tol: 0.01,
+      why: "$4(1)^3 - 6(1) + 1 = 4 - 6 + 1 = -1$. Negative slope: at $x=1$, moving right lowers $f$."
+    },
+    {
+      q: "You double a learning rate that was working, and the loss goes to NaN by step 20. This is most consistent with:",
+      opts: ["A code bug — the math was fine before", "The learning rate crossed the stability threshold set by the local curvature", "You didn't give it enough data"],
+      a: 1,
+      why: "Distractor (a) is the 'LR = speed, more is faster' misconception. Past a curvature-set threshold, a larger $\\eta$ makes the linear approximation fail — you overshoot and diverge. The exact threshold is page 13's."
+    },
+    {
+      q: "\"The gradient is the direction of steepest ascent\" is proved from:",
+      opts: ["The chain rule", "The dot product: $\\nabla f\\cdot\\mathbf{u} = \\lVert\\nabla f\\rVert\\cos\\vartheta$, maximized at $\\cos\\vartheta = 1$", "The Taylor series"],
+      a: 1,
+      why: "The directional derivative is a dot product (page 3's atom). Its second form makes the angle explicit, and $\\cos\\vartheta$ is largest when $\\mathbf{u}$ aligns with $\\nabla f$. The Taylor line gives the *step*, not the *direction* proof."
+    },
+    {
+      q: "Training differentiates the loss with respect to:",
+      opts: ["The input $\\mathbf{x}$", "The knobs $\\boldsymbol\\theta$, with $\\mathbf{x}$ held fixed", "Both equally"],
+      a: 1,
+      why: "This is the $\\vartheta$-vs-$x$ flip in symbols: we fix the data and vary the parameters. It is why $\\mathtt{param.grad}$ exists and inputs usually carry no gradient."
+    },
+    {
+      q: "A diffusion LoRA set to $\\eta = 2\\times10^{-6}$ (the *full* fine-tune rate) will most likely:",
+      opts: ["Overfit quickly", "Train roughly 100× too slowly, with a flat noisy loss curve that hides the problem", "Diverge to NaN"],
+      a: 1,
+      why: "Diffusion LoRA wants $\\sim1\\times10^{-4}$, a 100× higher rate; at the full-FT value it barely moves, and diffusion's noisy loss won't flag it — days burned (decisions.md D-09, constants.md §9.4)."
+    }
+  ], "Page 4 self-check");
+
+});
+</script>
+</body>
+</html>

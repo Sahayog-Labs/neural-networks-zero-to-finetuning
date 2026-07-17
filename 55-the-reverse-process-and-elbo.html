@@ -1,0 +1,699 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>55. The Reverse Process & the ELBO — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tag, shape ribbon, data table, and the ELBO-collapse
+     widget. The PREDICT prompt and the Symbol Ledgers use the shared
+     .box.predict / table.ledger components from course.css. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+
+  /* ELBO collapse widget */
+  .elbo-terms { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 4px 0 14px; }
+  .elbo-chip { border: 1px solid var(--border); border-radius: 7px; padding: 8px 12px; background: var(--bg-panel2);
+               cursor: pointer; font-size: .84rem; text-align: center; transition: all .18s ease; user-select: none;
+               display: flex; flex-direction: column; gap: 3px; min-width: 78px; }
+  .elbo-chip .lab { font-family: var(--mono); font-weight: 700; color: var(--text); }
+  .elbo-chip .sub { font-size: .72rem; color: var(--text-dim); }
+  .elbo-chip:hover { border-color: var(--track-diffusion); }
+  .elbo-chip.done { opacity: .45; }
+  .elbo-chip.dropped { opacity: .3; text-decoration: line-through; border-style: dashed; }
+  .elbo-chip.active { border-color: var(--track-diffusion); box-shadow: 0 0 0 2px color-mix(in srgb, var(--track-diffusion) 30%, transparent); }
+  .elbo-chip.mid { flex: 1 1 200px; }
+  .elbo-stage { background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin: 8px 0; min-height: 3.2em; }
+  .elbo-stage .cap { font-size: .82rem; color: var(--track-diffusion); font-weight: 700; margin-bottom: 4px; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+</style>
+</head>
+<body data-page="55-the-reverse-process-and-elbo.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · Where the Monster Dies</span>
+    <h1>The Reverse Process &amp; the ELBO Collapse</h1>
+    <p class="subtitle">The reverse of one big noising step is as tangled as all of image
+      space; the reverse of a <em>tiny</em> step is a Gaussian blob. That is the whole
+      trade. And a thousand-term variational monster over a million dimensions collapses,
+      by one lemma you already own, into the single line every image you have ever
+      generated was trained on: <code>MSELoss</code>.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: answered in the ELBO-collapse section and again in quiz Q1. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      The training objective behind every image you have ever made in ComfyUI — the loss
+      the denoiser was optimized against — is it <b>(a)</b> an adversarial game between two
+      networks, <b>(b)</b> reinforcement learning against a reward, or <b>(c)</b> plain
+      <code>MSELoss</code> on a regression problem? Commit to one letter before you read on.
+    </div>
+
+    <!-- ============================ WHY REVERSE IS A DEAD END ============================ -->
+    <h2>Why you cannot just run the ruler backwards</h2>
+
+    <p>Page 54 handed you a forward process with zero parameters: a ruler that rotates a
+      clean latent $\mathbf{x}_0$ into noise. The obvious idea is to invert it — walk the
+      chain back from noise to a picture. The obstacle is that the single honest reverse
+      step</p>
+
+    <p>$$q(\mathbf{x}_{t-1}\mid\mathbf{x}_t) = \frac{q(\mathbf{x}_t\mid\mathbf{x}_{t-1})\,q(\mathbf{x}_{t-1})}{q(\mathbf{x}_t)}$$</p>
+
+    <p>needs $q(\mathbf{x}_{t-1})$ — the marginal distribution of <em>all slightly-cleaner
+      images</em>. That is the data distribution you are trying to learn in the first place.
+      You cannot write it down. The reverse of a big jump is a dead end because undoing a lot
+      of noise means guessing which of the astronomically many possible pictures the noise
+      came from — a wildly multimodal answer.</p>
+
+    <div class="box key"><span class="box-title">🔑 Why 1000 steps: small steps are Gaussian, big steps are not</span>
+      <strong>Feller (1949):</strong> when $\beta_t$ is small, the true reverse step
+      $q(\mathbf{x}_{t-1}\mid\mathbf{x}_t)$ is itself approximately <em>Gaussian</em>. So you
+      never model the whole intractable reversal — you model one small step at a time and
+      parameterize it as
+      $$p_\theta(\mathbf{x}_{t-1}\mid\mathbf{x}_t) = \mathcal{N}\!\big(\mathbf{x}_{t-1};\ \boldsymbol\mu_\theta(\mathbf{x}_t,t),\ \Sigma_\theta\big),$$
+      learning only the <strong>mean</strong>. The reverse of a <em>big</em> step is as
+      multimodal as $p_{\text{data}}$ itself; the reverse of a <em>tiny</em> step is a small
+      Gaussian bump around where you already are. <strong>Diffusion trades one impossible
+      problem for a thousand easy ones — and the 1000 is a <em>training-time</em> statement
+      about tractability, not a claim that you must sample in 1000 steps</strong> (page 57's
+      four-step FLUX is the counterpoint).
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the tractable cousin $q(\mathbf{x}_{t-1}\mid\mathbf{x}_t,\mathbf{x}_0)$ and where $\boldsymbol\mu_\theta$ comes from</summary><div>
+      <p>The reverse step is intractable, but the reverse step <em>conditioned on the clean
+        image</em> is not. Bayes with the two forward Gaussians (both known) gives a Gaussian
+        whose mean and variance are closed-form:
+        $$\tilde{\boldsymbol\mu}_t(\mathbf{x}_t,\mathbf{x}_0) = \frac{\sqrt{\bar\alpha_{t-1}}\,\beta_t}{1-\bar\alpha_t}\mathbf{x}_0 + \frac{\sqrt{\alpha_t}\,(1-\bar\alpha_{t-1})}{1-\bar\alpha_t}\mathbf{x}_t,\qquad
+          \tilde\beta_t = \frac{1-\bar\alpha_{t-1}}{1-\bar\alpha_t}\beta_t.$$
+        The network never sees $\mathbf{x}_0$ at sampling time, so it is trained to predict it
+        (or, equivalently, the noise). Setting $\Sigma_\theta = \tilde\beta_t I$ — a fixed,
+        <em>unlearned</em> covariance — is what makes the next section's KL tractable, and it
+        is the choice DDPM ships. (The rigid-triangle demo below verifies the
+        $\boldsymbol\epsilon/\mathbf{x}_0/v$ conversions this covariance choice rides on — the
+        round-trip is exact to machine precision; $\tilde{\boldsymbol\mu}_t$ itself is what the
+        next section's KL collapse consumes.)</p>
+    </div></details>
+
+    <!-- ============================ THE RIGID TRIANGLE ============================ -->
+    <h2>★ One triangle, three names: $\boldsymbol\epsilon$ vs $\mathbf{x}_0$ vs $v$</h2>
+
+    <p>Before we can talk about the loss we have to settle what the network should
+      <em>report</em>. This is the source of endless confusion in the field — $\epsilon$-pred,
+      $\mathbf{x}_0$-pred, $v$-pred — and it dissolves the instant you notice it is one
+      equation, not three models. Eq. 3.3 from page 54,
+      $\mathbf{x}_t = \sqrt{\bar\alpha_t}\,\mathbf{x}_0 + \sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon$,
+      is a single line with <strong>two unknowns and one known</strong>: give it any one of
+      $\{\mathbf{x}_0, \boldsymbol\epsilon, v\}$ and simple algebra returns the other two.</p>
+
+    <p>Reopen page 54's circle. With $\sqrt{\bar\alpha_t} = \cos\psi_t$ and
+      $\sqrt{1-\bar\alpha_t} = \sin\psi_t$, the whole zoo lives on the unit circle spanned by
+      the two orthonormal axes $\mathbf{x}_0$ and $\boldsymbol\epsilon$:</p>
+
+    <div class="box key"><span class="box-title">🔑 The rigid triangle on the circle</span>
+      $$\mathbf{x}_t = \cos\psi_t\,\mathbf{x}_0 + \sin\psi_t\,\boldsymbol\epsilon,
+        \qquad
+        v \equiv \frac{d\mathbf{x}_t}{d\psi_t} = \cos\psi_t\,\boldsymbol\epsilon - \sin\psi_t\,\mathbf{x}_0.$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\mathbf{x}_0$</td><td>the clean latent — the horizontal axis of the circle</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>the VAE encode (p.53)</td></tr>
+          <tr><td>$\boldsymbol\epsilon$</td><td>the noise that was added — the vertical axis</td><td>same</td><td>$\mathcal{N}(0,I)$, the Eq. 3.3 draw</td></tr>
+          <tr><td>$\mathbf{x}_t$</td><td>the noised latent — the point at angle $\psi_t$</td><td>same</td><td>Eq. 3.3 (p.54)</td></tr>
+          <tr><td>$\psi_t$</td><td>rotation angle, $\arccos\sqrt{\bar\alpha_t}$</td><td>scalar, $0\!\to\!\tfrac{\pi}{2}$</td><td>the schedule (p.54)</td></tr>
+          <tr><td>$v$</td><td>the <em>velocity</em> around the circle — $\mathbf{x}_t$ turned a further $90°$</td><td>same as $\mathbf{x}_t$</td><td>the derivative $d\mathbf{x}_t/d\psi_t$</td></tr>
+        </tbody>
+      </table>
+      $v$ is $\mathbf{x}_t$ rotated one more quarter-turn. <strong>The entire
+      $\epsilon/\mathbf{x}_0/v$ argument is a choice of which axis on one circle you ask the
+      network to read off — the information is identical.</strong>
+    </div>
+
+    <p>The conversions, all four of them, substituting $\cos\psi_t = \sqrt{\bar\alpha_t}$ and
+      $\sin\psi_t = \sqrt{1-\bar\alpha_t}$:</p>
+
+    <div class="ribbon">given x0:   eps =  (x_t - cosψ·x0) / sinψ          # divide by sinψ = √(1-ᾱ_t)
+given eps:  x0  =  (x_t - sinψ·eps) / cosψ         # divide by cosψ = √ᾱ_t   ← the pole
+from v:     x0  =  cosψ·x_t - sinψ·v               # coefficients ≤ 1, no division
+from v:     eps =  sinψ·x_t + cosψ·v               # coefficients ≤ 1, no division</div>
+
+    <p>Why the choice matters at all, if the information is the same: the three targets put
+      the squared error in different <em>places</em>, and the schedule reweights them by the
+      signal-to-noise ratio. Converting an $\epsilon$-error into an $\mathbf{x}_0$-error costs
+      a factor of $\mathrm{SNR}_t$:</p>
+
+    <p>$$\|\boldsymbol\epsilon - \hat{\boldsymbol\epsilon}\|^2 = \mathrm{SNR}_t\,\|\mathbf{x}_0 - \hat{\mathbf{x}}_0\|^2,
+        \qquad \mathrm{SNR}_t = \frac{\bar\alpha_t}{1-\bar\alpha_t}.$$</p>
+
+    <p>Over the linear DDPM schedule $\mathrm{SNR}_t$ runs from about
+      $\mathbf{10^{4}}$ at low $t$ down to $\mathbf{4\times10^{-5}}$ at $t=T$
+      <span class="xref">[DER, constants&nbsp;§9.6]</span> — <strong>nine orders of
+      magnitude.</strong> Whichever coordinate you regress, you are implicitly choosing how
+      loss budget is spread across noise levels. That is the whole game, and it is why the
+      field argues about targets at all.</p>
+
+    <p class="thread"><b>[THREAD: The chain rule · beat]</b> Same verb returning. $v$ is a
+      <em>derivative</em> — the rate $\mathbf{x}_t$ changes as you turn the schedule angle.
+      Page 56 differentiates once more, w.r.t. $\mathbf{x}_t$ this time, and finds the score;
+      page 57 shows $v$ <em>is</em> flow matching's velocity on the circular path. Keep the word
+      "velocity"; both pages reopen it.</p>
+
+    <!-- ============================ THE eps-PRED POLE ============================ -->
+    <div class="box warn"><span class="box-title">⚠️ The $\epsilon$-pred pole — why $v$-pred was invented</span>
+      Recover the clean image from a noise prediction and you divide by the signal
+      coefficient:
+      $$\hat{\mathbf{x}}_0 = \frac{\mathbf{x}_t - \sqrt{1-\bar\alpha_t}\,\hat{\boldsymbol\epsilon}}{\sqrt{\bar\alpha_t}}.$$
+      At the last steps the denominator is tiny: $\sqrt{\bar\alpha_T} = 0.0063$
+      <span class="xref">[DER, constants&nbsp;§9.6]</span>, so dividing by it
+      <strong>multiplies any error in $\hat{\boldsymbol\epsilon}$ by
+      $1/0.0063 = \mathbf{159\times}$</strong>. A denoiser that is slightly wrong about the
+      noise at $t\approx T$ is catastrophically wrong about the image. The $v$-pred
+      conversions above have coefficients $\cos\psi_t,\sin\psi_t \le 1$ — <strong>no division,
+      no pole</strong>, stable at both ends of the circle. This is not a footnote:
+      $v$-prediction is the ancestor of flow matching's velocity (p.57). Do not skip it — it
+      prepays that page.
+    </div>
+
+    <!-- ============================ THE ELBO COLLAPSE ============================ -->
+    <h2>★ The ELBO collapse — where the monster dies</h2>
+
+    <p>Now the loss. The principled objective is the variational bound on the negative
+      log-likelihood (the same ELBO the VAE of page 53 used, now with a thousand latent
+      layers instead of one). Written out, it is genuinely frightening:</p>
+
+    <p>$$-\log p_\theta(\mathbf{x}_0) \le \mathbb{E}_q\Big[\underbrace{L_T}_{\text{prior}} + \sum_{t=2}^{T} \underbrace{L_{t-1}}_{\text{denoising KLs}} + \underbrace{L_0}_{\text{decoder}}\Big],
+        \qquad L_{t-1} = D_{\mathrm{KL}}\!\big(q(\mathbf{x}_{t-1}\mid\mathbf{x}_t,\mathbf{x}_0)\,\|\,p_\theta(\mathbf{x}_{t-1}\mid\mathbf{x}_t)\big).$$</p>
+
+    <p>A <strong>thousand</strong> KL divergences, each between two distributions over
+      $\mathbb{R}^{3{,}145{,}728}$ (a $1024^2$ RGB image; even the FLUX latent of page 53 is
+      $\mathbb{R}^{524{,}288}$). No one optimizes that by staring at it. You take it apart —
+      click through it below, one term at a time.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Click the three highlighted terms in order. <b>$L_T$</b> has no $\theta$ in it — watch
+      it drop. A representative middle term <b>$L_{t-1}$</b> collapses through the
+      equal-covariance KL lemma into a squared distance. The weight <b>$w_t$</b> gets set to
+      $1$ by Ho et al.'s honest hack. What is left standing is $\mathcal{L}_{\text{simple}}$.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">The ELBO, taken apart term by term <span class="demo-tag">Interactive</span></div>
+      <div class="demo-body">
+        <div class="elbo-terms" id="elbo-terms">
+          <div class="elbo-chip active" data-term="LT"><span class="lab">$L_T$</span><span class="sub">prior · click 1</span></div>
+          <div class="elbo-chip mid" data-term="Lmid"><span class="lab">$\sum_{t=2}^{T} L_{t-1}$</span><span class="sub">999 denoising KLs · click 2</span></div>
+          <div class="elbo-chip" data-term="L0"><span class="lab">$L_0$</span><span class="sub">decoder</span></div>
+          <div class="elbo-chip" data-term="wt"><span class="lab">$w_t := 1$</span><span class="sub">Ho's hack · click 3</span></div>
+        </div>
+        <div class="elbo-stage" id="elbo-stage">
+          <div class="cap">The monster, whole</div>
+          <div id="elbo-math">$$\mathcal{L} = \mathbb{E}_q\Big[L_T + \sum_{t=2}^{T} L_{t-1} + L_0\Big]$$</div>
+        </div>
+        <p style="margin:10px 0 0"><button class="btn secondary" id="elbo-reset">Reset</button></p>
+        <div class="readout" id="elbo-out">Three terms to click. Start with $L_T$.</div>
+      </div>
+    </div>
+
+    <p>Here is what each click actually does. <strong>$L_T = D_{\mathrm{KL}}(q(\mathbf{x}_T\mid\mathbf{x}_0)\,\|\,\mathcal{N}(0,I))$
+      contains no $\theta$</strong> — the forward process is a fixed ruler, so this term
+      cannot be optimized and drops. (Note it is <em>not</em> zero: that residual is the same
+      nonzero-terminal-SNR fact from page 54.) $L_0$ is a single reconstruction term. The
+      1000 middle terms are the ones that matter, and they fall to a lemma you already own.</p>
+
+    <div class="box rule"><span class="box-title">📐 The equal-covariance KL lemma (trunk-owned — reopened, not re-derived)</span>
+      For two Gaussians with the <em>same</em> fixed covariance, the KL is just a scaled
+      squared distance between their means:
+      $$D_{\mathrm{KL}}\!\big(\mathcal{N}(\boldsymbol\mu_1,\sigma^2 I)\,\|\,\mathcal{N}(\boldsymbol\mu_2,\sigma^2 I)\big) = \frac{\|\boldsymbol\mu_1 - \boldsymbol\mu_2\|^2}{2\sigma^2}.$$
+      The trunk derived this from the Gaussian log-density. <strong>A KL over
+      $\mathbb{R}^{3M}$ becomes a number divided into a squared distance. This one lemma is
+      where the monster dies.</strong>
+    </div>
+
+    <p>Both distributions in $L_{t-1}$ are Gaussians with the same covariance
+      $\tilde\beta_t I$ (the deep dive above), so the lemma applies term by term. Substitute
+      the $\epsilon$-parameterization of both means, and the $\mathbf{x}_t$ terms — present
+      identically in $\tilde{\boldsymbol\mu}_t$ and $\boldsymbol\mu_\theta$ — cancel exactly,
+      leaving a plain noise-prediction error:</p>
+
+    <p>$$L_{t-1} = w_t\,\big\|\boldsymbol\epsilon - \epsilon_\theta(\mathbf{x}_t, t)\big\|^2,
+        \qquad w_t = \frac{\beta_t^2}{2\tilde\beta_t\,\alpha_t\,(1-\bar\alpha_t)}.$$</p>
+
+    <p>The principled weight $w_t$ is exactly the $\mathrm{SNR}_t$ reweighting from the triangle
+      section. Then comes the move that made diffusion <em>work</em>:</p>
+
+    <div class="box key"><span class="box-title">🔑 $\mathcal{L}_{\text{simple}}$ — Ho et al.'s honest hack</span>
+      Delete the weight. Set $w_t := 1$. It makes the variational bound technically wrong, and
+      it makes the images dramatically better:
+      $$\boxed{\ \mathcal{L}_{\text{simple}} = \mathbb{E}_{\mathbf{x}_0,\ \boldsymbol\epsilon\sim\mathcal{N}(0,I),\ t\sim\mathcal{U}\{1,T\}}\Big[\big\|\boldsymbol\epsilon - \epsilon_\theta(\sqrt{\bar\alpha_t}\,\mathbf{x}_0 + \sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon,\ t)\big\|_2^2\Big]\ }$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\boldsymbol\epsilon$</td><td>the noise that was added — <em>the regression label</em></td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>drawn fresh, Eq. 3.3</td></tr>
+          <tr><td>$\epsilon_\theta(\cdot,t)$</td><td>the denoiser — the only thing with parameters</td><td>output matches $\boldsymbol\epsilon$</td><td>the U-Net / DiT (p.58–59)</td></tr>
+          <tr><td>$\mathbf{x}_0$</td><td>a clean latent, sampled from data</td><td>same</td><td>the VAE encode (p.53)</td></tr>
+          <tr><td>$t$</td><td>a uniform timestep — a free input, no loop</td><td>scalar $\in\{1,\dots,T\}$</td><td>$\mathcal{U}\{1,T\}$</td></tr>
+          <tr><td>$\bar\alpha_t$</td><td>cumulative signal retention</td><td>scalar</td><td>the schedule (p.54)</td></tr>
+        </tbody>
+      </table>
+      <strong>This is plain <code>MSELoss</code> on a regression problem.</strong>
+      It is the same "MSE falls out of a Gaussian likelihood" the trunk proved — a diffusion
+      corollary of it — and it is <em>simpler</em> than the LLM track's cross-entropy: predict
+      a vector, subtract, square.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Genuine, live uncertainty: dropping $w_t$ is not theory-justified</span>
+      Do not file $w_t := 1$ under "settled." It is not derived; it is a choice that happens to
+      reweight training toward the mid-noise band ($t\in[300,700]$, where composition is
+      decided — page 54's SNR$\approx 1$ region) and away from the near-clean and near-noise
+      ends the bound would have you obsess over. What weight belongs there is an
+      <strong>open 2026 research question</strong>, not a solved one: min-SNR-$\gamma$,
+      logit-normal timestep sampling (p.57), EDM's weighting, P2 — these are all live rival
+      answers to "what should $w_t$ be." When you set <code>timestep_sampling</code> or a loss
+      weighting in a FLUX training config, this is the knob you are turning.
+    </div>
+
+    <p class="thread"><b>[THREAD: The memory budget · beat]</b> The reality check returns.
+      Training this MSE still backprops through the <em>whole</em> denoiser at every step, so
+      the activations cached on the forward pass (page 54's shape-ribbon tensors,
+      $\phi'$-style intermediates) are what eat VRAM — not the loss, which is one subtraction.
+      The loss being simple does not make the memory small. We settle exactly how much on
+      page 60's latent-diffusion roofline and page 62's LoRA budget.</p>
+
+    <!-- ============================ THE SIX-LINE LOOP ============================ -->
+    <h2>The whole training loop is six lines</h2>
+
+    <div class="box worked"><span class="box-title">✍️ DDPM training — and there is no loop over $t$</span>
+      Every term above collapsed into one sampled expectation, so the algorithm is a
+      draw-and-regress:
+      <div class="codeblock" data-lang="python" style="margin-top:10px">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line"><span class="tok-kw">for</span> x0 <span class="tok-kw">in</span> data:                              <span class="tok-com"># 1. a clean latent (VAE-encoded, p.53)</span></span>
+<span class="line">    t   = torch.<span class="tok-fn">randint</span>(<span class="tok-num">1</span>, T + <span class="tok-num">1</span>, (x0.shape[<span class="tok-num">0</span>],))  <span class="tok-com"># 2. one uniform timestep per example</span></span>
+<span class="line">    eps = torch.<span class="tok-fn">randn_like</span>(x0)                   <span class="tok-com"># 3. the label</span></span>
+<span class="line">    xt  = abar[t].<span class="tok-fn">sqrt</span>() * x0 + (<span class="tok-num">1</span> - abar[t]).<span class="tok-fn">sqrt</span>() * eps   <span class="tok-com"># 4. Eq. 3.3, ONE line</span></span>
+<span class="line">    loss = F.<span class="tok-fn">mse_loss</span>(eps_theta(xt, t), eps)   <span class="tok-com"># 5. L_simple</span></span>
+<span class="line">    loss.<span class="tok-fn">backward</span>(); opt.<span class="tok-fn">step</span>(); opt.<span class="tok-fn">zero_grad</span>()  <span class="tok-com"># 6. one SGD step</span></span></code></pre>
+      </div>
+      Line 4 is Eq. 3.3 — you jump straight to level $t$, you never simulate a chain. That is
+      what "training is $O(1)$, not $O(T)$" (page 54) buys you in code.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 A diffusion model is a VAE with 1000 latent layers and a frozen encoder</span>
+      Page 53 cashes out here. The forward ruler <em>is</em> the encoder — fixed, unlearned.
+      The 1000 noise levels <em>are</em> the latent layers. The denoiser is the decoder,
+      trained by the ELBO you just watched collapse. The only reason it beats a one-layer VAE
+      is that breaking the encode into a thousand tiny Gaussian steps is what made each reverse
+      step tractable in the first place.
+    </div>
+
+    <p>One loose end for sampling, since you turn these knobs in ComfyUI. Each reverse step
+      draws $\mathbf{x}_{t-1} = \boldsymbol\mu_\theta(\mathbf{x}_t,t) + \sigma_t\,\mathbf{z}$
+      with a fresh $\mathbf{z}\sim\mathcal{N}(0,I)$ — you <strong>re-inject noise</strong>.
+      Why, when the network already predicted the mean? Because $p_\theta(\mathbf{x}_{t-1}\mid\mathbf{x}_t)$
+      is a <em>distribution</em>, not a point. Take only the mean at every step and you march
+      toward the single highest-probability blob — mode-seeking mush, a brown-grey average of
+      everything. The re-injected $\sigma_t\mathbf{z}$ is what keeps you sampling <em>a</em>
+      picture instead of collapsing to <em>the</em> average picture. (Page 59's DDIM sets
+      <code>eta</code>$=0$ and drops that noise entirely, yet still produces sharp images — a
+      genuine puzzle we bank for there.)</p>
+
+    <!-- ============================ DEMO 1: rigid triangle ============================ -->
+    <h2>Demo — the rigid triangle, verified not asserted</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">$\mathbf{x}_0$, $\boldsymbol\epsilon$, $v$ recovered from each other · round-trip error <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-tri" height="150" style="display:none"></canvas>
+        <div class="controls" id="d-tri-ctrls"></div>
+        <div class="readout" id="d-tri-out"></div>
+      </div>
+    </div>
+
+    <p>Six real values stand in for a latent's pixels. At the chosen $t$ the demo builds
+      $\mathbf{x}_t$ from Eq. 3.3, then recovers $\mathbf{x}_0$, $\boldsymbol\epsilon$ and $v$
+      from each other using the four conversions above and reports the worst round-trip error —
+      it sits at machine epsilon, because this is exact algebra, no network. Drag $t$ toward
+      $T$ and watch the $\epsilon\!\to\!\mathbf{x}_0$ amplification $1/\sqrt{\bar\alpha_t}$ blow
+      up to the frozen <b>159×</b> while the $v\!\to\!\mathbf{x}_0$ route stays at unit scale.</p>
+
+    <!-- ============================ DEMO 2: unit circle / v ============================ -->
+    <h2>Demo — the unit circle: three axes, one point</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">$\mathbf{x}_t = \cos\psi_t\,\mathbf{x}_0 + \sin\psi_t\,\boldsymbol\epsilon$, and $v$ a further $90°$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-circle" height="360"></canvas>
+        <div class="controls" id="d-circle-ctrls"></div>
+        <div class="readout" id="d-circle-out"></div>
+      </div>
+    </div>
+
+    <p>The horizontal axis is $\mathbf{x}_0$, the vertical is $\boldsymbol\epsilon$. As you
+      sweep the angle $\psi_t$ from $0$ (pure signal) to $90°$ (pure noise), the noised latent
+      $\mathbf{x}_t$ rides the circle and $v$ stays exactly a quarter-turn ahead of it. The
+      three prediction targets are three axes on <em>this</em> circle; asking the network for
+      one is asking it for all three.</p>
+
+    <!-- ============================ CODE ARTIFACT ============================ -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/prediction_targets.py</code> — take one $(\mathbf{x}_0,\boldsymbol\epsilon,t)$,
+      derive $\mathbf{x}_0$, $\boldsymbol\epsilon$ and $v$ from one another, and
+      <code>torch.allclose</code> them to machine precision. It prints the error-amplification
+      $1/\sqrt{\bar\alpha_t}$, which at the terminal step ($\sqrt{\bar\alpha_T}=0.0063$) crosses
+      <b>159×</b> <span class="xref">[DER, constants&nbsp;§9.6]</span>. The triangle, verified on
+      your own box, not asserted. Instant on CPU.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-55"></div>
+
+    <p class="xref" style="margin-top:2em">← p.54 gave us Eq. 3.3 and the circle this all rides
+      on. This page reused the trunk's equal-covariance KL lemma and its "MSE from a Gaussian
+      likelihood" result. → p.56 differentiates Eq. 3.3 to get the score
+      $\mathbf{s}_\theta = -\epsilon_\theta/\sqrt{1-\bar\alpha_t}$; p.57 shows $v$ is flow
+      matching's velocity; p.59 explains why DDIM(<code>eta</code>$=0$) drops the re-injected
+      noise and still works; p.62 shows $\mathcal{L}_{\text{simple}}$ is exactly what your
+      diffusion LoRA minimizes.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const katexOpts = { delimiters: [
+    { left: "$$", right: "$$", display: true },
+    { left: "$", right: "$", display: false }
+  ], throwOnError: false };
+  function typeset(el) { if (window.renderMathInElement && el) renderMathInElement(el, katexOpts); }
+
+  /* ---- shared schedule (identical to p.54: linear DDPM, β 1e-4→0.02, T=1000) ---- */
+  function buildAbar(T, bmin, bmax) {
+    const abar = [1];
+    let ab = 1;
+    for (let t = 1; t <= T; t++) {
+      const beta = bmin + (bmax - bmin) * (t - 1) / (T - 1);
+      ab *= (1 - beta);
+      abar.push(ab);
+    }
+    return abar;
+  }
+  const T = 1000, ABAR = buildAbar(T, 1e-4, 2e-2);
+  // frozen-precision √ᾱ: truncate to 4 d.p. so the terminal reads 0.0063 (matches the
+  // frozen SNR table on p.54) and 1/0.0063 = 159, never a rounded-up 0.0064/157 mismatch.
+  const truncFixed = (x, d) => { const f = Math.pow(10, d); return (Math.floor(x * f) / f).toFixed(d); };
+  const sqrtAbarDisp = t => parseFloat(truncFixed(Math.sqrt(ABAR[t]), 4)); // for display/amplification
+
+  /* ---- DEMO 1: rigid-triangle verifier ---- */
+  (function () {
+    const out = document.getElementById("d-tri-out");
+    const tC = makeCtrl(document.getElementById("d-tri-ctrls"),
+      { label: "timestep t", min: 0, max: 1000, step: 1, value: 500, fmt: v => v.toFixed(0) });
+
+    // six fixed "pixels" standing in for a latent (seeded, reproducible)
+    const rng = new NN.RNG(55055);
+    const x0 = [], eps = [];
+    for (let i = 0; i < 6; i++) { x0.push(rng.normal(0, 1)); eps.push(rng.normal(0, 1)); }
+
+    function maxAbsDiff(a, b) { let m = 0; for (let i = 0; i < a.length; i++) m = Math.max(m, Math.abs(a[i] - b[i])); return m; }
+
+    function draw() {
+      const t = Math.round(tC.get());
+      const ca = Math.sqrt(ABAR[t]);            // cosψ = √ᾱ_t  (raw, for the math)
+      const sa = Math.sqrt(1 - ABAR[t]);        // sinψ = √(1-ᾱ_t)
+      // Eq. 3.3 forward
+      const xt = x0.map((v, i) => ca * v + sa * eps[i]);
+      // v target
+      const v = x0.map((v0, i) => ca * eps[i] - sa * v0);
+      // recover each from the others
+      const epsFromX0 = xt.map((xv, i) => sa > 1e-12 ? (xv - ca * x0[i]) / sa : eps[i]);
+      const x0FromEps = xt.map((xv, i) => ca > 1e-12 ? (xv - sa * eps[i]) / ca : x0[i]);   // the pole path
+      const x0FromV   = xt.map((xv, i) => ca * xv - sa * v[i]);                             // stable path
+      const epsFromV  = xt.map((xv, i) => sa * xv + ca * v[i]);
+
+      const errEps = Math.max(maxAbsDiff(epsFromX0, eps), maxAbsDiff(epsFromV, eps));
+      const errX0  = Math.max(maxAbsDiff(x0FromEps, x0), maxAbsDiff(x0FromV, x0));
+      const worst  = Math.max(errEps, errX0);
+
+      const disp = sqrtAbarDisp(t);             // frozen-precision √ᾱ_t at THIS t
+      const amp = disp > 0 ? 1 / disp : Infinity;   // live ε→x0 amplification at this t
+      // The frozen constant (constants §9.6) is anchored to the TERMINAL coefficient
+      // √ᾱ_T = 0.0063 → ×159. It is rendered on its own line, always about t=T, so it
+      // is never concatenated with — and can never read as a contradiction of — the
+      // live per-t value on the line above. Dragging to the terminal step makes the
+      // live line coincide with it (×159); at intermediate t the two lines are clearly
+      // labelled as different timesteps (§6b.4: no 0.0063-vs-0.0064 in one breath).
+
+      out.innerHTML =
+        `<div>at <b>this</b> step: t = <b>${t}</b> · cos ψ = √ᾱ_t = <b>${disp.toFixed(4)}</b>, ` +
+          `sin ψ = √(1−ᾱ_t) = <b>${sa.toFixed(4)}</b> · ` +
+          `live ε→x₀ amplification 1/√ᾱ_t = <b>×${isFinite(amp) ? amp.toFixed(0) : "∞"}</b> ` +
+          `· the v→x₀ route stays at unit scale (no division).</div>` +
+        `<div>worst round-trip error across all four conversions: <b>${worst.toExponential(1)}</b> — machine epsilon, exact algebra.</div>` +
+        `<div class="xref" style="margin-top:6px;border-top:1px solid var(--border);padding-top:6px">` +
+          `frozen anchor — the <b>terminal</b> step t=${T}: √ᾱ_T = 0.0063 → ` +
+          `<span class="flag-bad">ε→x₀ error ×159</span> [DER, constants §9.6]. Drag t to ${T} and the live line above lands on it.</div>`;
+    }
+    tC.onInput(draw);
+    draw();
+  })();
+
+  /* ---- DEMO 2: the unit circle with x_t and v ---- */
+  (function () {
+    const canvas = document.getElementById("d-circle");
+    const out = document.getElementById("d-circle-out");
+    const psiC = makeCtrl(document.getElementById("d-circle-ctrls"),
+      { label: "angle ψ_t (degrees)", min: 0, max: 90, step: 1, value: 35, fmt: v => v.toFixed(0) + "°" });
+
+    function arrow(g, x0, y0, x1, y1, color, width, headText) {
+      g.save();
+      g.strokeStyle = color; g.fillStyle = color; g.lineWidth = width; g.lineJoin = "round";
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      const ang = Math.atan2(y1 - y0, x1 - x0), h = 11;
+      g.beginPath();
+      g.moveTo(x1, y1);
+      g.lineTo(x1 - h * Math.cos(ang - 0.4), y1 - h * Math.sin(ang - 0.4));
+      g.lineTo(x1 - h * Math.cos(ang + 0.4), y1 - h * Math.sin(ang + 0.4));
+      g.closePath(); g.fill();
+      if (headText) { g.font = "bold 13px system-ui"; g.fillText(headText, x1 + 6 * Math.cos(ang), y1 + 6 * Math.sin(ang) + 4); }
+      g.restore();
+    }
+
+    function draw() {
+      // Aspect-correct so a unit circle renders as a circle, not an ellipse: match
+      // units-per-pixel on both axes. y fixed to ±1.35; widen x by the plot-area ratio.
+      const pad = { l: 62, r: 16, t: 14, b: 42 };
+      const cw = canvas.clientWidth || 600;
+      const drawW = cw - pad.l - pad.r, drawH = 360 - pad.t - pad.b;
+      const yr = 2.7, xr = yr * (drawW / drawH);
+      const p = new Plot(canvas, { xmin: -xr / 2, xmax: xr / 2, ymin: -yr / 2, ymax: yr / 2, xlabel: "x₀ axis", ylabel: "ε axis" });
+      p.clear(); p.grid();
+      const g = p.g;
+      const cAxis = cssVar("--plot-tick", "#8391ab");
+      const cSig = cssVar("--accent", "#b48cff");
+      const cNoise = cssVar("--track-diffusion", "#ff9466");
+      const cV = cssVar("--accent2", "#54d6c4");
+
+      // the unit circle
+      const cs = [], ys = [];
+      for (let a = 0; a <= 360; a += 2) { cs.push(Math.cos(a * Math.PI / 180)); ys.push(Math.sin(a * Math.PI / 180)); }
+      p.trace(cs, ys, cAxis, 1.2);
+      // axes through origin
+      p.hline(0, cAxis, [3, 3]); p.vline(0, cAxis, [3, 3]);
+
+      const psi = psiC.get() * Math.PI / 180;
+      const ca = Math.cos(psi), sa = Math.sin(psi);
+      const ox = p._tx(0), oy = p._ty(0);
+      // x_t = (cosψ, sinψ) in the (x0, eps) basis
+      arrow(g, ox, oy, p._tx(ca), p._ty(sa), cNoise, 3, "xₜ");
+      // v = (-sinψ, cosψ) : x_t rotated +90°
+      arrow(g, ox, oy, p._tx(-sa), p._ty(ca), cV, 3, "v");
+      // the basis vectors x0 and eps at unit length, faint
+      arrow(g, ox, oy, p._tx(1), p._ty(0), cSig, 1.6, "x₀");
+      arrow(g, ox, oy, p._tx(0), p._ty(1), cSig, 1.6, "ε");
+
+      // right-angle marker between x_t and v
+      g.save(); g.strokeStyle = cV; g.lineWidth = 1;
+      const mx = ca * 0.16 - sa * 0.16, my = sa * 0.16 + ca * 0.16;
+      g.beginPath();
+      g.moveTo(p._tx(ca * 0.16), p._ty(sa * 0.16));
+      g.lineTo(p._tx(mx), p._ty(my));
+      g.lineTo(p._tx(-sa * 0.16), p._ty(ca * 0.16));
+      g.stroke(); g.restore();
+
+      // snap floating-point dust: Math.cos(90°)≈6.1e-17, not 0, which would make
+      // SNR read 3.75e-33 at ψ=90° instead of a clean 0. Round cos/sin to zero
+      // within epsilon for the readout (drawing above still uses the raw ca/sa).
+      const caS = Math.abs(ca) < 1e-9 ? 0 : ca;
+      const saS = Math.abs(sa) < 1e-9 ? 0 : sa;
+      const snr = saS > 0 ? (caS * caS) / (saS * saS) : Infinity;
+      out.innerHTML =
+        `ψ_t = <b>${(psi * 180 / Math.PI).toFixed(0)}°</b> · ` +
+        `√ᾱ_t = cos ψ = <b>${caS.toFixed(3)}</b>, √(1−ᾱ_t) = sin ψ = <b>${saS.toFixed(3)}</b> · ` +
+        `SNR = cos²/sin² = <b>${isFinite(snr) ? snr.toPrecision(3) : "∞"}</b><br>` +
+        `xₜ rides the circle; v is always 90° ahead — three axes (x₀, ε, v), one point.`;
+    }
+    psiC.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO 3: ELBO term-by-term collapse ---- */
+  (function () {
+    const terms = document.getElementById("elbo-terms");
+    const stage = document.getElementById("elbo-stage");
+    const mathEl = document.getElementById("elbo-math");
+    const capEl = stage.querySelector(".cap");
+    const out = document.getElementById("elbo-out");
+    const resetBtn = document.getElementById("elbo-reset");
+    const chips = {};
+    terms.querySelectorAll(".elbo-chip").forEach(c => chips[c.dataset.term] = c);
+
+    const state = { LT: false, Lmid: false, wt: false };
+    const order = ["LT", "Lmid", "wt"];
+
+    function currentMath() {
+      if (!state.LT) {
+        capEl.textContent = "The monster, whole";
+        return "$$\\mathcal{L} = \\mathbb{E}_q\\Big[L_T + \\sum_{t=2}^{T} L_{t-1} + L_0\\Big]$$";
+      }
+      if (!state.Lmid) {
+        capEl.textContent = "L_T has no θ — it drops (a fixed ruler cannot be optimized)";
+        return "$$\\mathcal{L} = \\mathbb{E}_q\\Big[\\underbrace{\\sum_{t=2}^{T} L_{t-1}}_{\\text{the 999 that matter}} + L_0\\Big]$$";
+      }
+      if (!state.wt) {
+        capEl.textContent = "Equal-covariance KL lemma → each KL is a scaled squared distance";
+        return "$$L_{t-1} = \\frac{\\|\\tilde{\\boldsymbol\\mu}_t - \\boldsymbol\\mu_\\theta\\|^2}{2\\tilde\\beta_t} = w_t\\,\\big\\|\\boldsymbol\\epsilon - \\epsilon_\\theta(\\mathbf{x}_t,t)\\big\\|^2 \\quad(\\mathbf{x}_t\\text{ terms cancel})$$";
+      }
+      capEl.textContent = "Set w_t := 1 (Ho's hack) — what remains is L_simple";
+      return "$$\\boxed{\\ \\mathcal{L}_{\\text{simple}} = \\mathbb{E}_{\\mathbf{x}_0,\\boldsymbol\\epsilon,t}\\big[\\,\\|\\boldsymbol\\epsilon - \\epsilon_\\theta(\\mathbf{x}_t,t)\\|_2^2\\,\\big]\\ }$$";
+    }
+
+    function nextExpected() { return order.find(k => !state[k]); }
+
+    function refresh() {
+      mathEl.innerHTML = currentMath();
+      typeset(stage);
+      chips.LT.classList.toggle("dropped", state.LT);
+      chips.Lmid.classList.toggle("done", state.Lmid);
+      chips.wt.classList.toggle("done", state.wt);
+      const nxt = nextExpected();
+      Object.values(chips).forEach(c => c.classList.remove("active"));
+      if (nxt) chips[nxt].classList.add("active");
+      if (!nxt) out.innerHTML = "Done. A thousand KLs over a million dimensions became one <code>MSELoss</code> — the predict answer is <b>(c)</b>.";
+      else if (nxt === "LT") out.innerHTML = "Click $L_T$ — it carries no parameters.";
+      else if (nxt === "Lmid") out.innerHTML = "Click the 999-term sum — the equal-covariance KL lemma does the work.";
+      else out.innerHTML = "Click $w_t := 1$ — delete the weight, keep the images.";
+    }
+
+    terms.addEventListener("click", (e) => {
+      const chip = e.target.closest(".elbo-chip");
+      if (!chip) return;
+      const term = chip.dataset.term;
+      if (term === "L0") { out.innerHTML = "$L_0$ is a single reconstruction term — it stays, but there is nothing to collapse."; return; }
+      if (!(term in state)) return;
+      if (state[term]) return;
+      if (term !== nextExpected()) { out.innerHTML = "Take them in order — the highlighted term is next."; return; }
+      state[term] = true;
+      refresh();
+    });
+    resetBtn.addEventListener("click", () => { state.LT = state.Lmid = state.wt = false; refresh(); });
+    refresh();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => typeset(stage), 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-55", [
+    {
+      q: "The training objective behind every image you have generated in ComfyUI is:",
+      opts: [
+        "An adversarial game between a generator and a discriminator",
+        "Reinforcement learning against a reward model",
+        "$\\texttt{MSELoss}$ on a regression problem — predict the noise, subtract, square",
+        "Maximum likelihood computed exactly, with no bound"
+      ],
+      a: 2,
+      why: "The ELBO collapses via the equal-covariance KL lemma to $\\mathcal{L}_{\\text{simple}} = \\mathbb{E}\\|\\boldsymbol\\epsilon - \\epsilon_\\theta\\|^2$ — plain MSE. 'Adversarial game' is the GAN misconception (the VAE decoder is GAN-trained, p.53, but the diffusion loss is not); 'RL' is a different training paradigm entirely; the exact likelihood is intractable ($Z_\\theta$), which is the whole reason for the bound."
+    },
+    {
+      q: "Recovering $\\hat{\\mathbf{x}}_0$ from an $\\epsilon$-prediction divides by $\\sqrt{\\bar\\alpha_t}$. At the terminal step $\\sqrt{\\bar\\alpha_T}=0.0063$, by roughly what factor does this amplify an error in $\\hat{\\boldsymbol\\epsilon}$?",
+      num: 159, tol: 5,
+      why: "$1/0.0063 = 159\\times$ [DER, constants §9.6]. This $\\epsilon$-pred pole at high $t$ is exactly why $v$-prediction — whose conversions have coefficients $\\cos\\psi_t,\\sin\\psi_t\\le 1$ — was invented."
+    },
+    {
+      q: "Why does diffusion use ~1000 steps at <em>training</em> time?",
+      opts: [
+        "More steps always means higher image quality",
+        "The reverse of a small step is approximately Gaussian (Feller); the reverse of a big step is not",
+        "One step per pixel is required",
+        "To match the VAE's 1000 latent channels"
+      ],
+      a: 1,
+      why: "Feller: for small $\\beta_t$ the true reverse step is nearly Gaussian, so a small Gaussian $p_\\theta$ can model it. 'More steps = more quality' confuses the training-time tractability argument with the <em>sampling</em>-step count — a different knob (FLUX samples in ~4 steps, p.57)."
+    },
+    {
+      q: "$\\epsilon$-prediction, $\\mathbf{x}_0$-prediction and $v$-prediction are:",
+      opts: [
+        "Three different network architectures with different capabilities",
+        "The same information in different coordinates on one circle, differing only in loss weighting",
+        "Three incompatible theories of diffusion",
+        "Only meaningful for flow matching, not DDPM"
+      ],
+      a: 1,
+      why: "Given any one of $\\{\\mathbf{x}_0,\\boldsymbol\\epsilon,v\\}$ and $\\mathbf{x}_t$, the other two follow by algebra — they are three axes on the unit circle. They differ only in where the squared error lands, i.e. the $\\mathrm{SNR}_t$ weighting across $t$. 'Different capabilities' is the misconception this section exists to kill."
+    },
+    {
+      q: "What single fact makes each of the ELBO's 1000 KL terms tractable — turning a KL over $\\mathbb{R}^{3M}$ into a squared distance?",
+      opts: [
+        "The two distributions have the same fixed covariance, so $D_{\\mathrm{KL}} = \\|\\mu_1-\\mu_2\\|^2/2\\sigma^2$",
+        "The forward process has no learnable parameters",
+        "The latent space is low-dimensional",
+        "Cross-entropy equals KL plus entropy"
+      ],
+      a: 0,
+      why: "Both $q(\\mathbf{x}_{t-1}\\mid\\mathbf{x}_t,\\mathbf{x}_0)$ and $p_\\theta$ are Gaussians with the same covariance $\\tilde\\beta_t I$, so the equal-covariance KL lemma (trunk-owned) reduces the KL to a scaled squared distance between means. That is where the monster dies."
+    },
+    {
+      q: "Is $\\mathcal{L}_{\\text{simple}}$ (with $w_t = 1$) equal to the variational bound (ELBO)?",
+      opts: [
+        "Yes — it is the ELBO, just written more compactly",
+        "No — the principled weight $w_t$ was deliberately deleted, which makes the bound wrong but the images better",
+        "Yes, but only for the cosine schedule",
+        "No — it drops the $\\|\\boldsymbol\\epsilon-\\epsilon_\\theta\\|^2$ term"
+      ],
+      a: 1,
+      why: "Ho et al. set $w_t := 1$, discarding the $\\mathrm{SNR}_t$-based weight. This is not the bound — it is an unprincipled reweighting toward mid-noise that empirically improves samples. What $w_t$ should be is a live 2026 research question (min-SNR-$\\gamma$, logit-normal, EDM, P2)."
+    },
+    {
+      q: "During sampling, each reverse step re-injects noise $\\sigma_t\\mathbf{z}$. Why not just take the predicted mean at every step?",
+      opts: [
+        "The mean is numerically unstable",
+        "Because $p_\\theta(\\mathbf{x}_{t-1}\\mid\\mathbf{x}_t)$ is a distribution, not a point; mean-only marching is mode-seeking and collapses to a grey average",
+        "Re-injecting noise speeds up sampling",
+        "The VAE decoder requires Gaussian input"
+      ],
+      a: 1,
+      why: "Taking only the mean each step walks toward the single highest-probability point — mode-seeking mush, not a sample. The re-injected $\\sigma_t\\mathbf{z}$ keeps you drawing <em>a</em> picture from the distribution. (DDIM with eta=0 drops it and still works — the puzzle banked for p.59.)"
+    }
+  ], "Reverse process & the ELBO — self-check");
+
+});
+</script>
+</body>
+</html>

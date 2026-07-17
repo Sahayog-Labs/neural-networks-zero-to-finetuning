@@ -1,0 +1,542 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>35. The Transformer Block, Assembled — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the comparison + ledger tables carry wide KaTeX; let each scroll
+   inside its own box on narrow screens so the page body never scrolls sideways.
+   Desktop (>900px) is untouched — the .inner column fits them. */
+@media (max-width: 900px) {
+  .inner table.ledger, .inner table.cmp { display: block; overflow-x: auto; white-space: nowrap; }
+}
+table.cmp { width: 100%; border-collapse: collapse; margin: 1em 0; font-size: .92rem; }
+table.cmp th, table.cmp td { text-align: left; padding: 7px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+table.cmp thead th { color: var(--accent); font-weight: 600; }
+table.cmp td:first-child { color: var(--text-dim); white-space: nowrap; }
+/* Grid children default to min-width:auto, which refuses to shrink below the
+   pre's min-content and blows the body out sideways. Pin them to 0 and collapse
+   to one column on narrow screens. */
+.d-block-grid { min-width: 0; }
+.d-block-grid > div { min-width: 0; }
+@media (max-width: 720px) { .d-block-grid { grid-template-columns: 1fr !important; } }
+/* Long inline code tokens (e.g. F.scaled_dot_product_attention(is_causal=True))
+   are unbreakable by default and push the body sideways on a phone. Let inline
+   code in prose wrap; codeblock <pre> keeps its own horizontal scroll. */
+.inner p code, .inner li code, .box code, .why-line code { overflow-wrap: anywhere; word-break: break-word; }
+/* The build-a-block stepper */
+.block-code { font-family: Consolas, monospace; font-size: .84rem; line-height: 1.55; background: var(--bg-panel2);
+  border: 1px solid var(--border); border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 0; }
+.block-code .bl { display: block; white-space: pre; color: var(--text-dim); opacity: .28; transition: opacity .25s, color .25s; }
+.block-code .bl.on { opacity: 1; color: var(--text); }
+.block-code .bl.cur { background: color-mix(in srgb, var(--accent) 20%, transparent); border-radius: 4px; }
+.block-code .cm { color: var(--plot-tick, #8391ab); }
+.why-line { min-height: 2.6em; margin: 10px 0 0; padding: 9px 12px; border-left: 3px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent); border-radius: 0 6px 6px 0; font-size: .9rem; }
+.subtotal { font-family: Consolas, monospace; font-size: 1.05rem; }
+.subtotal b { color: var(--good, #5ad19a); }
+</style>
+</head>
+<body data-page="35-the-transformer-block.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>The Transformer Block, Assembled — and Why Decoder-Only Won</h1>
+    <p class="subtitle">You have every part now: RMSNorm and the clean highway (34), GQA and the write port
+      (30/37), RoPE's zero-parameter rotation (33), QK-Norm (30), causal masking (32). This page bolts them into
+      the one block that every 2026 model repeats — building it a line at a time, so you can answer
+      <em>"why is this line here?"</em> for each — then counts what's inside and asks why the boring half holds
+      most of the weights.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:Qwen3-8B]</b> The anchor's fourteen numbers ($d=4096$, $L=36$, $H=32$, $H_{kv}=8$,
+      $d_{\text{head}}=128$, $d_{\text{ff}}=12288$, $V=151{,}936$) stop being config lines here and become a block
+      that weighs <b>192,946,432</b> parameters. <b>[THREAD:dot-product]</b> and <b>[THREAD:chain-rule]</b> both
+      recur — every "why is this line here?" answer reopens one of them. Next beat: page 36 multiplies this block
+      by 36 and closes the whole 8.19B count to the byte.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in "The parameter shock" box below, and again in the demo readout. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      In one transformer block, where do most of the <em>parameters</em> live — in <b>attention</b> (the famous
+      part everyone writes papers about) or in the <b>feed-forward network</b> (the two-or-three-matrix thing
+      wedged after it)? Commit to a fraction before you scroll: is the FFN roughly <b>25%, 50%, or 78%</b> of the
+      block?
+    </div>
+
+    <div class="box rule"><span class="box-title">🌐 Translation note</span>
+      This page uses the frozen course notation. Sequence length is <b>$S$</b> (papers write $T$, $L$, $N$, or
+      <code>seq_len</code>); per-head width is <b>$d_{\text{head}}=128$</b> (papers write $d_k$, $d_v$,
+      <code>head_dim</code>); weights are stored <b>$(d_{\text{out}}, d_{\text{in}})$</b> and applied row-batched,
+      $Q = XW_Q^\top$ (papers write $\mathbf q = W_Q\mathbf x$ with column vectors — same $W_Q$, notation §1.3).
+    </div>
+
+    <!-- ===================== THE BLOCK ===================== -->
+    <h2>The 2026 block, one line at a time</h2>
+    <p>Do <em>not</em> read the finished block and back-fill reasons. Build it. Below is the exact structure every
+      open frontier model shipped in 2026 shares — pre-norm, RMSNorm, GQA, QK-Norm, RoPE, SwiGLU, two residuals —
+      written in the row-batched form with $W$ as $(d_{\text{out}}, d_{\text{in}})$. Every line is annotated with
+      the earlier page that justifies it.</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">The block (Qwen3-style)</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x = residual_stream                              <span class="tok-com"># (B, S, 4096) — the bus, page 34</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># --- attention sublayer ---</span></span>
+<span class="line">h = rms_norm_1(x)                                <span class="tok-com"># pre-norm: normalize a COPY, keep +x clean (34)</span></span>
+<span class="line">q = h @ Wq.T                                     <span class="tok-com"># Wq (4096, 4096)   → 32 query heads</span></span>
+<span class="line">k = h @ Wk.T ;  v = h @ Wv.T                     <span class="tok-com"># Wk,Wv (1024, 4096) → only 8 KV heads: GQA (37)</span></span>
+<span class="line">q = q_norm(q) ;  k = k_norm(k)                   <span class="tok-com"># QK-Norm: re-impose unit variance (30)</span></span>
+<span class="line">q, k = rope(q), rope(k)                          <span class="tok-com"># RoPE on q,k only — never v (33). 0 params</span></span>
+<span class="line">q,k,v = to_heads(q,k,v) ; k,v = repeat_kv(k,v)   <span class="tok-com"># (B, H=32, S, 128); tile 8 KV heads → 32</span></span>
+<span class="line">a = softmax(q @ k.T / sqrt(128) + causal) @ v    <span class="tok-com"># causal mask = the LLM hinge (32). 0 params</span></span>
+<span class="line">out = a.reshape(B,S,4096) @ Wo.T                 <span class="tok-com"># Wo (4096, 4096): the write port (30)</span></span>
+<span class="line hl">x = x + out                                      <span class="tok-com"># highway #1 — the I-term nothing shrinks (34)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># --- feed-forward sublayer ---</span></span>
+<span class="line">h = rms_norm_2(x)                                <span class="tok-com"># pre-norm again</span></span>
+<span class="line">ffn = Wdown @ (silu(Wgate @ h) * (Wup @ h))      <span class="tok-com"># SwiGLU, THREE matrices (4096,12288)</span></span>
+<span class="line hl">x = x + ffn                                      <span class="tok-com"># highway #2 → this x is the next block's input</span></span></code></pre>
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The six-line "why is this line here?" self-check</span>
+      This is the real test of whether pages 30/32/33/34/37 landed. Cover the answers; justify each from what you
+      already know.
+      <ol style="margin:.5em 0 0">
+        <li><b><code>rms_norm_1</code> before, not after</b> → page 34: pre-norm keeps the residual highway
+          <code>x + …</code> clean, so the $I$-term survives 36 layers.</li>
+        <li><b>$W_K$ narrower than $W_Q$</b> ($1024$ vs $4096$ output) → page 37: GQA. 8 KV heads, not 32 — a 4×
+          cut to the KV cache, and 37.5% off the attention block's weights.</li>
+        <li><b>RoPE on <code>q,k</code> but not <code>v</code></b> → page 33: the rotation identity only pays off
+          <em>inside a dot product</em>, and $\mathbf v$ is never dot-producted — it is averaged.</li>
+        <li><b><code>+ x</code> twice</b> → page 34: two sublayers, two clean highways, so gradient reaches layer 0
+          undiminished.</li>
+        <li><b><code>Wo</code> at the end</b> → page 30: the heads run independently right up until this matmul,
+          which is each head's <em>write port</em> back onto the bus.</li>
+        <li><b><code>q_norm</code>/<code>k_norm</code></b> → page 30 QK-Norm: it re-imposes the unit-variance the
+          $\sqrt{d_{\text{head}}}$ scaling assumed, which raw projections drift away from.</li>
+      </ol>
+    </div>
+
+    <p><b>Shape ribbon</b>, the whole block, one hop per line — <em>trace it and you never guess a shape again</em>:</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">Shapes · (out, in) always</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x                       (B, S, d=4096)</span>
+<span class="line">Wq                      (4096, 4096)              <span class="tok-com"># (out, in)</span></span>
+<span class="line">q = h @ Wq.T            (B, S, 4096)</span>
+<span class="line">Wk, Wv                  (1024, 4096)              <span class="tok-com"># 8 KV heads x 128 = 1024</span></span>
+<span class="line">to_heads(q)             (B, H=32, S, d_head=128)</span>
+<span class="line">repeat_kv(k)            (B, 32, S, 128)           <span class="tok-com"># 8 -> 32 by tiling, no new params</span></span>
+<span class="line">q @ k.T / sqrt(128)     (B, 32, S, S)             <span class="tok-com"># row i sums to 1 after softmax</span></span>
+<span class="line">a @ v                   (B, 32, S, 128)</span>
+<span class="line">reshape                 (B, S, 4096)</span>
+<span class="line">out @ Wo.T              (B, S, 4096)              <span class="tok-com"># back onto the bus, x + out</span></span></code></pre>
+    </div>
+
+    <!-- ===================== THE FFN ===================== -->
+    <h2>The feed-forward network — bigger than you'd guess</h2>
+    <p>Attention <em>moves</em> information between positions. The FFN <em>thinks</em> about it: same weights
+      applied to every position independently, no communication between tokens. 4096 in, 4096 out, and a wide
+      hidden layer in the middle. The 2017 version was two matrices with a ReLU:
+      $\text{FFN}(\mathbf x)=W_2\,\text{ReLU}(W_1\mathbf x+\mathbf b_1)+\mathbf b_2$, with $d_{\text{ff}}=4d$.
+      The 2026 version is <b>SwiGLU</b> — three matrices, no biases:</p>
+
+    <p>$$\text{FFN}(\mathbf x)=W_{\text{down}}\Big(\text{SiLU}(W_{\text{gate}}\mathbf x)\;\odot\;(W_{\text{up}}\mathbf x)\Big),
+        \qquad \text{SiLU}(z)=z\,\sigma(z).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / value</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf x$</td><td>one position's residual-stream vector (post-norm)</td><td>$(d,1)=(4096,1)$</td><td>the bus, page 34</td></tr>
+        <tr><td>$W_{\text{gate}}$</td><td>gate projection — makes a per-dimension volume knob</td><td>$(d_{\text{ff}}, d)=(12288,4096)$</td><td>learned</td></tr>
+        <tr><td>$W_{\text{up}}$</td><td>up projection — makes the content to be gated</td><td>$(12288,4096)$</td><td>learned</td></tr>
+        <tr><td>$W_{\text{down}}$</td><td>down projection — back to stream width</td><td>$(d, d_{\text{ff}})=(4096,12288)$</td><td>learned</td></tr>
+        <tr><td>$\text{SiLU}(z)=z\,\sigma(z)$</td><td>smooth gate; $\sigma$ is the logistic sigmoid</td><td>elementwise</td><td>page 11; <code>hidden_act:"silu"</code> [VP]</td></tr>
+        <tr><td>$\odot$</td><td>elementwise (Hadamard) product — the gating</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>Why $d_{\text{ff}}=3d$, not $4d$?</b> SwiGLU spends <em>three</em> matrices where the classic FFN spent
+      two. To hold the parameter count fixed you shrink the hidden width by two-thirds:
+      $\tfrac23\times 4d = \tfrac83 d \approx 2.67d$, and Qwen3 rounds up to exactly $3d$. So for the anchor
+      $d_{\text{ff}} = 3\times4096 = \mathbf{12288}$ — the number sitting in <code>intermediate_size</code>. That is
+      the answer to "why 12288 and not 16384": <b>a parameter-budget correction for the third matrix.</b>
+      (The old "$d_{\text{ff}}=3.5d=14336$" you may have memorized was Llama-3.1's figure — retired here; the
+      anchor is Qwen3-8B.)</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "No biases — did they forget them?"</span>
+      No: <code>attention_bias: false</code> [VP], and FLUX.2 drops bias throughout [VP] too. Once every sublayer
+      is preceded by an RMSNorm carrying a learned gain $\mathbf g$, an additive bias is redundant — the gain
+      already sets scale, and the residual stream carries any needed offset. Fewer parameters, one less thing to
+      tune.
+    </div>
+
+    <!-- The parameter count -->
+    <p>Now count. The per-block parameter formulas, in frozen notation:</p>
+    <p>$$P_{\text{attn}} = 2\,d\,d_{\text{head}}\,(H + H_{kv}),
+        \qquad P_{\text{ffn}} = 3\,d\,d_{\text{ff}},
+        \qquad P_{\text{norm}} = 2d + 2d_{\text{head}}.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value (Qwen3-8B)</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$d$</td><td>residual-stream width</td><td>4096</td><td><code>hidden_size</code> [VP]</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head width</td><td>128</td><td><code>head_dim</code> [VP]</td></tr>
+        <tr><td>$H$ / $H_{kv}$</td><td>query heads / KV heads</td><td>32 / 8</td><td><code>num_(key_value_)attention_heads</code> [VP]</td></tr>
+        <tr><td>$d_{\text{ff}}$</td><td>FFN inner width $=3d$</td><td>12288</td><td><code>intermediate_size</code> [VP]</td></tr>
+        <tr><td>$P_{\text{attn}}$</td><td>$W_Q{+}W_K{+}W_V{+}W_O$ ($2d\,d_{\text{head}}(H{+}H_{kv})$)</td><td>41,943,040</td><td>[DER] constants §1.2</td></tr>
+        <tr><td>$P_{\text{ffn}}$</td><td>$W_{\text{gate}}{+}W_{\text{up}}{+}W_{\text{down}}$ ($3d\,d_{\text{ff}}$)</td><td>150,994,944</td><td>[DER] constants §1.2</td></tr>
+        <tr><td>$P_{\text{norm}}$</td><td>2 RMSNorms $+$ QK-Norm ($2d+2d_{\text{head}}$)</td><td>8,448</td><td>[DER] constants §1.2</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ The count, per block</span>
+      <p><b>Attention.</b> $W_Q = 4096\times4096 = 16{,}777{,}216$; $W_K=W_V=4096\times1024 = 4{,}194{,}304$ each
+        (the GQA saving — 8 KV heads, not 32); $W_O = 4096\times4096 = 16{,}777{,}216$. Subtotal
+        $= 2\cdot4096\cdot128\cdot(32{+}8) = \mathbf{41{,}943{,}040}$.</p>
+      <p><b>FFN.</b> $W_{\text{gate}}=W_{\text{up}}=W_{\text{down}} = 4096\times12288 = 50{,}331{,}648$ each.
+        Subtotal $= 3\cdot4096\cdot12288 = \mathbf{150{,}994{,}944}$.</p>
+      <p><b>Norms.</b> $4096 + 4096 + 128 + 128 = \mathbf{8{,}448}$.</p>
+      <p><b>Block total</b> $= 41{,}943{,}040 + 150{,}994{,}944 + 8{,}448 = \mathbf{192{,}946{,}432}$.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The parameter shock (your PREDICT, resolved)</span>
+      $$\frac{P_{\text{ffn}}}{P_{\text{block}}} = \frac{150{,}994{,}944}{192{,}946{,}432} = \mathbf{78.26\%}.$$
+      The FFN is <b>78% of the block</b> — attention, the part every explainer dwells on, is barely a fifth. If you
+      guessed 78%, you were right; almost everyone guesses attention. <em>Attention gets all the attention; the FFN
+      holds most of the weights.</em> That is exactly why MoE (page 38) sparsifies the FFN — you sparsify the part
+      that is 78% of the cost. (Careful with denominators: it is 78.26% <em>of a block</em> but 66.4%
+      <em>of the whole model</em>, because the embedding tables dilute the whole-model share — both true, always say
+      which. Never "~70%", the retired Llama figure.)
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: what the gate actually buys over a ReLU MLP</summary><div>
+      <p>Split the two projections by role: $W_{\text{up}}\mathbf x$ is the <em>content</em> — a feature to
+        maybe emit — and $\text{SiLU}(W_{\text{gate}}\mathbf x)$ is a <em>per-dimension volume knob</em> that lands
+        mostly in $[0,1]$. Their elementwise product says "compute this feature, but only let it through if that
+        other condition holds." That is a multiplicative interaction between two learned linear functions of the
+        same input — something a ReLU MLP can only approximate by stacking depth. The gate is why SwiGLU beats a
+        same-parameter ReLU FFN [M — the <em>why</em> is a practitioner reading; the config line is [VP]]. It is
+        also why $\sigma$ with an explicit argument is legal here: this is the trunk, and $\sigma(\cdot)=$ the
+        logistic sigmoid (SiLU is written by name in every config).</p>
+    </div></details>
+
+    <!-- ===================== ENC / DEC / ENC-DEC ===================== -->
+    <h2>Encoder, decoder, encoder-decoder — and why decoder-only won</h2>
+    <p>The block above is a <em>decoder</em> block: causal mask, next-token objective. It was not the only option.
+      Three families competed, and one won generation outright — for reasons that are concrete, not aesthetic.</p>
+
+    <table class="cmp">
+      <thead><tr><th></th><th>Encoder-only (BERT)</th><th>Decoder-only (GPT / Qwen3)</th><th>Encoder-decoder (T5)</th></tr></thead>
+      <tbody>
+        <tr><td>Attention</td><td>bidirectional</td><td><b>causal</b> (page 32)</td><td>enc bidir + dec causal + cross</td></tr>
+        <tr><td>Objective</td><td>masked LM (~15% of tokens)</td><td>next-token (<b>100%</b>)</td><td>denoising / seq2seq</td></tr>
+        <tr><td>Loss signals / token</td><td>~0.15</td><td><b>1.0</b></td><td>~0.15–1</td></tr>
+        <tr><td>2026 status</td><td>alive in <b>RAG</b> embedders</td><td><b>won generation</b></td><td>alive in <b>diffusion</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box rule"><span class="box-title">📐 Why decoder-only won — the honest four-part answer</span>
+      The single-cause story ("it's more elegant") is the misconception. There are four reasons, and the one that
+      dominates is rarely stated first:
+      <ol style="margin:.5em 0 0">
+        <li><b>Signal density.</b> A causal LM gets a loss term from <em>every</em> token; masked LM from ~15%.
+          That is $1/0.15 \approx \mathbf{6.7\times}$ more learning signal per forward FLOP. When compute is the
+          bottleneck and the data is the whole internet, this dominates. <b>[THREAD:chain-rule]</b> — more tokens
+          carrying a gradient means more of the backward pass does useful work.</li>
+        <li><b>Task universality.</b> Every task casts as text-completion; in-context learning falls out for free
+          and <em>was not designed in</em>.</li>
+        <li><b>Simplicity scales.</b> One stack, one objective, one attention pattern — fewer knobs to get right at
+          1000-GPU scale.</li>
+        <li><b>KV-cache economics.</b> Causal masking means a token's $K,V$ never change once computed, so you
+          cache them forever and decode incrementally (page 37). Bidirectional attention invalidates every previous
+          token when you append one — no incremental decoding. Causal masking (page 32) is exactly what makes the
+          cache sound.</li>
+      </ol>
+      <p style="margin:.6em 0 0"><b>Be honest about what was lost:</b> bidirectional encoders are still better at
+        <em>representation</em> — a token can depend on what comes after it — which is precisely why 2026 RAG uses
+        dedicated bidirectional, contrastively-trained embedders, not decoder hidden states (page 27's anisotropy).
+        Decoder-only won at <em>generation</em>, not at <em>representation</em>.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔀 The fork beat — encoder-decoder didn't die, it moved</span>
+      A text-to-image model <em>is</em> an encoder-decoder. A text encoder — CLIP, T5-XXL, or
+      <b>Mistral-3 in FLUX.2 [VP]</b> — produces the keys and values $K,V$; the U-Net or DiT is the decoder that
+      <b>cross-attends</b> to them (page 31). The architecture you were told "lost" is the one you have been running
+      in ComfyUI all along. Hold that thought: the two tracks of this course — LLM and diffusion — are the same
+      block wired two ways, and page 64 grows them back together.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Four traps</span>
+      <b>(a) "Attention holds most of a block's parameters."</b> The FFN does — 78.26%. Compute both subtotals:
+      41,943,040 vs 150,994,944. &nbsp;<b>(b) "$d_{\text{ff}}=4d$."</b> It is $3d$ for SwiGLU — a budget correction
+      for the third matrix; Qwen3's 12288 $=3\times4096$. &nbsp;<b>(c) "Decoder-only won because it's smarter /
+      more elegant."</b> Four concrete reasons, signal density first — not elegance. &nbsp;<b>(d) "Encoder-decoder
+      is obsolete."</b> It is what runs your ComfyUI text-to-image graph.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Build the block, and watch the weights accumulate</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Press <b>Reveal next line ▸</b>. Each click lights up one line of the block, shows <em>why it's there</em>,
+      animates its matmul (real inner-dimension bookkeeping), and adds its parameters to the running subtotal —
+      computed live from the config numbers, not hard-coded. Watch the subtotal crawl through attention, then
+      <b>leap by 150,994,944 in a single step</b> when the three FFN matrices land: the 78% made visible as one
+      jump. It ends on <b>192,946,432</b> — page 36's per-block number.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Assemble a Qwen3-8B block · live parameter count <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1.1fr .9fr;gap:16px" class="d-block-grid">
+          <div>
+            <pre class="block-code" id="d-block-code"></pre>
+            <div class="why-line" id="d-block-why">Press <b>Reveal next line ▸</b> to start assembling the block.</div>
+          </div>
+          <div>
+            <canvas id="d-block-tv" height="220"></canvas>
+            <div class="readout" id="d-block-ribbon" style="font-family:Consolas,monospace;font-size:.8rem"></div>
+          </div>
+        </div>
+        <p style="margin:14px 0 0">
+          <button class="btn" id="d-block-next">Reveal next line ▸</button>
+          <button class="btn secondary" id="d-block-reset">Reset</button>
+        </p>
+        <div class="readout subtotal" id="d-block-out"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/build_block.py</code> — a ~40-line <code>TransformerBlock</code> (RMSNorm, GQA q/k/v with
+      <code>repeat_kv</code>, <code>apply_rope</code>, <code>F.scaled_dot_product_attention(is_causal=True)</code>,
+      <code>Wo</code>, SwiGLU), no elided imports. It asserts <code>sum(p.numel()) == 192_946_432</code> and prints
+      the FFN share <b>78.26%</b> — the two numbers this page derived, confirmed against PyTorch's own count.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: parallel blocks, and why 2026 labs still tune depth vs width</summary><div>
+      <p>The residual-stream picture (page 34) makes two 2026 variants instantly legible. <b>Parallel blocks</b>
+        (Cohere's Tiny Aya): attention and FFN both read the <em>same</em> normalized $\mathbf x$ and both write
+        the stream, instead of the FFN reading attention's output — one fewer serial dependency, a hair faster, and
+        the bus model shows why it barely changes the result (both are just writers on the same whiteboard).
+        <b>Depth-scaled RMSNorm</b> (GLM-5, Trinity) rescales the norm by layer index to keep the stream's variance
+        flat down a very deep stack. And depth itself is a live knob, not a solved one: GLM-5 <em>cut</em> depth
+        92→78 while widening $d$ 5120→6144 versus GLM-4.7 [V-sec] — a lab deciding its previous model was too deep.
+        None of this changes the block's skeleton; it is all knobs on the same six lines.</p>
+    </div></details>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz35"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: build-a-block stepper + live parameter subtotal ---- */
+  (function () {
+    // Real config numbers — every param count below is COMPUTED from these, not typed.
+    const CFG = { d: 4096, dHead: 128, H: 32, Hkv: 8, dFf: 12288 };
+    const attnOut = CFG.H * CFG.dHead;      // 4096
+    const kvOut = CFG.Hkv * CFG.dHead;      // 1024
+
+    // add() functions return REAL parameter counts from the config.
+    const P = {
+      norm:   () => CFG.d,
+      qknorm: () => 2 * CFG.dHead,
+      wq:     () => CFG.d * attnOut,
+      wkv:    () => 2 * (CFG.d * kvOut),
+      wo:     () => attnOut * CFG.d,
+      ffn:    () => 3 * (CFG.d * CFG.dFf),
+    };
+
+    // Each step: which source line(s) to light, the "why", params added, and an
+    // illustrative TensorViz matmul (small shapes; the REAL shapes are in .ribbon).
+    const STEPS = [
+      { lines: [0], why: "The residual stream — a shared 4096-wide bus running the length of the model (page 34). Every sublayer reads it and adds back.",
+        add: 0, ribbon: "x  (B, S, 4096)", tv: null },
+      { lines: [3], why: "Pre-norm: RMSNorm normalizes a COPY of x. The residual path stays a clean x + …, so the gradient highway survives 36 layers (page 34).",
+        add: P.norm(), ribbon: "rms_norm_1: gain g  (4096,)", tv: null },
+      { lines: [4], why: "Query projection. Wq is (4096, 4096) — stored (out, in). 32 query heads × 128 = 4096 out.",
+        add: P.wq(), ribbon: "h (B,S,4096) @ Wq.T (4096,4096) → q (B,S,4096)",
+        tv: { A: { shape: [4, 6], label: "h" }, B: { shape: [6, 6], label: "Wqᵀ" }, C: "q" } },
+      { lines: [5], why: "Key & value projections — narrower. Wk,Wv are (1024, 4096): only 8 KV heads, not 32. That is GQA (page 37): a 4× cut to the KV cache.",
+        add: P.wkv(), ribbon: "h @ Wk.T (4096,1024) → k (B,S,1024)   [8 KV heads]",
+        tv: { A: { shape: [4, 6], label: "h" }, B: { shape: [6, 2], label: "Wkᵀ" }, C: "k" } },
+      { lines: [6], why: "QK-Norm re-imposes the unit variance the √d_head scaling assumed but raw projections drift from (page 30). 128 + 128 params — tiny.",
+        add: P.qknorm(), ribbon: "q_norm, k_norm  (128,) each", tv: null },
+      { lines: [7], why: "RoPE rotates q and k — never v. The rotation identity only pays off inside a dot product (page 33), and v is averaged, never dot-producted. ZERO parameters — pure geometry.",
+        add: 0, ribbon: "rope(q), rope(k)  →  0 params", tv: null },
+      { lines: [8], why: "Reshape to 32 heads; tile the 8 KV heads up to 32 with repeat_kv. No new parameters — just a view.",
+        add: 0, ribbon: "(B, H=32, S, d_head=128); repeat_kv 8→32", tv: null },
+      { lines: [9], why: "Scaled dot-product attention with the causal mask — the LLM hinge (page 32). Row i of the S×S weight matrix sums to 1. ZERO parameters.",
+        add: 0, ribbon: "softmax(q @ k.T / √128 + causal) @ v  →  0 params",
+        tv: { A: { shape: [4, 3], label: "qₕ" }, B: { shape: [3, 4], label: "kₕᵀ" }, C: "scores" } },
+      { lines: [10], why: "The write port. Wo is (4096, 4096): heads run independently until this matmul folds them back onto the bus (page 30).",
+        add: P.wo(), ribbon: "a.reshape(B,S,4096) @ Wo.T (4096,4096) → out",
+        tv: { A: { shape: [4, 6], label: "a" }, B: { shape: [6, 6], label: "Woᵀ" }, C: "out" } },
+      { lines: [11], why: "Highway #1: x + out. The +x term is an I in the Jacobian that nothing can shrink (page 34). ZERO parameters.",
+        add: 0, ribbon: "x = x + out  →  0 params", tv: null },
+      { lines: [14], why: "Pre-norm again, before the FFN sublayer. Second clean highway ahead.",
+        add: P.norm(), ribbon: "rms_norm_2: gain g  (4096,)", tv: null },
+      { lines: [15], why: "SwiGLU — THREE matrices, each (4096, 12288). This is where the weights are: 78% of the block lands in one step.",
+        add: P.ffn(), ribbon: "Wgate,Wup (4096→12288), Wdown (12288→4096)  ×3 matrices",
+        tv: { A: { shape: [4, 6], label: "h" }, B: { shape: [6, 9], label: "Wgateᵀ" }, C: "gate" } },
+      { lines: [16], why: "Highway #2: x + ffn. This x is the next block's input. The block is complete — 192,946,432 parameters.",
+        add: 0, ribbon: "x = x + ffn  →  next block's input", tv: null },
+    ];
+
+    // Build the display code (mirrors the section's block, indices matter for .lines).
+    const SRC = [
+      "x = residual_stream",                                  // 0
+      "",                                                     // 1
+      "# --- attention sublayer ---",                         // 2
+      "h = rms_norm_1(x)",                                    // 3
+      "q = h @ Wq.T",                                         // 4
+      "k = h @ Wk.T ;  v = h @ Wv.T",                         // 5
+      "q = q_norm(q) ;  k = k_norm(k)",                       // 6
+      "q, k = rope(q), rope(k)",                              // 7
+      "q,k,v = to_heads(...) ; k,v = repeat_kv(k,v)",         // 8
+      "a = softmax(q @ k.T / sqrt(128) + causal) @ v",        // 9
+      "out = a.reshape(B,S,4096) @ Wo.T",                     // 10
+      "x = x + out",                                          // 11
+      "",                                                     // 12
+      "# --- feed-forward sublayer ---",                      // 13
+      "h = rms_norm_2(x)",                                    // 14
+      "ffn = Wdown @ (silu(Wgate @ h) * (Wup @ h))",          // 15
+      "x = x + ffn",                                          // 16
+    ];
+
+    const codeEl = document.getElementById("d-block-code");
+    const whyEl = document.getElementById("d-block-why");
+    const ribbonEl = document.getElementById("d-block-ribbon");
+    const outEl = document.getElementById("d-block-out");
+    const nextBtn = document.getElementById("d-block-next");
+    const resetBtn = document.getElementById("d-block-reset");
+    const canvas = document.getElementById("d-block-tv");
+
+    const tv = new TensorViz(canvas, { A: { shape: [4, 6], label: "h" }, B: { shape: [6, 6], label: "Wqᵀ" }, labels: { C: "q" } });
+
+    const fmt = n => n.toLocaleString("en-US");
+    let stepIdx = -1;          // -1 = nothing revealed yet
+    let subtotal = 0;
+    let lastFfnJump = 0;
+
+    function renderCode(curLines) {
+      const onSet = new Set();
+      for (let s = 0; s <= stepIdx; s++) STEPS[s].lines.forEach(l => onSet.add(l));
+      // also light the comment/blank separators once their neighbourhood is on
+      const maxLine = stepIdx >= 0 ? Math.max(...[...onSet]) : -1;
+      let html = "";
+      SRC.forEach((line, i) => {
+        const isComment = line.trim().startsWith("#");
+        const shown = onSet.has(i) || (i <= maxLine && (line === "" || isComment));
+        const cur = curLines && curLines.includes(i);
+        let txt = line.length ? line : " ";
+        if (isComment) txt = `<span class="cm">${txt}</span>`;
+        html += `<span class="bl${shown ? " on" : ""}${cur ? " cur" : ""}">${txt}</span>`;
+      });
+      codeEl.innerHTML = html;
+    }
+
+    function updateOut() {
+      let msg = `running block subtotal: <b>${fmt(subtotal)}</b> params`;
+      if (lastFfnJump) msg += ` &nbsp;·&nbsp; the FFN alone just added <b>${fmt(lastFfnJump)}</b> — one step, 78% of the block`;
+      if (stepIdx === STEPS.length - 1) {
+        const share = (P.ffn() / subtotal * 100);
+        msg = `block complete: <b>${fmt(subtotal)}</b> params &nbsp;·&nbsp; FFN share <b>${share.toFixed(2)}%</b> — matches page 36 to the unit`;
+      }
+      outEl.innerHTML = msg;
+    }
+
+    function doStep() {
+      if (stepIdx >= STEPS.length - 1) return;
+      stepIdx++;
+      const st = STEPS[stepIdx];
+      subtotal += st.add;
+      lastFfnJump = (st.add === P.ffn()) ? st.add : 0;
+      renderCode(st.lines);
+      whyEl.innerHTML = st.why;
+      ribbonEl.textContent = st.ribbon;
+      if (st.tv) {
+        tv.o.labels = { C: st.tv.C };
+        tv.animateMatmul({ A: st.tv.A, B: st.tv.B });
+      }
+      updateOut();
+      if (stepIdx >= STEPS.length - 1) nextBtn.disabled = true;
+    }
+
+    function reset() {
+      stepIdx = -1; subtotal = 0; lastFfnJump = 0;
+      nextBtn.disabled = false;
+      renderCode(null);
+      whyEl.innerHTML = "Press <b>Reveal next line ▸</b> to start assembling the block.";
+      ribbonEl.textContent = "";
+      outEl.innerHTML = `running block subtotal: <b>0</b> params`;
+      tv.stop();
+      tv.setMatmul({ shape: [4, 6], label: "h" }, { shape: [6, 6], label: "Wqᵀ" });
+    }
+
+    nextBtn.addEventListener("click", doStep);
+    resetBtn.addEventListener("click", reset);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => tv.draw(), 0));
+    reset();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz35", [
+    {
+      q: "The feed-forward (FFN) parameters in one Qwen3-8B block, $3\\,d\\,d_{\\text{ff}}$ with $d=4096$, $d_{\\text{ff}}=12288$:",
+      num: 150994944, tol: 0,
+      why: "$3 \\times 4096 \\times 12288 = 150{,}994{,}944$ — three SwiGLU matrices, each $4096\\times12288 = 50{,}331{,}648$."
+    },
+    {
+      q: "The FFN's share of one block's parameters, in %:",
+      num: 78.26, tol: 0.1, unit: "%",
+      why: "$150{,}994{,}944 / 192{,}946{,}432 = 78.26\\%$. The famous part (attention) is barely a fifth. Not 66.4% — that is the whole-MODEL share, a different denominator; and never the retired '~70%'."
+    },
+    {
+      q: "Why is $d_{\\text{ff}} = 3d$ (not the classic $4d$) in a 2026 SwiGLU block?",
+      opts: ["SwiGLU needs a smaller hidden layer to converge", "SwiGLU uses 3 matrices; you shrink $d_{\\text{ff}}$ by 2/3 to hold the parameter count constant", "3d is the largest that fits in memory", "It is an arbitrary choice with no reason"],
+      a: 1,
+      why: "SwiGLU spends three matrices where the ReLU FFN spent two. $\\tfrac23\\times4d = \\tfrac83 d \\approx 2.67d$, rounded up to $3d$ — a parameter-budget correction for the third matrix. Qwen3: $3\\times4096=12288$."
+    },
+    {
+      q: "The single biggest reason decoder-only architectures won generation:",
+      opts: ["They are more elegant and simpler to explain", "Bidirectional attention is fundamentally weaker", "Signal density: a loss term from every token vs ~15% for masked LM", "They were invented more recently"],
+      a: 2,
+      why: "Causal LM gets a gradient from every token; masked LM from ~15% — about 6.7× more learning per forward FLOP. The 'elegant' and 'bidirectional is weaker' answers are the named misconceptions; bidirectional is actually better at representation."
+    },
+    {
+      q: "Why do <code>q_norm</code> / <code>k_norm</code> appear in the block?",
+      opts: ["To normalize the final output logits", "QK-Norm re-imposes the unit variance the $\\sqrt{d_{\\text{head}}}$ scaling assumes", "To replace the residual connection", "To add learnable positional information"],
+      a: 1,
+      why: "QK-Norm (page 30) is an RMSNorm on q and k that restores the unit variance the $1/\\sqrt{d_{\\text{head}}}$ scale was designed around but raw projections drift away from."
+    },
+    {
+      q: "Where does the encoder-decoder architecture live in 2026?",
+      opts: ["It is obsolete and used nowhere", "In diffusion: a text encoder produces $K,V$; the U-Net/DiT decoder cross-attends", "Only in translation systems", "It replaced decoder-only for chat models"],
+      a: 1,
+      why: "A text-to-image model IS an encoder-decoder — CLIP/T5/Mistral-3 encode text into K,V, and the U-Net or DiT cross-attends to them (page 31). It is what runs in ComfyUI."
+    },
+    {
+      q: "You want to cut a dense model's compute by making it sparse. Which part do you sparsify first?",
+      opts: ["Attention — it is the most expensive", "The embeddings — they are the largest table", "The FFN — it is 78% of the block (→ MoE)", "The normalization layers"],
+      a: 2,
+      why: "The FFN holds 78.26% of a block's parameters, so sparsifying it (mixture-of-experts, page 38) is where the compute savings are. Attention is barely a fifth; norms are 0.004%."
+    }
+  ], "The transformer block — self-check");
+
+});
+</script>
+</body>
+</html>

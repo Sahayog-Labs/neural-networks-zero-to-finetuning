@@ -1,0 +1,437 @@
+/* ==========================================================================
+   ANN Course — shared stylesheet
+   Identity: "signal in a network" — a neuron-violet / gradient-teal duo on a
+   near-black ink background, standing in the same structural family as the
+   PI/SI course (sidebar+pager+box/demo/quiz chrome) but its own palette and
+   motif. Deep-dives shift to rose (violet is now the primary accent, so deep
+   can't reuse it the way PI/SI did). Two content tracks — LLM fine-tuning and
+   diffusion — get their own cool-blue / warm-coral signature colors that never
+   collide with the five semantic box colors. See course.css §IDENTITY notes
+   inline for the reasoning behind each choice.
+   ========================================================================== */
+:root {
+  --bg: #0c0a15;
+  --bg-panel: #16121f;
+  --bg-panel2: #1d1829;
+  --bg-code: #0a0810;
+  --bg-canvas: #0a0810;    /* plot canvases stay dark in BOTH themes (scope-screen look) */
+  --text: #e4e0f2;
+  --text-dim: #9a90b5;
+  --accent: #b48cff;       /* neuron violet — a unit firing */
+  --accent2: #45e0b8;      /* gradient teal — the signal that flows backward */
+  --good: #5ce6a0;
+  --bad: #ff6b6b;
+  --warn: #ffd166;
+  --border: #2c2640;
+  --link: #c9a8ff;
+  --btn-text: #0c0a15;
+  --deep: #ff8fc4;         /* deep-dive rose — distinct from the violet accent */
+  --try: #ffab5e;          /* "go run this" amber — distinct from all of the above */
+  --predict: #7c93ff;      /* PREDICT-box indigo — "commit to a guess"; sits between
+                               accent's violet and track-llm's sky blue but reads as
+                               its own hue (crystal-ball indigo, not a track color) */
+  --track-llm: #62c3ff;        /* LLM / language track — cool sky blue */
+  --track-diffusion: #ff9466;  /* Diffusion / vision track — warm coral */
+  /* canvas chrome (grid/ticks/border/axis-label drawn by Plot/viz.js primitives).
+     bg-canvas stays dark in BOTH themes (see above), so this chrome is
+     deliberately theme-INVARIANT too — it's still a CSS custom property
+     (themeable / overridable by a page), just not one that swaps per theme. */
+  --plot-grid: #243049;
+  --plot-tick: #8391ab;
+  --plot-border: #3b4a6b;
+  --plot-label: #a8b4cc;
+  --radius: 10px;
+  --maxw: 940px;
+  --font: "Segoe UI", system-ui, -apple-system, Roboto, "Helvetica Neue", sans-serif;
+  --mono: "Cascadia Code", Consolas, "SF Mono", Menlo, monospace;
+}
+
+/* ---------------- light theme (cream) ---------------- */
+:root[data-theme="light"] {
+  --bg: #faf7f2;           /* warm cream, same family warmth as the sibling course */
+  --bg-panel: #ffffff;
+  --bg-panel2: #f1eafc;    /* faint lavender panel tint — this is the tell for "ANN, not PI/SI" */
+  --bg-code: #f4eefc;
+  --bg-canvas: #0a0810;    /* plots stay dark on purpose */
+  --text: #2a2438;
+  --text-dim: #675e80;
+  --accent: #6a3fd1;       /* deep violet for contrast on light */
+  --accent2: #0d9488;      /* deep teal */
+  --good: #2e8b57;
+  --bad: #c62828;
+  --warn: #92720a;
+  --border: #ded2ef;
+  --link: #5b34c4;
+  --btn-text: #ffffff;
+  --deep: #c2185b;
+  --try: #c1601a;
+  --predict: #3949ab;
+  --track-llm: #0d6fb0;
+  --track-diffusion: #c1531f;
+}
+:root[data-theme="light"] h1, :root[data-theme="light"] h3 { color: #211c33; }
+:root[data-theme="light"] tr:nth-child(even) td { background: rgba(0,0,0,.025); }
+/* Symbol Ledger first column: --accent2 (#0d9488) on cream is only ~3.5:1.
+   Darken to teal-700 in light theme so the symbol column clears WCAG AA (5.12:1). */
+:root[data-theme="light"] table.ledger td:first-child { color: #0f766e; }
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--bg); color: var(--text);
+  font-family: var(--font); line-height: 1.65; font-size: 16.5px;
+}
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+/* ---- layout: sidebar + content ---- */
+#layout { display: flex; min-height: 100vh; }
+#sidebar {
+  width: 290px; flex: 0 0 290px; background: var(--bg-panel);
+  border-right: 1px solid var(--border); padding: 18px 14px 40px;
+  position: sticky; top: 0; height: 100vh; overflow-y: auto; font-size: 14px;
+}
+#sidebar .course-title {
+  font-weight: 700; font-size: 15px; color: var(--accent);
+  margin: 4px 6px 2px; letter-spacing: .3px; line-height: 1.35;
+}
+/* ---- sidebar progress: a course this long needs a "where am I" readout ---- */
+#sidebar .sidebar-progress {
+  margin: 8px 6px 14px; height: 5px; border-radius: 4px; background: var(--bg-panel2);
+  overflow: hidden; border: 1px solid var(--border);
+}
+#sidebar .sidebar-progress-fill {
+  height: 100%; border-radius: 4px 0 0 4px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+}
+#sidebar .sidebar-progress-label {
+  font-size: 10.5px; color: var(--text-dim); margin: -8px 6px 12px; letter-spacing: .3px;
+}
+/* ---- nav groups: ~50 entries need to collapse by Part, not scroll flat ---- */
+#sidebar details.nav-group { margin: 2px 0; }
+#sidebar details.nav-group[open] > summary { color: var(--text); }
+#sidebar summary.nav-part {
+  margin: 10px 2px 2px; padding: 4px 6px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 1.2px; color: var(--text-dim); font-weight: 700; cursor: pointer;
+  list-style: none; display: flex; align-items: center; gap: 6px; border-radius: 6px;
+  user-select: none;
+}
+#sidebar summary.nav-part:hover { background: var(--bg-panel2); color: var(--text); }
+#sidebar summary.nav-part::-webkit-details-marker { display: none; }
+#sidebar summary.nav-part::before {
+  content: "▸"; display: inline-block; font-size: 9px; color: var(--text-dim);
+  transition: transform .15s ease; transform: rotate(0deg);
+}
+#sidebar details[open] > summary.nav-part::before { transform: rotate(90deg); }
+/* track-colored group rail — the whole section gets a hairline of its track color */
+#sidebar details.nav-group.track-llm { border-left: 2px solid color-mix(in srgb, var(--track-llm) 45%, transparent); }
+#sidebar details.nav-group.track-diffusion { border-left: 2px solid color-mix(in srgb, var(--track-diffusion) 45%, transparent); }
+#sidebar details.nav-group.track-llm summary.nav-part::after { content: "◆ LLM"; margin-left: auto; font-size: 9px; letter-spacing: .5px; color: var(--track-llm); font-weight: 700; }
+#sidebar details.nav-group.track-diffusion summary.nav-part::after { content: "◆ Diffusion"; margin-left: auto; font-size: 9px; letter-spacing: .5px; color: var(--track-diffusion); font-weight: 700; }
+#sidebar a.nav-link {
+  display: block; padding: 5px 8px 5px 16px; border-radius: 6px; color: var(--text-dim);
+  margin: 1px 0; font-size: 13px;
+}
+#sidebar a.nav-link:hover { background: var(--bg-panel2); color: var(--text); text-decoration: none; }
+#sidebar a.nav-link.current { background: var(--bg-panel2); color: var(--accent); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
+#sidebar a.nav-link.track-llm.current { box-shadow: inset 2px 0 0 var(--track-llm); }
+#sidebar a.nav-link.track-diffusion.current { box-shadow: inset 2px 0 0 var(--track-diffusion); }
+#sidebar a.nav-link.milestone-link { font-weight: 700; color: var(--text); }
+#sidebar a.nav-link.milestone-link::before { content: "🚩 "; }
+#content { flex: 1 1 auto; min-width: 0; padding: 34px 44px 90px; }
+#content > .inner { max-width: var(--maxw); margin: 0 auto; }
+
+@media (max-width: 900px) {
+  #layout { flex-direction: column; }
+  #sidebar { position: static; width: 100%; height: auto; flex: none; }
+  #content { padding: 20px 16px 60px; }
+}
+
+/* ---- typography ---- */
+h1 { font-size: 2rem; color: #fff; margin: 0 0 4px; line-height: 1.25; }
+h2 { font-size: 1.45rem; color: var(--accent); margin-top: 2.4em; border-bottom: 1px solid var(--border); padding-bottom: 6px; }
+h3 { font-size: 1.15rem; color: #fff; margin-top: 1.8em; }
+h4 { color: var(--accent2); margin-top: 1.5em; }
+.subtitle { color: var(--text-dim); font-size: 1.05rem; margin-bottom: 1.6em; }
+.kicker { text-transform: uppercase; letter-spacing: 2px; font-size: .75rem; color: var(--accent2); font-weight: 700; }
+code, pre { font-family: var(--mono); font-size: .9em; }
+code { background: var(--bg-code); padding: 2px 6px; border-radius: 5px; border: 1px solid var(--border); }
+pre { background: var(--bg-code); padding: 14px 16px; border-radius: var(--radius); border: 1px solid var(--border); overflow-x: auto; }
+pre code { background: none; border: none; padding: 0; }
+table { border-collapse: collapse; width: 100%; margin: 1.2em 0; font-size: .93em; }
+th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; }
+th { background: var(--bg-panel); color: var(--accent); }
+tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+
+/* ==========================================================================
+   table.ledger — the Symbol Ledger: symbol | meaning | shape/units, under an
+   equation. The most-repeated table type in the course (nearly every page
+   with math has one), so it stays quiet on purpose: no full grid, no zebra
+   striping, no header fill — just a hairline under each row and a monospace
+   first column so symbols scan at a glance. Usage:
+     <table class="ledger">
+       <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+       <tbody><tr><td>$z$</td><td>pre-activation</td><td>$(d,1)$</td><td>forward pass</td></tr></tbody>
+     </table>
+   Header row is optional — several pages use a headerless ledger as a plain
+   two/three-column list; the thin bottom rule still separates rows either way.
+   ========================================================================== */
+table.ledger { border-collapse: collapse; width: 100%; margin: 1em 0; font-size: .85em; position: relative; display: block; overflow-x: auto; }
+table.ledger th, table.ledger td { border: none; border-bottom: 1px solid var(--border); padding: 6px 10px; text-align: left; vertical-align: top; }
+table.ledger thead th { background: transparent; color: var(--text-dim); font-weight: 600; font-size: .82em; text-transform: uppercase; letter-spacing: .4px; }
+table.ledger tbody tr:last-child td { border-bottom: none; }
+table.ledger tbody tr:nth-child(even) td { background: transparent; }
+table.ledger td:first-child { font-family: var(--mono); color: var(--accent2); white-space: nowrap; }
+blockquote { border-left: 3px solid var(--accent2); margin: 1.2em 0; padding: 6px 18px; background: var(--bg-panel); border-radius: 0 var(--radius) var(--radius) 0; color: var(--text-dim); }
+hr { border: none; border-top: 1px solid var(--border); margin: 2.5em 0; }
+.katex { font-size: 1.06em; }
+.katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; position: relative; }
+
+/* ---- callout boxes ---- */
+.box { border-radius: var(--radius); padding: 16px 20px; margin: 1.4em 0; border: 1px solid var(--border); background: var(--bg-panel); }
+.box .box-title { font-weight: 700; margin-bottom: 6px; display: block; }
+.box.key    { border-left: 4px solid var(--accent); }
+.box.key    .box-title { color: var(--accent); }
+.box.rule   { border-left: 4px solid var(--accent2); }
+.box.rule   .box-title { color: var(--accent2); }
+.box.warn   { border-left: 4px solid var(--bad); }
+.box.warn   .box-title { color: var(--bad); }
+.box.deep   { border-left: 4px solid var(--deep); }
+.box.deep   .box-title { color: var(--deep); }
+.box.worked { border-left: 4px solid var(--good); }
+.box.worked .box-title { color: var(--good); }
+.box.try    { border: 1px dashed var(--try); border-left: 4px solid var(--try); background: var(--bg-panel2); position: relative; }
+.box.try    .box-title { color: var(--try); }
+.box.try    .box-title::before { content: "▶ "; }
+.box.try    .box-title::after { content: "RUN THIS"; float: right; font-size: .65rem; letter-spacing: 1.5px; font-weight: 700; color: var(--try); opacity: .7; }
+/* .box.predict — "commit to a guess before scrolling." Same plain construction as
+   .key/.rule/.warn/.worked (border-left + title color, nothing fancier): no dashed
+   border and no "RUN THIS" tag — those are .try's signature, and a PREDICT is a
+   question, not an instruction to go run a demo. Author writes the 🔮 by hand in
+   the box-title text, same convention as 🔑/📐/⚠️/✍️ on the other variants. Every
+   .box.predict MUST be answered somewhere later on the same page (on-page-resolution
+   rule) — see TEMPLATE-example.html for the annotated example. */
+.box.predict { border-left: 4px solid var(--predict); }
+.box.predict .box-title { color: var(--predict); }
+details.deepdive { border: 1px solid var(--border); border-left: 4px solid var(--deep); border-radius: var(--radius); background: var(--bg-panel); margin: 1.4em 0; }
+details.deepdive > summary { cursor: pointer; padding: 12px 20px; font-weight: 700; color: var(--deep); }
+details.deepdive > div { padding: 0 20px 14px; }
+
+/* ---- interactive demo panels ---- */
+.demo {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-panel); margin: 1.8em 0; overflow: hidden;
+}
+.demo .demo-head {
+  padding: 10px 18px; background: var(--bg-panel2); border-bottom: 1px solid var(--border);
+  font-weight: 700; color: var(--accent); font-size: .95rem;
+}
+.demo .demo-head .demo-tag { float: right; font-size: .7rem; letter-spacing: 1.5px; color: var(--accent2); text-transform: uppercase; padding-top: 3px; }
+.demo .demo-body { padding: 16px 18px; }
+.demo canvas { width: 100%; height: auto; display: block; background: var(--bg-canvas); border-radius: 6px; border: 1px solid var(--border); }
+.demo .controls { display: flex; flex-wrap: wrap; gap: 14px 26px; margin-top: 12px; }
+.demo .ctrl { display: flex; flex-direction: column; gap: 2px; min-width: 170px; flex: 1 1 170px; }
+.demo .ctrl label { font-size: .8rem; color: var(--text-dim); }
+.demo .ctrl label .val { color: var(--accent); font-family: var(--mono); font-weight: 600; }
+.demo .ctrl input[type=range] { width: 100%; accent-color: var(--accent); }
+.demo .ctrl select, .demo .ctrl input[type=number] {
+  background: var(--bg-code); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 5px 8px; font-family: var(--mono);
+}
+.demo .readout { font-family: var(--mono); font-size: .88rem; color: var(--text-dim); margin-top: 10px; }
+.demo .readout b { color: var(--accent2); }
+.demo button, .quiz button, button.btn {
+  background: var(--accent); color: var(--btn-text); font-weight: 700; border: none;
+  padding: 8px 18px; border-radius: 7px; cursor: pointer; font-size: .9rem;
+}
+.demo button:hover, .quiz button:hover, button.btn:hover { filter: brightness(1.12); }
+.demo button.secondary { background: var(--bg-panel2); color: var(--text); border: 1px solid var(--border); }
+
+/* ---- quizzes ---- */
+.quiz { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); margin: 1.8em 0; }
+.quiz .quiz-head { padding: 12px 18px; background: linear-gradient(90deg, rgba(180,140,255,.14), transparent); border-bottom: 1px solid var(--border); font-weight: 700; color: var(--text); }
+.quiz .q { padding: 16px 18px; border-bottom: 1px solid var(--border); }
+.quiz .q:last-of-type { border-bottom: none; }
+.quiz .q .q-text { font-weight: 600; margin-bottom: 10px; }
+.quiz .q .q-num { color: var(--accent2); font-weight: 700; margin-right: 6px; }
+.quiz .opt { display: block; padding: 8px 12px; border: 1px solid var(--border); border-radius: 7px; margin: 6px 0; cursor: pointer; transition: background .15s; }
+.quiz .opt:hover { background: var(--bg-panel2); }
+.quiz .opt input { margin-right: 10px; accent-color: var(--accent); }
+.quiz .opt.correct { border-color: var(--good); background: rgba(92,230,160,.14); }
+.quiz .opt.incorrect { border-color: var(--bad); background: rgba(255,107,107,.14); }
+.quiz .numin { background: var(--bg-code); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-family: var(--mono); width: 160px; }
+.quiz .numin.correct { border-color: var(--good); }
+.quiz .numin.incorrect { border-color: var(--bad); }
+.quiz .explain { display: none; margin-top: 10px; padding: 10px 14px; border-radius: 7px; background: var(--bg-code); border-left: 3px solid var(--accent); font-size: .93em; color: var(--text-dim); }
+.quiz .explain.shown { display: block; }
+.quiz .quiz-foot { padding: 14px 18px; display: flex; align-items: center; gap: 18px; }
+.quiz .score { font-weight: 700; font-family: var(--mono); }
+.quiz .score.pass { color: var(--good); }
+.quiz .score.fail { color: var(--bad); }
+
+/* ---- page footer nav ---- */
+.pager { display: flex; justify-content: space-between; gap: 16px; margin-top: 60px; }
+.pager a {
+  flex: 1; border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 14px 18px; background: var(--bg-panel); color: var(--text);
+}
+.pager a:hover { border-color: var(--accent); text-decoration: none; }
+.pager a .dir { font-size: .72rem; text-transform: uppercase; letter-spacing: 1.5px; color: var(--text-dim); display: block; }
+.pager a .ttl { color: var(--accent); font-weight: 600; }
+.pager a.next { text-align: right; }
+
+/* ---- index page cards ---- */
+.card-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; margin: 1.5em 0; }
+.card { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); padding: 16px 18px; display: block; color: var(--text); }
+.card:hover { border-color: var(--accent); text-decoration: none; transform: translateY(-2px); transition: all .15s; }
+.card .card-num { font-family: var(--mono); color: var(--accent2); font-size: .8rem; }
+.card .card-title { font-weight: 700; color: var(--accent); margin: 4px 0 6px; }
+.card .card-desc { font-size: .87rem; color: var(--text-dim); }
+.card.track-llm { border-left: 3px solid var(--track-llm); }
+.card.track-llm .card-title { color: var(--track-llm); }
+.card.track-diffusion { border-left: 3px solid var(--track-diffusion); }
+.card.track-diffusion .card-title { color: var(--track-diffusion); }
+.card .card-milestone { float: right; font-size: .8rem; }
+.card .card-chip { float: right; }
+.badge { display: inline-block; font-size: .68rem; padding: 2px 9px; border-radius: 20px; border: 1px solid var(--border); color: var(--text-dim); letter-spacing: 1px; text-transform: uppercase; margin-right: 6px; }
+.badge.found { border-color: var(--good); color: var(--good); }
+.badge.adv { border-color: var(--deep); color: var(--deep); }
+.badge.llm { border-color: var(--track-llm); color: var(--track-llm); }
+.badge.diffusion { border-color: var(--track-diffusion); color: var(--track-diffusion); }
+
+/* ==========================================================================
+   .codeblock — real, runnable Python/PyTorch snippets.
+   Structure the page author writes:
+     <div class="codeblock" data-lang="python">
+       <div class="codeblock-head"><span class="lang-tag">Python</span>
+         <button class="copy-btn" type="button">Copy</button></div>
+       <pre><code><span class="line">import torch</span>
+   <span class="line hl">x = torch.randn(4, 8)</span></code></pre>
+     </div>
+   Line numbers are pure CSS counters — no JS tokenizer, no build step. Wrap a
+   line in class="line hl" to highlight it. Optional hand-applied token classes
+   (tok-kw/tok-str/tok-num/tok-com/tok-fn) give restrained syntax color without
+   an external highlighter. The copy button is wired by course.js:wireCodeblocks().
+   ========================================================================== */
+.codeblock {
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg-code); margin: 1.6em 0; overflow: hidden;
+}
+.codeblock .codeblock-head {
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  background: var(--bg-panel2); border-bottom: 1px solid var(--border);
+}
+.codeblock .lang-tag {
+  font-family: var(--mono); font-size: .72rem; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; color: var(--accent2);
+  padding: 2px 8px; border: 1px solid var(--border); border-radius: 20px;
+}
+.codeblock .copy-btn {
+  margin-left: auto; background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px; padding: 3px 11px;
+  font-size: .74rem; cursor: pointer; font-family: var(--font);
+}
+.codeblock .copy-btn:hover { color: var(--text); border-color: var(--accent); }
+.codeblock .copy-btn.copied { color: var(--good); border-color: var(--good); }
+.codeblock pre {
+  margin: 0; border: none; border-radius: 0; background: transparent;
+  padding: 12px 0; overflow-x: auto;
+}
+.codeblock code {
+  background: none; border: none; padding: 0; display: block;
+  counter-reset: codeline; font-family: var(--mono); font-size: .87em; line-height: 1.6;
+}
+.codeblock .line {
+  display: block; padding: 0 16px 0 3.4em; position: relative; white-space: pre;
+}
+.codeblock .line::before {
+  counter-increment: codeline; content: counter(codeline);
+  position: absolute; left: 0; width: 2.6em; text-align: right;
+  color: var(--text-dim); opacity: .55; user-select: none;
+}
+.codeblock .line.hl {
+  background: rgba(180,140,255,.10); box-shadow: inset 3px 0 0 var(--accent);
+}
+:root[data-theme="light"] .codeblock .line.hl { background: rgba(106,63,209,.08); }
+.codeblock .tok-kw  { color: var(--accent); font-weight: 600; }
+.codeblock .tok-str  { color: var(--accent2); }
+.codeblock .tok-num  { color: var(--try); }
+.codeblock .tok-fn   { color: var(--track-llm); }
+.codeblock .tok-com  { color: var(--text-dim); font-style: italic; }
+
+/* ==========================================================================
+   .tensor-shape / .matrix — shape bookkeeping as real typography, not an
+   afterthought. Shapes read inline in prose; matrices get drawn brackets.
+   ========================================================================== */
+.tensor-shape {
+  display: inline-block; font-family: var(--mono); font-size: .92em;
+  background: var(--bg-code); color: var(--accent2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 1px 8px; margin: 0 1px;
+}
+.tensor-shape .dim { color: var(--text-dim); }
+.matrix {
+  display: inline-grid; gap: 4px 18px; position: relative; vertical-align: middle;
+  padding: 8px 20px; margin: 4px 6px; font-family: var(--mono); font-size: .95em;
+}
+.matrix::before, .matrix::after {
+  content: ""; position: absolute; top: 2px; bottom: 2px; width: 8px;
+  border: 2px solid var(--accent);
+}
+.matrix::before { left: 0; border-right: none; border-radius: 4px 0 0 4px; }
+.matrix::after  { right: 0; border-left: none; border-radius: 0 4px 4px 0; }
+.matrix-row { display: flex; gap: 18px; }
+.matrix-row span { min-width: 1.6em; text-align: center; }
+.matrix-row span.hl { color: var(--try); font-weight: 700; }
+
+/* ==========================================================================
+   .track-llm / .track-diffusion — the trunk forks into two tracks. Apply as
+   a modifier on .box/.demo/.card to tint it, or use .track-banner as a
+   standalone divider marking "you are now on the X track" without spinning
+   up a whole second visual language.
+   ========================================================================== */
+.box.track-llm, .demo.track-llm { border-left-color: var(--track-llm); }
+.box.track-llm .box-title, .demo.track-llm .demo-head { color: var(--track-llm); }
+.box.track-diffusion, .demo.track-diffusion { border-left-color: var(--track-diffusion); }
+.box.track-diffusion .box-title, .demo.track-diffusion .demo-head { color: var(--track-diffusion); }
+.track-banner {
+  display: flex; align-items: center; gap: 12px; margin: 2.6em 0 1.6em;
+  padding: 10px 0;
+}
+.track-banner::before, .track-banner::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.track-banner .track-label {
+  flex: 0 1 auto; min-width: 0; text-align: center; overflow-wrap: break-word;
+  font-weight: 700; font-size: .85rem; letter-spacing: .5px;
+  padding: 5px 16px; border-radius: 20px; border: 1px solid currentColor;
+}
+.track-banner.track-llm .track-label { color: var(--track-llm); }
+.track-banner.track-llm .track-label::before { content: "🔤 "; }
+.track-banner.track-diffusion .track-label { color: var(--track-diffusion); }
+.track-banner.track-diffusion .track-label::before { content: "🌀 "; }
+
+/* ==========================================================================
+   .milestone — visible progress checkpoints for a 45+ page course, so the
+   mid-course trough has a marker that says "you're further than it feels".
+   Usage: <div class="milestone" data-progress="55">
+            <span class="milestone-flag">Milestone</span> Halfway: backprop is
+            now yours. <span class="milestone-pct">55%</span> of the course.
+          </div>
+   data-progress (0–100) is read by course.js to size the fill bar; omit it
+   and the bar simply stays empty.
+   ========================================================================== */
+.milestone {
+  margin: 3em 0; padding: 18px 22px; border-radius: var(--radius);
+  background: linear-gradient(135deg, var(--bg-panel2), var(--bg-panel));
+  border: 1px solid var(--border); position: relative; overflow: hidden;
+}
+.milestone::before {
+  content: ""; position: absolute; left: 0; top: 0; bottom: 0;
+  width: var(--milestone-fill, 0%); background: linear-gradient(180deg, var(--accent), var(--accent2));
+  opacity: .16; transition: width .4s ease;
+}
+.milestone-flag {
+  display: inline-flex; align-items: center; gap: 6px; font-weight: 700;
+  color: var(--bg); background: linear-gradient(90deg, var(--accent), var(--accent2));
+  padding: 3px 12px; border-radius: 20px; font-size: .78rem; letter-spacing: .5px;
+  margin-right: 10px; position: relative;
+}
+.milestone-flag::before { content: "🚩"; }
+.milestone-pct { font-family: var(--mono); color: var(--accent2); font-weight: 700; }

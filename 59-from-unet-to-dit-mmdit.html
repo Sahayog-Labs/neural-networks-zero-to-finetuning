@@ -1,0 +1,774 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>59. The Denoiser II: DiT, MMDiT & the Samplers — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local only: the thread tag, the shape ribbon, compact data tables and the
+     radio/select rows. PREDICT, Symbol Ledgers and callout boxes all come from the
+     shared components in course.css. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .84rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  table.data td.ok { color: var(--good); font-weight: 600; }
+  table.data td.bad { color: var(--bad); font-weight: 600; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label, .selwrap .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .selwrap select { background: var(--bg-panel2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-family: var(--mono); }
+  .legend { font-size: .8rem; color: var(--text-dim); margin: .3em 0 0; }
+  .legend span { display: inline-block; margin-right: 14px; }
+  .legend b { font-family: var(--mono); }
+  .sw { display: inline-block; width: 22px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+</style>
+</head>
+<body data-page="59-from-unet-to-dit-mmdit.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · The Denoiser, Part II</span>
+    <h1>The Denoiser's Body II: DiT, MMDiT &amp; the Samplers</h1>
+    <p class="subtitle">The U-Net's hierarchy was a <em>constraint</em> that scale outgrew. Swap it
+      for a transformer over patch tokens and two things change: quality tracks GFLOPs, and text
+      can finally talk back to the image. Then the sampler dropdown you use daily turns out to be a
+      menu of textbook ODE solvers — one of which is a genuine free lunch.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: the "different image" half is answered by demo D59.1 and the
+         sentence under it; the "1 model call" half is answered in the samplers table and the
+         sentence right after it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Two questions you can answer from experience, then check. <b>(1)</b> You run
+      <code>euler_a</code> at 20 steps, then again at 100 steps, same seed, same prompt. Do you get
+      the <em>same image, only sharper</em>, or a <em>different image</em>? <b>(2)</b>
+      <code>dpmpp_2m</code> is a second-order method — it gets a more accurate step than plain Euler.
+      How many <em>model calls per step</em> does it spend to buy that second order: <b>1 or 2</b>?
+      Commit to both before scrolling.
+    </div>
+
+    <!-- ============================ RECAP / TWO BODIES ============================ -->
+    <h2>Two bodies for one job</h2>
+
+    <p>Page 58 pinned the denoiser's job as a <strong>shape constraint</strong>, not an architecture:
+      take a noised latent, a noise level, and the text, and return a tensor of the
+      <em>same shape as the latent</em>. Dense prediction, not classification — the output is the
+      thing you are generating, at full latent resolution.</p>
+
+    <div class="ribbon">eps_theta :  (C, H_lat, W_lat) x  R  x  (S_txt, d_c)  ->  (C, H_lat, W_lat)
+             #  noised latent   noise level   the prompt          same shape back</div>
+
+    <p>Two network families satisfy that constraint, and you own checkpoints of both. The
+      <strong>U-Net</strong> (SD1.5, SDXL) meets it with a spatial hierarchy and skip wires — page 58.
+      The <strong>DiT</strong> (SD3.5, FLUX.1/2, Z-Image, Qwen-Image) throws the hierarchy out and
+      meets it with a plain transformer over patch tokens. This page is the second body, and the
+      sampler that walks it.</p>
+
+    <!-- ============================ THE DiT ============================ -->
+    <h2>The DiT: patchify, transform, unpatchify</h2>
+
+    <p>A transformer eats a sequence of tokens. A latent is a grid. The DiT bridges them with the
+      exact move you already met on the VAE page — <strong>patchify</strong> — then runs $N$ ordinary
+      transformer blocks, then puts the grid back:</p>
+
+    <div class="ribbon">x (latent)     (B=1, C=16, H_lat=128, W_lat=128)   # a FLUX.1 latent, from p.53
+patchify 2x2   (B=1, 4096, 64)                      # (128/2)^2 = 4096 tokens; width 16*2*2 = 64
+linear proj    (B=1, 4096, 3072)                    # each token widened to d = 3072
++ N x block    (1, 4096, 3072)                       # attention + MLP, shape preserved every block
+unpatchify     (1, 16, 128, 128)                     # tokens folded back to the grid -> VAE decode</div>
+
+    <div class="box key"><span class="box-title">🔑 The 4096 tokens are the same 4096</span>
+      That token count is not new. It is the <strong>4096</strong> from page 53 — $64\times64$ after
+      the VAE's $f=8$ downsample and the $2\times2$ patchify. On the U-Net those patches were pixels
+      in a feature map; on the DiT they are <em>tokens in a sequence</em>, and every one attends to
+      every other. Peebles &amp; Xie (2023) measured the payoff: DiT quality tracks the block's
+      <strong>GFLOPs monotonically</strong> — the same clean scaling behaviour you saw in the LLM
+      trunk. The U-Net's convolutional inductive bias, so useful at small scale, becomes a
+      <em>constraint</em> once you have the compute to not need it.
+    </div>
+
+    <!-- ============================ CONDITIONING ENTERS — THREE DESIGNS ============================ -->
+    <h2>How the prompt and the timestep get in</h2>
+
+    <p>The DiT block is a plain transformer block; it has nowhere obvious to inject "denoise <em>this</em>
+      much, toward <em>this</em> caption." Three designs solved it, and the field converged on the third.</p>
+
+    <table class="data">
+      <thead><tr><th>Design</th><th>How $t$ and $\mathbf{c}$ enter</th><th>Ships in</th></tr></thead>
+      <tbody>
+        <tr><td>adaLN-Zero</td><td>$t$ + pooled text &rarr; per-block scale/shift/gate</td><td>original DiT, PixArt-α</td></tr>
+        <tr><td>Cross-attention</td><td>image queries, text keys/values (as on the U-Net, p.58)</td><td>PixArt, SD1.x/2.x lineage</td></tr>
+        <tr><td>MMDiT (joint attention)</td><td>concatenate text + image, self-attend over the union</td><td>SD3/3.5, FLUX.1/2 — the 2026 standard</td></tr>
+      </tbody>
+    </table>
+
+    <p><strong>adaLN-Zero</strong> is worth one equation, because its trick is one you now own. A tiny
+      MLP maps the timestep-plus-pooled-text vector to three per-channel modulation vectors, and the
+      block becomes:</p>
+
+    <p>$$\mathbf{h}' = \mathbf{h} + \boldsymbol\gamma_2 \odot
+        \operatorname{Block}\!\Big( (1+\boldsymbol\gamma_1)\odot\operatorname{LN}(\mathbf{h}) + \boldsymbol\beta_1 \Big),
+        \qquad (\boldsymbol\gamma_1,\boldsymbol\beta_1,\boldsymbol\gamma_2) = \operatorname{MLP}\big(t + \operatorname{pool}(\mathbf{c})\big).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{h}$</td><td>the residual-stream activation entering the block</td><td>$(4096, d)$</td><td>previous block</td></tr>
+        <tr><td>$\boldsymbol\gamma_1,\boldsymbol\beta_1$</td><td>scale &amp; shift on the normalized input (FiLM)</td><td>$(d,)$ each</td><td>the modulation MLP</td></tr>
+        <tr><td>$\boldsymbol\gamma_2$</td><td>the <strong>output gate</strong> — <em>init 0</em></td><td>$(d,)$</td><td>the modulation MLP</td></tr>
+        <tr><td>$\operatorname{LN}$</td><td>LayerNorm with the affine turned off (adaLN supplies it)</td><td>—</td><td>fixed</td></tr>
+        <tr><td>$t,\ \mathbf{c}$</td><td>diffusion timestep · pooled text embedding</td><td>scalar · $(d,)$</td><td>the schedule · the frozen encoder</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 "adaLN-<em>Zero</em>" is the B = 0 trick again</span>
+      $\boldsymbol\gamma_2$ is initialized to <strong>zero</strong>, so at step 0 every block computes
+      $\mathbf{h}' = \mathbf{h} + 0 = \mathbf{h}$ — a pure identity. Training <em>opens</em> the gate
+      from a clean no-op instead of fighting random garbage.
+      <span class="thread" style="display:block;border:0;padding:6px 0 0;margin:6px 0 0">
+        <b>[THREAD: LoRA · the zero-init no-op]</b> This is the same object as LoRA's
+        <strong>$B = 0$</strong> from p.40 — the adapter starts as an exact identity and the effective
+        update is scaled up from nothing. Same idea, different letter: reopen p.40's zero-init argument,
+        it is the reason both train stably.</span>
+      Translation: the DiT paper calls $\boldsymbol\gamma_2$ the residual gate $\alpha$; we subscript it
+      to keep a bare $\alpha$ meaning LoRA scaling (notation §5.4).
+    </div>
+
+    <!-- ============================ WHY MMDiT WON ============================ -->
+    <h2>★ Why MMDiT won: the prompt gets to look at the canvas</h2>
+
+    <p>Cross-attention — the U-Net's mechanism — is <strong>one-directional</strong>. The image queries
+      the text; the text is shouted once, encoded, frozen, and never gets to see what is being drawn.
+      The prompt's representation of "a red cube on a blue sphere" is fixed before a single pixel exists.</p>
+
+    <p>MMDiT concatenates the text and image tokens into <strong>one sequence</strong> and self-attends
+      over the union — so <strong>text tokens attend to image tokens too</strong>. Each modality keeps
+      its own $W_Q, W_K, W_V$ (text and image are different animals), but they share <em>one softmax</em>
+      over the joined sequence.</p>
+
+    <div class="ribbon">img tokens     (B, 4096, d)             # the patchified noised latent
+txt tokens     (B, S_txt, d)            # the prompt, from the frozen encoder
+concat         (B, 4096 + S_txt, d)     # ONE sequence
+Q,K,V          separate W per modality, then concatenated   # different weights, shared attention
+scores = Q Kt / sqrt(d_head)   (B, H=48, 4096+S_txt, 4096+S_txt)   # image<->text, both directions</div>
+
+    <div class="box key"><span class="box-title">🔑 A capability change, not a refactor</span>
+      Because the text can now adapt to the half-drawn canvas, "a red cube on a blue sphere" can
+      <strong>resolve which noun owns which colour by looking at where the shapes landed</strong>. This
+      is why SD3/FLUX render legible text and bind attributes, and why SD1.5 — with its one-way
+      cross-attention — constantly swapped them (red sphere, blue cube). You have <em>lived</em> this
+      exact jump moving your own work from SD1.5 to FLUX. It was not a bigger model alone; it was the
+      attention becoming bidirectional.
+      <span class="thread" style="display:block;border:0;padding:6px 0 0;margin:6px 0 0">
+        <b>[THREAD: the dot product · the atom]</b> Joint attention is still just
+        $\operatorname{softmax}(QK^\top/\sqrt{d_\text{head}})$ — the same dot-product similarity from
+        the trunk. What is new is only <em>which tokens are in the sequence</em>: text and image
+        together. Reopen p.29's soft-lookup picture; the mechanism is unchanged.</span>
+    </div>
+
+    <!-- ============================ HIS CONFIG OFF DISK ============================ -->
+    <h2>Your FLUX config, off disk</h2>
+
+    <p>This is not a diagram of someone else's model. These numbers are in
+      <code>transformer/config.json</code> in your own FLUX folders — open them and read along.</p>
+
+    <div class="box worked"><span class="box-title">✍️ FLUX.1-dev and FLUX.2-dev, verified from the shipped configs</span>
+      <table class="data">
+        <thead><tr><th>field</th><th>FLUX.1-dev</th><th>FLUX.2-dev (your disk)</th></tr></thead>
+        <tbody>
+          <tr><td>class</td><td>FluxTransformer2DModel</td><td>Flux2Transformer2DModel</td></tr>
+          <tr><td>params</td><td>12B, $d=3072$</td><td>32B</td></tr>
+          <tr><td>attention</td><td>MMDiT (joint)</td><td>MMDiT (joint)</td></tr>
+          <tr><td>heads &times; head_dim</td><td>24 &times; 128</td><td><b>48 &times; 128</b></td></tr>
+          <tr><td>blocks</td><td><b>19</b> double-stream + <b>38</b> single-stream</td><td><b>8</b> dual + <b>48</b> single</td></tr>
+          <tr><td>in_channels</td><td>64 (=16&times;2²)</td><td><b>128</b> (=32&times;2² packing ✓)</td></tr>
+          <tr><td>mlp_ratio</td><td>4.0</td><td>3.0</td></tr>
+          <tr><td>rope_theta</td><td>10000</td><td>2000</td></tr>
+          <tr><td>joint_attention_dim</td><td>4096</td><td><b>15360 = 3&times;5120</b></td></tr>
+          <tr><td>guidance</td><td>guidance-distilled</td><td>guidance-distilled <span class="xref">[EST]</span></td></tr>
+        </tbody>
+      </table>
+      FLUX.2-dev's config figures — class, params, heads&times;head_dim, block split, in_channels, mlp_ratio,
+      rope_theta, joint_attention_dim — are <span class="xref">[VP, <code>hardware-ground-truth.md</code> §4]</span>
+      from your shipped <code>transformer/config.json</code>; FLUX.1-dev's 12B / MMDiT / guidance-distilled are
+      <span class="xref">[VP, <code>constants.md</code> §9.6]</span>, but its <b>19+38 block split</b> is
+      <span class="xref">[EST]</span> (medium confidence — verify against <code>FluxTransformer2DModel</code>).
+      FLUX.2-dev's <b>guidance-distilled</b> row is <span class="xref">[EST]</span> — <em>not</em> stated in §4 or
+      §9.6; it is inferred from the FLUX <code>dev</code>-family pattern, so confirm it against the
+      <code>guidance_embeds</code> flag in your own <code>transformer/config.json</code> before trusting it.
+      The <code>in_channels: 128</code> line is the cross-check on page 53: $32$ VAE channels $\times\,2^2$
+      from the $2\times2$ patch = exactly $128$, so a token is one packed $2\times2$ patch of the 32-channel
+      latent. The double/dual-stream blocks keep text and image in separate residual streams that
+      co-attend; the single-stream blocks run them as one merged sequence.
+      <span class="thread" style="display:block;border:0;padding:6px 0 0;margin:6px 0 0">
+        <b>[THREAD: Qwen3-8B / the LLM track]</b> That <code>joint_attention_dim</code> $= 15360 = 3\times5120$
+        is not arbitrary: <strong>5120</strong> is the hidden size of FLUX.2's text encoder, a
+        <strong>40-layer GQA (32 query / 8 KV heads) RoPE Mistral-3</strong> — a 24B LLM, twice the size of
+        the entire FLUX.1 image model, just to read the prompt. GQA (p.36–37), RoPE (p.33), the decoder
+        block (p.35): every component the LLM track taught you, now reading your image prompt. The tracks
+        are converging; page 61 names it and the capstone cashes it in.</span>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/sample_flux.py</code> against your own <code>flux1-dev-kontext_fp8</code>. It exposes
+      <code>seed</code> / <code>steps</code> / <code>guidance</code> / <code>scheduler</code> and
+      <strong>prints the latent shape $[1,16,128,128]$, the token count 4096, and peak memory</strong> —
+      verifying pages 53 and 60 on your machine, in about 3 s per image. Then <code>cat</code>
+      <code>transformer/config.json</code> and match every row of the table above.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the SD3.5-Large joint sequence, walked</summary><div>
+      <p>SD3.5-Large concatenates its $4096$ image tokens <span class="xref">[DER, §9.6]</span> with
+        $\approx154$ text tokens (its dual CLIP encoders contribute $77+77$, T5 pooled separately), giving a
+        joined length of $\approx\mathbf{4250}$ <span class="xref">[EST — the 154 text count is illustrative,
+        not frozen]</span>. Every joint-attention block then
+        forms a $[B, H, 4250, 4250]$ score matrix — image-to-image, text-to-text, and both cross
+        directions in one softmax. That $4250^2 \approx 1.8\times10^{7}$ entries per head per block is
+        the price of letting the prompt watch the canvas; page 60 does the memory arithmetic in full.</p>
+    </div></details>
+
+    <!-- ============================ SAMPLERS ============================ -->
+    <h2>The sampler dropdown is a menu of ODE solvers</h2>
+
+    <p>Sampling is integrating an ordinary differential equation downward in noise level $\sigma$.
+      Writing the network's posterior-mean prediction as the denoiser $D(\mathbf{x},\sigma)$, the
+      probability-flow ODE is a single line:</p>
+
+    <p>$$\frac{d\mathbf{x}}{d\sigma} = \frac{\mathbf{x} - D(\mathbf{x},\sigma)}{\sigma}
+        \;=\; -\,\sigma\,\mathbf{s}_\theta(\mathbf{x},\sigma).$$</p>
+
+    <p>Every entry in your <code>sampler</code> dropdown is a different numerical scheme for walking that
+      curve from $\sigma_{\max}$ down to $0$. The differences are pure numerical analysis — order, and
+      how many times you evaluate the (expensive) network per step.</p>
+
+    <div class="box key"><span class="box-title">🔑 Order and model-calls-per-step — the honest cost axis</span>
+      <table class="data">
+        <thead><tr><th>sampler</th><th>order</th><th>model calls / step</th><th>converges?</th></tr></thead>
+        <tbody>
+          <tr><td><code>euler</code></td><td>1</td><td class="ok">1</td><td class="ok">yes (deterministic)</td></tr>
+          <tr><td><code>ddim</code> (<code>eta=0</code>)</td><td>1</td><td class="ok">1</td><td class="ok">yes (deterministic)</td></tr>
+          <tr><td><code>heun</code></td><td>2</td><td class="bad">2</td><td class="ok">yes</td></tr>
+          <tr><td><code>dpmpp_2m</code></td><td>2 (multistep)</td><td class="ok"><b>1</b></td><td class="ok">yes</td></tr>
+          <tr><td><code>euler_a</code> / ancestral</td><td>1</td><td class="ok">1</td><td class="bad">no — stochastic</td></tr>
+        </tbody>
+      </table>
+      Three takeaways no tutorial spells out:
+      <ol style="margin:.4em 0 0">
+        <li><strong><code>dpmpp_2m</code> is the free lunch.</strong> It reaches second-order accuracy by
+          <em>reusing the previous step's model output</em> (an Adams–Bashforth multistep) — so it spends
+          <strong>1 model call per step</strong>, exactly like Euler, while Heun pays 2 calls for the same
+          order. That answers the second predict: <b>1 call</b>, not 2. Same accuracy as Heun at half the
+          network evaluations.</li>
+        <li><strong>Ancestral samplers ($\_a$) do not converge.</strong> They inject <em>fresh noise</em>
+          every step, so <code>euler_a</code> at 100 steps is not <code>euler_a</code> at 20 steps
+          improved — it is a <em>different image</em> (the first predict). Deterministic samplers
+          (<code>euler</code>, <code>ddim</code> with <code>eta=0</code>, <code>dpmpp_2m</code>) walk one
+          fixed trajectory and sharpen toward a single answer as you add steps. <strong>This resolves the
+          DDIM-$\eta{=}0$ puzzle from page 55</strong>: $\eta{=}0$ removes the re-injected noise, turning
+          the stochastic sampler into a deterministic ODE that <em>does</em> converge.</li>
+        <li><strong>Step count is step size.</strong> Error falls as $O(h^p)$ for a $p$-th-order method with
+          step $h$. FLUX needs fewer Euler steps than SD1.5 not because it is "better tuned" but because
+          <em>flow matching straightened the path</em> (page 57) — Euler is exact on a straight line.</li>
+      </ol>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 <code>denoise</code> decoded — where on the ladder you jump in</span>
+      Setting <code>denoise=0.6</code> in a KSampler is not "remove 60% of the noise." It means:
+      <strong>skip the first 40% of the schedule</strong>, noise the input latent to $t = 0.6\,T$, and run
+      only the last 12 of a 20-step grid. It is a <em>starting point on the noise ladder</em>, which is
+      exactly why low <code>denoise</code> preserves the input image (you start close to it) and
+      <code>denoise=1.0</code> starts from pure noise (img2img &rarr; txt2img). Not a mystery dial — a
+      choice of $\sigma_{\text{start}}$.
+    </div>
+
+    <!-- ============================ DEMO 1 — SAMPLER SHOOTOUT ============================ -->
+    <h2>Demo — the sampler shootout</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      This is a real ODE integrator on a 2-D mixture of 8 Gaussians with a <em>closed-form</em> score —
+      no network. The reference is a <strong>converged 256-step solve</strong>, and the plot shows each
+      sampler's distance to it (sliced Wasserstein) against the honest x-axis: <strong>model calls</strong>.
+      Watch two things.
+      Drag the <b>steps</b> slider and see <code>heun</code> and <code>dpmpp_2m</code> land on the same
+      accuracy — but <code>heun</code> gets there at twice the model calls (the free lunch, measured).
+      Then crank steps on <code>euler_a</code>: its error plateaus on a noisy floor and never sharpens,
+      while <code>euler</code> drives toward zero. Slide <code>ddim</code>'s <code>eta</code> down from 1:
+      it sits on that same ancestral floor for every nonzero setting — <code>0.5</code>, <code>0.1</code>,
+      <code>0.05</code> are all still stochastic — and only snaps onto the converging curve at
+      <code>eta=0</code> exactly, the instant the fresh-noise injection switches off.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Solver accuracy vs model calls · closed-form 8-Gaussian ODE <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-shoot" height="320"></canvas>
+        <div class="legend" id="d-shoot-legend"></div>
+        <div class="controls" id="d-shoot-ctrls">
+          <div class="radio-row" id="d-shoot-samp">
+            <span class="grp-label">highlight sampler:</span>
+            <label><input type="radio" name="samp" value="euler" checked> euler</label>
+            <label><input type="radio" name="samp" value="euler_a"> euler_a</label>
+            <label><input type="radio" name="samp" value="heun"> heun</label>
+            <label><input type="radio" name="samp" value="dpmpp_2m"> dpmpp_2m</label>
+            <label><input type="radio" name="samp" value="ddim"> ddim</label>
+          </div>
+        </div>
+        <div class="controls" id="d-shoot-sliders"></div>
+        <div class="readout" id="d-shoot-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DISTILLATION ============================ -->
+    <h2>Distillation: buying steps back with weights</h2>
+
+    <p>If step count is the cost, the frontier's move is to <strong>bake the trajectory into the weights</strong>
+      so you need almost no steps. The family tree — progressive distillation, Reflow (page 57's
+      re-coupling), consistency / LCM, ADD, DMD, and <strong>guidance distillation</strong> — all trade
+      training compute for inference steps. Guidance distillation is the one on your disk: it bakes CFG
+      into the weights (FLUX.1-dev/schnell), which is why FLUX's <code>guidance</code> is not the same
+      knob as real <code>cfg</code> — page 61 derives that in full.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The step count is not free — you paid in controllability</span>
+      A distilled model is <strong>less steerable</strong>, and the symptoms are ones you have hit. The
+      klein example's <code>guidance_scale=1.0</code> is a <em>constraint</em>, not a default — real CFG
+      largely does not work on a guidance-distilled model (page 61). Distilled checkpoints also show
+      narrower diversity and are <strong>harder to LoRA-train</strong> (page 62). "4-step FLUX" and
+      "one-step turbo" are not free quality; they spent your controllability to buy the steps.
+    </div>
+
+    <!-- ============================ DEMO 2 — TOKEN BUDGET ============================ -->
+    <h2>Demo — better prompt understanding isn't free</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      MMDiT's power — the prompt watching the canvas — costs attention entries. This calculator computes
+      them live. Push the encoder from CLIP's 77 tokens to T5's 512 and watch the text side of the bill
+      multiply; push it to a long-context LLM encoder and watch the joint sequence dominate. Every number
+      is $\text{tokens}^2$ arithmetic you can check by hand.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Joint-attention token budget <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="controls" id="d-tok-ctrls">
+          <div class="radio-row" id="d-tok-res">
+            <span class="grp-label">resolution:</span>
+            <label><input type="radio" name="res" value="512"> 512²</label>
+            <label><input type="radio" name="res" value="1024" checked> 1024²</label>
+            <label><input type="radio" name="res" value="2048"> 2048²</label>
+          </div>
+          <div class="radio-row" id="d-tok-enc">
+            <span class="grp-label">text encoder:</span>
+            <label><input type="radio" name="enc" value="77" checked> CLIP (77)</label>
+            <label><input type="radio" name="enc" value="512"> T5-XXL (512)</label>
+            <label><input type="radio" name="enc" value="4096"> LLM long (4096)</label>
+          </div>
+        </div>
+        <div class="readout" id="d-tok-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ 2026 LANDSCAPE ============================ -->
+    <h2>The 2026 landscape</h2>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the 2026 backbone/params table (expected to age fast)</summary><div>
+      <p>A snapshot, cited verbatim from <code>constants.md</code> §9.6 <span class="xref">[VP]</span>,
+        flagged as the fastest-moving thing in this course:</p>
+      <table class="data">
+        <thead><tr><th>model</th><th>backbone / params</th><th>note</th></tr></thead>
+        <tbody>
+          <tr><td>SD1.5</td><td>U-Net, 860M</td><td>the teaching model</td></tr>
+          <tr><td>SDXL</td><td>U-Net, 2.6B</td><td>the last big U-Net</td></tr>
+          <tr><td>SD3.5-Large</td><td>MMDiT, 8B</td><td>the transition</td></tr>
+          <tr><td>FLUX.1-dev</td><td>MMDiT, 12B</td><td>T5-XXL 4.7B + CLIP-L</td></tr>
+          <tr><td>FLUX.2-dev</td><td>MMDiT, <b>32B</b></td><td>+ <b>Mistral-3 24B</b> VLM encoder</td></tr>
+          <tr><td>FLUX.2-klein-4B</td><td>MMDiT, 4B</td><td>Apache-2.0, ~13 GB, 4 steps @ <code>guidance_scale 1.0</code></td></tr>
+          <tr><td>Z-Image-Turbo</td><td>DiT, 6B</td><td>8 NFE, Apache-2.0, <b>#1 open-weights above FLUX.2-dev (32B)</b></td></tr>
+        </tbody>
+      </table>
+      <p>Four trends, and one deliberate contradiction. <strong>(1)</strong> Everything is a transformer.
+        <strong>(2)</strong> Everything is flow matching. <strong>(3)</strong> The text encoders became
+        LLMs — CLIP's 123M &rarr; T5's 4.7B &rarr; a 24B Mistral-3, <em>twice the size of the entire
+        FLUX.1 model, just to read the prompt</em> (page 61 cashes this out). <strong>(4)</strong>
+        <em>Small + distilled beats big</em>: a 6B Z-Image-Turbo tops a 32B FLUX.2-dev on the open-weights
+        arena. That last one is the <strong>opposite of the LLM track's still-scaling story</strong> — the
+        LLM side keeps winning by getting bigger; the diffusion side is winning by getting smaller and
+        distilled. The tracks genuinely diverge here (flagged deliberately). "Teach on SD1.5, work on
+        FLUX.1, flex on FLUX.2."</p>
+    </div></details>
+
+    <div class="box warn"><span class="box-title">⚠️ "Transformers won" has a scale asterisk</span>
+      At small scale — under ~1B params, 256² and below — a <strong>U-Net still wins</strong>. Its
+      convolutional hierarchy is a genuine prior that helps when you cannot afford the compute for a
+      transformer to learn spatial structure from scratch. That is exactly why page 58's from-scratch
+      MNIST artifact (<code>code/ddpm_mnist.py</code>) is a U-Net, not a DiT. The honest rule is not
+      "transformers won" but <strong>"the right architecture depends on scale"</strong> — which is the same
+      lesson the whole course keeps handing you.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-59"></div>
+
+    <p class="xref" style="margin-top:2em">← p.57 explained why plain <code>euler</code> suffices for FLUX
+      (the straightened path); p.58 gave the attention shapes joint attention reuses; p.55 posed the
+      DDIM-$\eta{=}0$ puzzle this page resolves. → p.60 does the latent-vs-pixel attention memory
+      arithmetic on these token counts; p.61 derives why FLUX's <code>guidance</code> $\ne$ real
+      <code>cfg</code> from guidance distillation; p.62 explains why distilled models are harder to
+      LoRA-train.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* =====================================================================
+     DEMO 1 — SAMPLER SHOOTOUT
+     A real probability-flow ODE on a closed-form 2-D mixture of 8 Gaussians.
+     Score / denoiser are exact (posterior mean over the mixture). Solver error
+     is measured as sliced-Wasserstein distance to a converged 256-step reference
+     solve (how EDM/k-diffusion sampler convergence is benchmarked). Five samplers,
+     each a faithful numerical scheme, plotted vs model calls (network evaluations).
+     ===================================================================== */
+  (function () {
+    const canvas = document.getElementById("d-shoot");
+    const out = document.getElementById("d-shoot-out");
+    const legendHost = document.getElementById("d-shoot-legend");
+    const slidersHost = document.getElementById("d-shoot-sliders");
+
+    // ---- the target: 8 isotropic Gaussians on a ring ----
+    const K = 8, R = 1.8, S0 = 0.10, S0V = S0 * S0;
+    const MU = [];
+    for (let k = 0; k < K; k++) { const a = 2 * Math.PI * k / K; MU.push([R * Math.cos(a), R * Math.sin(a)]); }
+
+    const SIG_MAX = 8, SIG_MIN = 0.03, RHO = 7, M = 420;
+
+    // denoiser D(x, sigma) = posterior mean = sum_k w_k mu_k, softmax over log N(x; mu_k, (S0^2+sig^2) I)
+    function denoise(px, py, sig) {
+      const varr = S0V + sig * sig, inv = 1 / (2 * varr);
+      let logmax = -Infinity;
+      const logs = new Array(K);
+      for (let k = 0; k < K; k++) {
+        const dx = px - MU[k][0], dy = py - MU[k][1];
+        const lp = -(dx * dx + dy * dy) * inv;          // shared 1/(2 var) drops out of the softmax
+        logs[k] = lp; if (lp > logmax) logmax = lp;
+      }
+      let Z = 0; for (let k = 0; k < K; k++) { logs[k] = Math.exp(logs[k] - logmax); Z += logs[k]; }
+      let mx = 0, my = 0;
+      for (let k = 0; k < K; k++) { const w = logs[k] / Z; mx += w * MU[k][0]; my += w * MU[k][1]; }
+      return [mx, my];
+    }
+
+    // Karras sigma grid of n steps: length n+1, ends at 0
+    function sigmas(n) {
+      const a = Math.pow(SIG_MAX, 1 / RHO), b = Math.pow(SIG_MIN, 1 / RHO), s = [];
+      for (let i = 0; i < n; i++) s.push(Math.pow(a + (i / (n - 1)) * (b - a), RHO));
+      s.push(0);
+      return s;                                          // n==1 handled by caller
+    }
+
+    // ---- reference = the CONVERGED ODE solution (a 256-step deterministic solve,
+    //      same seed / same particles). Sampler error is the distance to THIS, which
+    //      is how EDM / k-diffusion convergence is actually benchmarked. The payoff:
+    //      deterministic solvers drive to ~0 as steps grow (they approach the exact
+    //      trajectory), while ancestral samplers inject fresh noise every step and
+    //      never land on it -> a nonzero, noisy floor. Built after run() is defined. ----
+    let NREF = 0, REF = null;
+
+    // sliced Wasserstein-2 between two point sets (average 1-D W2 over projections)
+    const DIRS = 24, QN = 64;
+    const dirCos = [], dirSin = [];
+    (function () { const r = new NN.RNG(7); for (let d = 0; d < DIRS; d++) { const a = r.uniform(0, Math.PI); dirCos.push(Math.cos(a)); dirSin.push(Math.sin(a)); } })();
+    function quantiles(proj) {                            // proj: sorted Float64Array -> QN quantiles
+      const n = proj.length, q = new Float64Array(QN);
+      for (let j = 0; j < QN; j++) {
+        const pos = (j + 0.5) / QN * (n - 1), lo = pos | 0, fr = pos - lo;
+        q[j] = proj[lo] * (1 - fr) + proj[Math.min(n - 1, lo + 1)] * fr;
+      }
+      return q;
+    }
+    function slicedW2(pts) {                              // pts: Float64Array length 2M
+      const nA = pts.length / 2;
+      let acc = 0;
+      for (let d = 0; d < DIRS; d++) {
+        const c = dirCos[d], s = dirSin[d];
+        const pa = new Float64Array(nA); for (let i = 0; i < nA; i++) pa[i] = pts[i * 2] * c + pts[i * 2 + 1] * s;
+        const pb = new Float64Array(NREF); for (let i = 0; i < NREF; i++) pb[i] = REF[i * 2] * c + REF[i * 2 + 1] * s;
+        pa.sort(); pb.sort();
+        const qa = quantiles(pa), qb = quantiles(pb);
+        let e = 0; for (let j = 0; j < QN; j++) { const dd = qa[j] - qb[j]; e += dd * dd; }
+        acc += Math.sqrt(e / QN);
+      }
+      return Math.max(1e-4, acc / DIRS);   // epsilon floor so a converged (W2=0) curve stays finite on the log axis
+    }
+
+    // ancestral split (k-diffusion style): from sig_from -> sig_to, eta in [0,1]
+    function ancestralSplit(sf, st, eta) {
+      if (st <= 0) return { down: 0, up: 0 };
+      const up = Math.min(st, eta * Math.sqrt(st * st * (sf * sf - st * st) / (sf * sf)));
+      const down = Math.sqrt(Math.max(0, st * st - up * up));
+      return { down, up };
+    }
+
+    // Run one sampler at n steps. Returns final particle positions (Float64Array 2M).
+    // eta only used by ddim. Seeded so every (sampler,n,eta) is reproducible.
+    function run(sampler, n, eta) {
+      const sig = n === 1 ? [SIG_MAX, 0] : sigmas(n);
+      const rng = new NN.RNG(20260716);
+      const X = new Float64Array(M * 2);
+      for (let i = 0; i < M; i++) { X[i * 2] = rng.normal(0, SIG_MAX); X[i * 2 + 1] = rng.normal(0, SIG_MAX); }
+      let prevDx = null, prevDy = null;                  // for dpmpp_2m multistep reuse
+      for (let step = 0; step < sig.length - 1; step++) {
+        const s = sig[step], sn = sig[step + 1], h = sn - s;
+        for (let i = 0; i < M; i++) {
+          const px = X[i * 2], py = X[i * 2 + 1];
+          const D = denoise(px, py, s);
+          const dx = (px - D[0]) / s, dy = (py - D[1]) / s;     // dx/dsigma
+          if (sampler === "heun" && sn > 0) {
+            let xp = px + h * dx, yp = py + h * dy;             // Euler predictor
+            const D2 = denoise(xp, yp, sn);
+            const dx2 = (xp - D2[0]) / sn, dy2 = (yp - D2[1]) / sn;
+            X[i * 2] = px + h * 0.5 * (dx + dx2);               // trapezoid correction
+            X[i * 2 + 1] = py + h * 0.5 * (dy + dy2);
+          } else if (sampler === "dpmpp_2m" && prevDx !== null && sn > 0) {
+            X[i * 2] = px + h * (1.5 * dx - 0.5 * prevDx[i]);   // Adams-Bashforth reuse of prev output
+            X[i * 2 + 1] = py + h * (1.5 * dy - 0.5 * prevDy[i]);
+          } else if (sampler === "euler_a" || sampler === "ddim") {
+            const e = sampler === "euler_a" ? 1.0 : eta;
+            const sp = ancestralSplit(s, sn, e), hd = sp.down - s;
+            X[i * 2] = px + hd * dx + sp.up * rng.normal(0, 1);
+            X[i * 2 + 1] = py + hd * dy + sp.up * rng.normal(0, 1);
+          } else {                                             // euler (and dpmpp first step)
+            X[i * 2] = px + h * dx;
+            X[i * 2 + 1] = py + h * dy;
+          }
+        }
+        if (sampler === "dpmpp_2m") {                          // stash this step's derivative
+          if (!prevDx) { prevDx = new Float64Array(M); prevDy = new Float64Array(M); }
+          for (let i = 0; i < M; i++) {
+            const D = denoise(X[i * 2], X[i * 2 + 1], sn > 0 ? sn : s);
+            prevDx[i] = (X[i * 2] - D[0]) / (sn > 0 ? sn : s);
+            prevDy[i] = (X[i * 2 + 1] - D[1]) / (sn > 0 ? sn : s);
+          }
+        }
+      }
+      return X;
+    }
+    function modelCalls(sampler, n) { return sampler === "heun" ? Math.max(1, 2 * n - 1) : n; }
+
+    // now that run() exists, compute the converged reference (256-step deterministic solve)
+    REF = run("dpmpp_2m", 256, 0); NREF = REF.length / 2;
+
+    // fixed N grid for the reference curves
+    const NGRID = [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64];
+    const SAMPLERS = [
+      { key: "euler", label: "euler", c: () => cssVar("--accent", "#b48cff") },
+      { key: "euler_a", label: "euler_a", c: () => cssVar("--track-diffusion", "#ff9466") },
+      { key: "heun", label: "heun", c: () => cssVar("--accent2", "#54d6c4") },
+      { key: "dpmpp_2m", label: "dpmpp_2m", c: () => cssVar("--good", "#6ad48b") },
+      { key: "ddim", label: "ddim(eta)", c: () => "#e6b800" },
+    ];
+
+    // cache the 5 reference curves; only depends on eta (for ddim)
+    let curves = null, cachedEta = null;
+    function ensureCurves(eta) {
+      if (curves && cachedEta === eta) return;
+      curves = {};
+      for (const sp of SAMPLERS) {
+        const pts = [];
+        for (const n of NGRID) { const X = run(sp.key, n, eta); pts.push({ calls: modelCalls(sp.key, n), w2: slicedW2(X) }); }
+        curves[sp.key] = pts;
+      }
+      cachedEta = eta;
+    }
+
+    const stepsC = makeCtrl(slidersHost, { label: "steps N", min: 1, max: 64, step: 1, value: 16, fmt: v => v.toFixed(0) });
+    const etaC = makeCtrl(slidersHost, { label: "ddim eta", min: 0, max: 1, step: 0.05, value: 1, fmt: v => v.toFixed(2) });
+
+    legendHost.innerHTML = SAMPLERS.map(sp => `<span><span class="sw" style="background:${sp.c()}"></span><b>${sp.label}</b></span>`).join("");
+
+    function sel() { return document.querySelector('input[name="samp"]:checked').value; }
+
+    function draw() {
+      const eta = etaC.get();
+      ensureCurves(eta);
+      const selKey = sel();
+
+      // y-range from all curves
+      let w2min = Infinity, w2max = -Infinity;
+      for (const sp of SAMPLERS) for (const p of curves[sp.key]) { if (p.w2 < w2min) w2min = p.w2; if (p.w2 > w2max) w2max = p.w2; }
+      const ymin = Math.max(1e-4, w2min * 0.7), ymax = w2max * 1.4;
+
+      const p = new Plot(canvas, { xmin: 1, xmax: 130, ymin, ymax, xlog: true, ylog: true, xlabel: "model calls (network evaluations)", ylabel: "sliced W2 to converged solution" });
+      p.clear(); p.grid();
+      for (const sp of SAMPLERS) {
+        const cur = curves[sp.key];
+        p.trace(cur.map(q => q.calls), cur.map(q => q.w2), sp.c(), sp.key === selKey ? 3 : 1.4);
+      }
+
+      // the selected sampler, computed EXACTLY at the current integer N (marker)
+      const n = Math.round(stepsC.get());
+      const X = run(selKey, n, eta);
+      const w2 = slicedW2(X);
+      const calls = modelCalls(selKey, n);
+      const selColor = SAMPLERS.find(s => s.key === selKey).c();
+      p.label(calls, w2, "●", selColor);
+
+      legendHost.innerHTML = SAMPLERS.map(sp => `<span><span class="sw" style="background:${sp.c()}"></span><b>${sp.label}</b></span>`).join("");
+
+      const heun = curves["heun"], dpm = curves["dpmpp_2m"];
+      // ONLY eta === 0 is deterministic: ancestralSplit injects fresh noise for ANY eta > 0,
+      // so any nonzero eta plateaus on the same stochastic floor as euler_a. The DDIM->ODE
+      // crossing the page 55 puzzle resolves happens exactly at eta=0, not at a 0.5 boundary.
+      const ddimStochastic = selKey === "ddim" && eta > 0;
+      const conv = selKey === "euler_a" || ddimStochastic
+        ? `<span class="flag-bad">stochastic — fresh noise every step, so it never lands on the reference: a nonzero, noisy floor</span>`
+        : `<span class="flag-ok">deterministic — converges to the reference solution as N grows (W2 → 0)</span>`;
+      out.innerHTML = `<b>${selKey}</b>${selKey === "ddim" ? ` (eta=${eta.toFixed(2)})` : ""} at N=<b>${n}</b>: ` +
+        `<b>${calls}</b> model call${calls === 1 ? "" : "s"}, W2 = <b>${w2.toFixed(3)}</b>. ${conv}` +
+        `<br>free-lunch check at N=32: heun spends <b>${heun[9].calls}</b> calls for W2 ${heun[9].w2.toFixed(3)}; ` +
+        `dpmpp_2m spends <b>${dpm[9].calls}</b> calls for W2 ${dpm[9].w2.toFixed(3)} — same order, half the network.`;
+    }
+
+    document.querySelectorAll('input[name="samp"]').forEach(r => r.addEventListener("change", draw));
+    stepsC.onInput(draw);
+    etaC.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* =====================================================================
+     DEMO 2 — JOINT-ATTENTION TOKEN BUDGET
+     Pure tokens^2 arithmetic, computed live. FLUX f=8, 2x2 patchify:
+     latent tokens per side = H_px / 16; N = that squared.
+     ===================================================================== */
+  (function () {
+    const out = document.getElementById("d-tok-out");
+    const BYTES = 2;                                     // fp16 attention matrix, one head, one layer
+
+    function fmtBytes(entries) {
+      const b = entries * BYTES;
+      if (b >= 1e9) return (b / 1e9).toFixed(2) + " GB";
+      if (b >= 1e6) return (b / 1e6).toFixed(1) + " MB";
+      return (b / 1e3).toFixed(0) + " KB";
+    }
+    function res() { return parseInt(document.querySelector('input[name="res"]:checked').value, 10); }
+    function enc() { return parseInt(document.querySelector('input[name="enc"]:checked').value, 10); }
+
+    function draw() {
+      const Hpx = res(), Stxt = enc();
+      const side = Hpx / 16;                             // f=8 then 2x2 patchify
+      const N = side * side;                             // image tokens
+      const cross = N * Stxt;                            // cross-attention matrix entries (image queries, text keys)
+      const joint = (N + Stxt) * (N + Stxt);             // MMDiT joint self-attention entries
+      const selfImg = N * N;                             // image self-attention alone
+      const ratioJC = joint / cross;
+      const clipMult = Stxt / 77;                        // vs the CLIP baseline
+
+      out.innerHTML =
+        `at <b>${Hpx}²</b> with an encoder of <b>${Stxt}</b> tokens:` +
+        `<table class="data" style="margin-top:.5em"><tbody>` +
+        `<tr><td>image (latent) tokens N</td><td>${N.toLocaleString()}</td><td>(${side}×${side})</td></tr>` +
+        `<tr><td>cross-attention N×S<sub>txt</sub></td><td>${cross.toLocaleString()}</td><td>${fmtBytes(cross)}</td></tr>` +
+        `<tr><td>image self-attention N²</td><td>${selfImg.toLocaleString()}</td><td>${fmtBytes(selfImg)}</td></tr>` +
+        `<tr><td><b>MMDiT joint (N+S<sub>txt</sub>)²</b></td><td><b>${joint.toLocaleString()}</b></td><td><b>${fmtBytes(joint)}</b></td></tr>` +
+        `</tbody></table>` +
+        `joint vs cross: <b>${ratioJC.toFixed(1)}×</b> the entries · this encoder vs CLIP(77): ` +
+        `text side <b>${clipMult.toFixed(2)}×</b> larger.` +
+        (Stxt === 512 ? ` <span class="flag-bad">CLIP→T5 multiplies the text side 6.65×</span> — better binding, bigger bill.` : "") +
+        (Stxt === 4096 ? ` <span class="flag-bad">an LLM-length prompt makes text tokens rival the image (${(Stxt / N).toFixed(2)}× of N)</span> — page 61.` : "");
+    }
+
+    document.querySelectorAll('input[name="res"], input[name="enc"]').forEach(r => r.addEventListener("change", draw));
+    draw();
+  })();
+
+  /* =====================================================================
+     QUIZ
+     ===================================================================== */
+  renderQuiz("quiz-59", [
+    {
+      q: "<code>dpmpp_2m</code> reaches second-order accuracy. How many <b>model calls per step</b> does it spend?",
+      num: 1, tol: 0,
+      why: "It reuses the previous step's model output (an Adams–Bashforth multistep), so it pays only 1 network evaluation per step — the same as Euler — while <code>heun</code> pays 2 for the same order. That is why it is the free lunch."
+    },
+    {
+      q: "You run <code>euler_a</code> at 20 steps, then at 100 steps, same seed. You get:",
+      opts: [
+        "The same image, only sharper",
+        "A different image — ancestral samplers inject fresh noise each step and don't converge",
+        "Exactly half the noise, since 100 &gt; 20",
+        "An error — <code>euler_a</code> is fixed at 20 steps"
+      ],
+      a: 1,
+      why: "Ancestral ($\\_a$) samplers add fresh noise every step, so more steps means a different stochastic trajectory, not a refinement of the same one. 'More steps is always better/sharper' is the misconception; it only holds for deterministic samplers (euler, ddim η=0, dpmpp_2m)."
+    },
+    {
+      q: "Why can FLUX render legible text and bind attributes ('red cube on a blue sphere') when SD1.5 constantly swapped them?",
+      opts: [
+        "FLUX is simply a larger model",
+        "MMDiT's joint attention lets text tokens attend to image tokens too — the prompt adapts to the canvas",
+        "FLUX uses a higher CFG scale by default",
+        "FLUX's VAE has more channels"
+      ],
+      a: 1,
+      why: "Cross-attention (SD1.5) is one-directional: the text is encoded once and frozen. MMDiT concatenates text and image into one self-attended sequence, so the prompt's representation adapts to what is being drawn. It is a capability change, not just scale."
+    },
+    {
+      q: "In a KSampler, <code>denoise=0.6</code> means:",
+      opts: [
+        "Remove 60% of the noise from the output",
+        "Start from a 60%-noised input and skip the first 40% of the schedule",
+        "Use 60% of the model's weights",
+        "Set CFG to 6.0"
+      ],
+      a: 1,
+      why: "<code>denoise</code> picks where on the noise ladder you jump in: the input is noised to t = 0.6T and only the last 60% of the step grid runs. That is exactly why low <code>denoise</code> preserves the input image (img2img) — you start close to it."
+    },
+    {
+      q: "A guidance-distilled model (FLUX.1-dev) is run at <code>guidance_scale=1.0</code>. This value is:",
+      opts: [
+        "A neutral default you can freely raise like SD1.5's CFG",
+        "A constraint — real CFG largely does not work on a guidance-distilled model",
+        "The number of sampling steps",
+        "The VAE scaling factor"
+      ],
+      a: 1,
+      why: "Guidance distillation bakes the CFG behaviour into the weights, so a separate CFG extrapolation is not available (page 61). The '1.0' is not a default to raise — it is a constraint of the distilled model. You paid controllability for the low step count."
+    },
+    {
+      q: "FLUX.2-dev's <code>joint_attention_dim</code> (from your shipped <code>transformer/config.json</code>) is:",
+      num: 15360, tol: 0,
+      why: "15360 = 3 × 5120 [VP, constants §9.6 / hardware-ground-truth §4]. FLUX.2-dev is a 32B MMDiT with 48 heads × 128, 8 dual + 48 single blocks, in_channels 128 = 32×2²."
+    },
+    {
+      q: "At under ~1B params and 256² resolution, the better denoiser backbone is:",
+      opts: [
+        "Always a DiT — transformers won",
+        "A U-Net — its convolutional hierarchy is a useful prior when compute is scarce",
+        "Neither works below 1B",
+        "A cross-attention-only model"
+      ],
+      a: 1,
+      why: "DiT quality tracks GFLOPs, so it needs scale to beat the U-Net's built-in spatial prior. Below ~1B/256² the U-Net wins — which is why page 58's from-scratch MNIST demo is a U-Net. The rule is 'the right architecture depends on scale', not 'transformers won'."
+    }
+  ], "DiT, MMDiT & samplers — self-check");
+
+});
+</script>
+</body>
+</html>

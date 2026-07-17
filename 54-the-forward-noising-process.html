@@ -1,0 +1,720 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>54. The Forward Process: A Rotation — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: the thread tag + a compact circle canvas. The PREDICT prompt and
+     the Symbol Ledger now come from the shared .box.predict / table.ledger
+     components in course.css. Everything else here is page-specific. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .filmwrap { overflow-x: auto; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label, .selwrap .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .selwrap select { background: var(--bg-panel2); color: var(--text); border: 1px solid var(--border); border-radius: 5px; padding: 4px 8px; font-family: var(--mono); }
+</style>
+</head>
+<body data-page="54-the-forward-noising-process.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◆ · Trig Payoff #3</span>
+    <h1>The Forward Process: Noising Is a Rotation</h1>
+    <p class="subtitle">The whole forward chain is one rotation of a unit vector. The
+      noise schedule only sets how fast you sweep the angle — and that single picture
+      hands you $v$-prediction, the cosine schedule, and the terminal-SNR bug for free.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution rule: this PREDICT is answered below, in the sentence
+         right after the SNR table ("So the predict answer is..."). -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      At $t = 500$ of $1000$ on the linear DDPM schedule, how much of the picture is
+      left? Commit to a number for the <em>signal fraction</em> $\sqrt{\bar\alpha_{500}}$
+      before you scroll. If your instinct says "about half," hold that thought — then
+      check it against the SNR table and the noise-ladder demo below.
+    </div>
+
+    <!-- ============================ INTUITION ============================ -->
+    <h2>The chain that learns nothing</h2>
+
+    <p>Every image you have ever made in ComfyUI was trained against a process with
+      <strong>zero learnable parameters</strong>. The forward process — the thing that
+      turns a clean latent $\mathbf{x}_0$ into noise — is a fixed recipe. One Gaussian
+      step:</p>
+
+    <p>$$q(\mathbf{x}_t \mid \mathbf{x}_{t-1}) = \mathcal{N}\!\big(\mathbf{x}_t;\ \sqrt{1-\beta_t}\,\mathbf{x}_{t-1},\ \beta_t I\big)$$</p>
+
+    <table class="ledger">
+      <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+      <tr><td>$\mathbf{x}_t$</td><td>the latent noised to level $t$</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>the VAE encode of p.53</td></tr>
+      <tr><td>$\mathbf{x}_{t-1}$</td><td>the latent one notch cleaner</td><td>same</td><td>the previous step</td></tr>
+      <tr><td>$\beta_t$</td><td>noise variance added <em>at</em> step $t$ — a rate</td><td>scalar, $10^{-4}\!\to\!0.02$</td><td>the schedule, baked in the checkpoint</td></tr>
+      <tr><td>$\mathcal{N}(\cdot;\mu,\Sigma)$</td><td>a Gaussian with that mean and covariance</td><td>—</td><td>definition</td></tr>
+    </table>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "the forward process is part of the model, something the network learns"</span>
+      It is not. $q(\mathbf{x}_t\mid\mathbf{x}_{t-1})$ is a <strong>ruler</strong>, not a model
+      — you could have written it in 1950. Its entire job is to manufacture, for free and
+      in infinite supply, pairs of (noisy input $\mathbf{x}_t$, known answer
+      $\boldsymbol\epsilon$). That is the strategic core of the whole field:
+      <strong>diffusion turns unsupervised generative modelling into supervised
+      regression.</strong> The network you <em>do</em> train only ever solves a
+      least-squares problem — we build to exactly that on p.55.
+    </div>
+
+    <!-- ============================ VARIANCE PRESERVATION ============================ -->
+    <h2>Why the energy stays constant</h2>
+
+    <p>Look at what one step does to the variance. Take the variance of both sides of
+      $\mathbf{x}_t = \sqrt{1-\beta_t}\,\mathbf{x}_{t-1} + \sqrt{\beta_t}\,\boldsymbol\epsilon_t$
+      (the sample form of that Gaussian), with $\boldsymbol\epsilon_t$ independent of
+      $\mathbf{x}_{t-1}$:</p>
+
+    <p>$$\mathrm{Var}(\mathbf{x}_t) = (1-\beta_t)\,\mathrm{Var}(\mathbf{x}_{t-1}) + \beta_t.$$</p>
+
+    <p>If the input already has unit variance, $\mathrm{Var}(\mathbf{x}_{t-1}) = 1$, then
+      $\mathrm{Var}(\mathbf{x}_t) = (1-\beta_t) + \beta_t = 1$ — <strong>exactly</strong>.
+      The total energy never moves. That is what "variance-preserving" (VP) means: signal
+      is not turned <em>down</em> and noise turned <em>up</em> like a volume knob; signal
+      is <strong>rotated into noise at constant total energy</strong>. It is a crossfader,
+      not a fader. Hold that word "rotated" — it is about to become literal.</p>
+
+    <!-- ============================ THE ROTATION ============================ -->
+    <h2>★ The rotation — the trig payoff</h2>
+
+    <p>Applying that one step over and over collapses (next section) into a single jump
+      whose two coefficients are $\sqrt{\bar\alpha_t}$ on the signal and
+      $\sqrt{1-\bar\alpha_t}$ on the noise, where
+      $\bar\alpha_t \equiv \prod_{s\le t}\alpha_s$ and $\alpha_t \equiv 1-\beta_t$. Square
+      them and add:</p>
+
+    <p>$$\big(\sqrt{\bar\alpha_t}\big)^2 + \big(\sqrt{1-\bar\alpha_t}\big)^2 = \bar\alpha_t + (1-\bar\alpha_t) = 1.$$</p>
+
+    <div class="box key"><span class="box-title">🔑 The forward process is a rotation</span>
+      The point $\big(\sqrt{\bar\alpha_t},\ \sqrt{1-\bar\alpha_t}\big)$ traces the
+      <strong>unit circle</strong>. Define the rotation angle
+      $$\psi_t \equiv \arccos\sqrt{\bar\alpha_t},\qquad\text{so}\qquad
+        \mathbf{x}_t = \cos\psi_t\,\mathbf{x}_0 + \sin\psi_t\,\boldsymbol\epsilon.$$
+      At $t=0$: $\psi_0 = 0$, pure signal. At $t=T$: $\psi_T \to \tfrac{\pi}{2}$, pure
+      noise. <strong>The whole forward process is sweeping one angle from $0$ to
+      $90°$; the noise schedule is nothing but the <em>speed</em> of that sweep.</strong>
+      Two consequences fall out for free: $v$-prediction (p.55) is just "the velocity
+      around this circle," and the cosine schedule (below) is "sweep the angle at
+      constant rate."
+    </div>
+
+    <p class="thread"><b>Translation.</b> We write the rotation angle $\psi_t$ (notation
+      §4.4, frozen). Papers write it $\phi_t$, and many skip it and speak only of
+      $\alpha_t$ / $\bar\alpha_t$. Same angle, three names — <code>arccos √ᾱ_t</code>
+      always recovers it.</p>
+
+    <!-- ============================ EQ 3.3 ============================ -->
+    <h2>Equation 3.3 — the one line the whole track leans on</h2>
+
+    <p>The claim above was that 1000 tiny steps collapse into one jump. Here is why. Chain
+      two steps and use the merge rule for independent Gaussians:</p>
+
+    <div class="box rule"><span class="box-title">📐 Variances add — not standard deviations</span>
+      $$\mathcal{N}(0,\sigma_a^2 I) + \mathcal{N}(0,\sigma_b^2 I) = \mathcal{N}\!\big(0,\ (\sigma_a^2+\sigma_b^2)\,I\big).$$
+      When you sum two independent zero-mean Gaussians, their <strong>variances</strong>
+      add, so the resulting standard deviation is $\sqrt{\sigma_a^2+\sigma_b^2}$ — "in
+      quadrature," a straight Pythagoras. Numerically: $\sqrt{9}+\sqrt{16} = 3+4 = 7$, but
+      the combined std is $\sqrt{9+16} = \sqrt{25} = \mathbf{5}$. Std does <em>not</em> add;
+      variance does. This is the entire reason two noising steps merge into one.
+    </div>
+
+    <p>Folding step $t$ into step $t{-}1$: the surviving signal multiplies to
+      $\sqrt{\alpha_t}\sqrt{\alpha_{t-1}}$, and the two injected noises
+      $\sqrt{\alpha_t}\sqrt{1-\alpha_{t-1}}\,\boldsymbol\epsilon_{t-1}$ and
+      $\sqrt{1-\alpha_t}\,\boldsymbol\epsilon_t$ merge in quadrature. Induct all the way
+      down to $\mathbf{x}_0$ and the whole telescope collapses:</p>
+
+    <div class="box key"><span class="box-title">🔑 Eq. 3.3 — the one-shot reparameterization</span>
+      $$\boxed{\ \mathbf{x}_t = \sqrt{\bar\alpha_t}\,\mathbf{x}_0 + \sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon,\qquad \boldsymbol\epsilon \sim \mathcal{N}(0,I)\ }$$
+      <table class="ledger">
+        <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+        <tr><td>$\mathbf{x}_t$</td><td>the latent at any noise level $t$, drawn in one shot</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>what we sample</td></tr>
+        <tr><td>$\bar\alpha_t$</td><td>cumulative signal retention, $\prod_{s\le t}(1-\beta_s)$</td><td>scalar, $1\!\to\!4\times10^{-5}$</td><td>the running product of the schedule</td></tr>
+        <tr><td>$\mathbf{x}_0$</td><td>the clean latent</td><td>same as $\mathbf{x}_t$</td><td>the VAE encode (p.53)</td></tr>
+        <tr><td>$\boldsymbol\epsilon$</td><td>one fresh standard-normal draw</td><td>same as $\mathbf{x}_t$</td><td>$\mathcal{N}(0,I)$ — this <em>is</em> the training label</td></tr>
+      </table>
+    </div>
+
+    <div class="ribbon">x0            (C=32, H_lat=128, W_lat=128)      # a FLUX.2 latent, from p.53
+eps ~ N(0,I)  (32, 128, 128)                    # same shape, drawn fresh
+abar_t        scalar                            # one number, from the schedule
+x_t = sqrt(abar_t)*x0 + sqrt(1-abar_t)*eps      (32, 128, 128)   # elementwise, broadcast scalars</div>
+
+    <p>Three things you just bought. <strong>(1)</strong> Training is $O(1)$, not $O(T)$:
+      to get a training pair at level $t$ you do not simulate $t$ steps, you evaluate one
+      line. <strong>(2)</strong> $t$ is a free, uniform input — sample it
+      $t\sim\mathcal{U}\{1,\dots,T\}$ each minibatch. <strong>(3)</strong> One network
+      covers <em>all</em> noise levels, because every level is reachable from
+      $\mathbf{x}_0$ by the same formula.</p>
+
+    <p class="thread"><b>[THREAD: The chain rule · beat]</b> Same verb, new object. Eq. 3.3
+      is the function page 56 differentiates with respect to $\mathbf{x}_t$ to recover the
+      <em>score</em> $\nabla_{\mathbf{x}}\log p$ — the "intractable" object from p.53 turns
+      out to be $\epsilon_\theta$ rescaled. Keep this line; we reopen it there.</p>
+
+    <!-- ============================ SNR TABLE ============================ -->
+    <h2>Reading the schedule out loud</h2>
+
+    <div class="box worked"><span class="box-title">✍️ The $\bar\alpha$ / SNR table (linear DDPM, $\beta:10^{-4}\!\to\!0.02$, $T=1000$)</span>
+      Signal-to-noise ratio is $\mathrm{SNR}_t = \bar\alpha_t / (1-\bar\alpha_t)$.
+      Interior third-significant figures are schedule-dependent <span class="flag-ok" style="color:var(--text-dim)">[EST]</span>;
+      the endpoints are frozen <span class="flag-ok" style="color:var(--text-dim)">[DER, constants.md §9.6]</span>.
+      <table class="data" id="snr-table">
+        <thead><tr><th>$t$</th><th>$\sqrt{\bar\alpha_t}$ (signal)</th><th>$\sqrt{1-\bar\alpha_t}$ (noise)</th><th>$\mathrm{SNR}_t$</th></tr></thead>
+        <tbody>
+          <tr><td>0</td><td>1.000</td><td>0.000</td><td>$\infty$</td></tr>
+          <tr><td>100</td><td>0.947</td><td>0.321</td><td>8.71</td></tr>
+          <tr><td>250</td><td>0.724</td><td>0.690</td><td>1.10</td></tr>
+          <tr><td>500</td><td><b>0.280</b></td><td>0.960</td><td>0.0853</td></tr>
+          <tr><td>750</td><td>0.0579</td><td>0.998</td><td>$3.36\times10^{-3}$</td></tr>
+          <tr><td>1000</td><td><b>0.0063</b></td><td>1.000</td><td>$4.0\times10^{-5}$</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><strong>So the predict answer is $\sqrt{\bar\alpha_{500}} \approx 0.280$</strong> —
+      barely a quarter of the signal survives to the midpoint, far below "half." Now read
+      three facts straight off the table:</p>
+
+    <ol>
+      <li><strong>The last row is not zero.</strong> $\sqrt{\bar\alpha_{1000}} = 0.0063 \ne 0$
+        <span class="xref">[DER]</span>. A trace of $\mathbf{x}_0$ leaks all the way to
+        $t=T$, so at generation time the model is asked to start from "almost, but not
+        quite, pure noise." The practical fallout: SD1.5 and SDXL <strong>cannot render a
+        genuinely pure-black image</strong> — the residual signal pins the mean luminance
+        near the training-set average. This is the "zero-terminal-SNR" bug (Lin et al.,
+        2024); the <code>noise_offset</code> knob in your training configs is a hack that
+        papers over it.</li>
+      <li><strong>The linear schedule wastes its ends.</strong> Between $t=0$ and $t\approx100$
+        almost nothing has happened ($\sqrt{\bar\alpha}$ still $0.95$), and past $t\approx800$
+        it is already all noise. Roughly a quarter of the steps do nothing interesting —
+        which is precisely why the cosine schedule was invented.</li>
+      <li><strong>The interesting band is $t\in[300,700]$</strong>, where $\mathrm{SNR}\approx1$
+        and signal and noise are comparable. That is where <em>composition</em> is decided.
+        A model that never trains enough on this band learns texture and palette but not
+        structure.</li>
+    </ol>
+
+    <!-- ============================ SCHEDULE vs SCHEDULER ============================ -->
+    <div class="box warn"><span class="box-title">⚠️ The two objects your tooling confuses: the $\beta$ schedule vs the <code>scheduler</code> dropdown</span>
+      These share a name and are completely different animals.
+      <ul>
+        <li>The <strong>$\beta$ schedule</strong> (linear, scaled-linear, cosine) is
+          <strong>baked into the checkpoint at training time</strong>. It defines
+          $\bar\alpha_t$, hence Eq. 3.3, hence what "$t$" even means for this model. Change
+          it after the fact and the model is simply <em>wrong</em> — you are lying to it
+          about how noisy its input is.</li>
+        <li>ComfyUI's <strong><code>scheduler</code> dropdown</strong>
+          (<code>karras</code>, <code>normal</code>, <code>exponential</code>,
+          <code>sgm_uniform</code>, <code>beta</code>, <code>simple</code>) is an
+          <strong>inference-time</strong> choice: it picks <em>which</em> timesteps, out of
+          the $1000$, you actually stop at while sampling — the sampling grid. It never
+          touches the trained $\bar\alpha_t$.</li>
+      </ul>
+      Baked-in physics vs. a sightseeing itinerary over that physics. You almost certainly
+      have had these two conflated; almost everyone does.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the cosine schedule, and why 2048² sometimes grows a second head</summary><div>
+      <p>The cosine schedule (Nichol &amp; Dhariwal, 2021) defines the cumulative product
+        <em>directly</em> so the angle sweeps at a near-constant rate:
+        $\bar\alpha_t = \cos^2\!\big(\tfrac{t/T + s}{1+s}\cdot\tfrac{\pi}{2}\big)\big/\cos^2\!\big(\tfrac{s}{1+s}\cdot\tfrac{\pi}{2}\big)$,
+        with a small offset $s\approx0.008$. It spends far less budget at the dead ends and,
+        conveniently, drives $\bar\alpha_T$ genuinely to $0$ — no terminal-SNR leak.</p>
+      <p>The <strong>resolution-dependence</strong> bug: Eq. 3.3 adds one independent noise
+        sample <em>per pixel</em>. At high resolution there are vastly more pixels carrying
+        the same low-frequency content, so per-pixel noise averages out over any region and
+        the effective SNR at a fixed $t$ is <em>higher</em> than at low resolution. A schedule
+        tuned at 512² therefore under-noises 2048² images — the model still "sees" the global
+        composition at timesteps meant to have destroyed it, and can commit twice to the same
+        structure (the infamous extra head / duplicated subject). The fix is to shift the
+        schedule with resolution — exactly the <code>shift</code> parameter you will meet as
+        production code in your own FLUX scheduler on p.57. Drag the resolution toggle in the
+        noise-ladder demo to watch this happen live.</p>
+    </div></details>
+
+    <!-- ============================ DEMO 1 ============================ -->
+    <h2>Demo — the Schedule Explorer</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag $\beta_{\max}$ from $0.02$ down toward $0.008$ on the <em>linear</em> schedule
+      and watch $\bar\alpha_T$ leap off zero — the endpoint stops being noise, and the red
+      terminal-SNR flag lights. Then switch to <em>cosine</em> and watch the flag go green:
+      $\bar\alpha_T$ collapses to $0$ on its own. Everything here is the running product
+      $\bar\alpha_t = \bar\alpha_{t-1}(1-\beta_t)$, computed live.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Noise schedule · signal, noise &amp; SNR vs $t$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-amp" height="260"></canvas>
+        <canvas id="d-snr" height="200"></canvas>
+        <div class="controls" id="d-sched-ctrls">
+          <div class="radio-row" id="d-sched-kind">
+            <span class="grp-label">schedule:</span>
+            <label><input type="radio" name="sched" value="linear" checked> linear</label>
+            <label><input type="radio" name="sched" value="scaled"> scaled-linear</label>
+            <label><input type="radio" name="sched" value="cosine"> cosine</label>
+            <label><input type="radio" name="sched" value="flow"> flow-match + shift</label>
+          </div>
+          <div class="selwrap"><span class="grp-label">T:</span>
+            <select id="d-sched-T"><option>100</option><option>250</option><option>500</option><option selected>1000</option></select>
+          </div>
+        </div>
+        <div class="controls" id="d-sched-sliders"></div>
+        <div class="readout" id="d-sched-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 2 ============================ -->
+    <h2>Demo — the noise ladder on a real picture</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Eq. 3.3 applied per pixel, $t = 0,100,\dots,1000$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="filmwrap"><canvas id="d-film" height="150"></canvas></div>
+        <div class="radio-row" id="d-film-res" style="margin-top:12px">
+          <span class="grp-label">native resolution:</span>
+          <label><input type="radio" name="res" value="64"> 64²</label>
+          <label><input type="radio" name="res" value="256" checked> 256²</label>
+          <label><input type="radio" name="res" value="1024"> 1024²</label>
+          <button class="btn secondary" id="d-film-go" style="margin-left:10px">Re-noise</button>
+        </div>
+        <div class="readout" id="d-film-out"></div>
+      </div>
+    </div>
+
+    <p>Each tile is noised at the chosen <em>native</em> resolution, then every tile is
+      shrunk to the same display size — so your eye compares them fairly. Two things to
+      catch: at $t=500$ the subject is still plainly there (the predict payoff, $\sqrt{\bar\alpha}=0.28$
+      is enough to see), and at $t\approx800$ the $64^2$ tile is dead static while the
+      $1024^2$ tile still shows the shape. That gap <em>is</em> the resolution bug: more
+      pixels average the per-pixel noise away.</p>
+
+    <!-- ============================ DEMO 3 ============================ -->
+    <h2>Demo — "jump vs walk": Eq. 3.3, verified</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">500 tiny Markov steps vs one line of Eq. 3.3 <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="filmwrap"><canvas id="d-jw-img" height="150"></canvas></div>
+        <canvas id="d-jw-hist" height="220"></canvas>
+        <p style="margin:12px 0 0"><button class="btn" id="d-jw-go">Run both paths</button></p>
+        <div class="readout" id="d-jw-out"></div>
+      </div>
+    </div>
+
+    <p>Path A walks the full 1000→500 chain, drawing a fresh $\boldsymbol\epsilon_t$ at
+      every one of 500 steps. Path B evaluates Eq. 3.3 once. The two pictures are
+      <em>different</em> — different noise was drawn — but the pixel-value histograms lie on
+      top of each other and the printed means and stds agree to about three decimals. That
+      is what "one shot reaches the same distribution" means, made visible.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Run <code>code/diffusion_2d.py</code> — a from-scratch DDPM on 8 Gaussians, a 3-layer
+      MLP, no U-Net, ~200 lines. It implements Eq. 3.3, the $\mathcal{L}_{\text{simple}}$
+      loss you will derive on p.55, and an ancestral sampler by hand. The whole of the next
+      two pages, in one readable file you can step through on CPU in about 40 seconds.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-54"></div>
+
+    <p class="xref" style="margin-top:2em">← p.53 gave us the latent shapes these tensors
+      live in. → p.55 inverts this process (the reverse chain and the ELBO), p.56
+      differentiates Eq. 3.3 to get the score, and p.57 shows flow matching is the same
+      picture with a different route $(a_t,b_t)$ across the same circle.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- shared: build a schedule as (a_t signal coef, b_t noise coef) over t=0..T ----
+     VP schedules (linear/scaled/cosine): a=sqrt(abar), b=sqrt(1-abar), a^2+b^2=1.
+     Flow matching (rectified + shift): a=1-t', b=t', a+b=1 (a chord, not the circle). */
+  function buildSchedule(kind, T, bmin, bmax, sOff, shift) {
+    const ts = [], a = [], b = [], abar = [];
+    if (kind === "cosine") {
+      const f0 = Math.pow(Math.cos((sOff / (1 + sOff)) * Math.PI / 2), 2);
+      for (let t = 0; t <= T; t++) {
+        let ab = Math.pow(Math.cos(((t / T + sOff) / (1 + sOff)) * Math.PI / 2), 2) / f0;
+        ab = Math.min(1, Math.max(0, ab));
+        ts.push(t); abar.push(ab); a.push(Math.sqrt(ab)); b.push(Math.sqrt(1 - ab));
+      }
+    } else if (kind === "flow") {
+      for (let t = 0; t <= T; t++) {
+        const tau = t / T;
+        const tp = shift * tau / (1 + (shift - 1) * tau);  // resolution/shift warp
+        const av = 1 - tp, bv = tp;                        // rectified-flow chord
+        ts.push(t); a.push(av); b.push(bv); abar.push(av * av);
+      }
+    } else {
+      // linear or scaled-linear: build betas, then the RUNNING cumulative product
+      const betas = [];
+      for (let i = 0; i < T; i++) {
+        const f = T === 1 ? 0 : i / (T - 1);
+        if (kind === "scaled") { const s = Math.sqrt(bmin) + (Math.sqrt(bmax) - Math.sqrt(bmin)) * f; betas.push(s * s); }
+        else betas.push(bmin + (bmax - bmin) * f);
+      }
+      let ab = 1;
+      ts.push(0); abar.push(1); a.push(1); b.push(0);
+      for (let t = 1; t <= T; t++) {
+        ab *= (1 - betas[t - 1]);                          // alphabar[t] = alphabar[t-1]*(1-beta[t])
+        abar.push(ab); ts.push(t); a.push(Math.sqrt(ab)); b.push(Math.sqrt(Math.max(0, 1 - ab)));
+      }
+    }
+    return { ts, a, b, abar };
+  }
+
+  /* ---- DEMO 1: Schedule Explorer ---- */
+  (function () {
+    const ampCanvas = document.getElementById("d-amp");
+    const snrCanvas = document.getElementById("d-snr");
+    const out = document.getElementById("d-sched-out");
+    const slidersHost = document.getElementById("d-sched-sliders");
+
+    const bminC = makeCtrl(slidersHost, { label: "β_min", min: 1e-5, max: 1e-3, step: 1e-5, value: 1e-4, fmt: v => v.toExponential(1) });
+    const bmaxC = makeCtrl(slidersHost, { label: "β_max", min: 5e-3, max: 5e-2, step: 1e-3, value: 2e-2, fmt: v => v.toFixed(3) });
+    const sC    = makeCtrl(slidersHost, { label: "cosine offset s", min: 0, max: 0.05, step: 0.001, value: 0.008, fmt: v => v.toFixed(3) });
+    const shiftC= makeCtrl(slidersHost, { label: "flow shift", min: 0.5, max: 6, step: 0.1, value: 3.0, fmt: v => v.toFixed(1) });
+    const Tsel  = document.getElementById("d-sched-T");
+
+    function kind() { return document.querySelector('input[name="sched"]:checked').value; }
+    // Round-to-frozen: the frozen SNR table prints √ᾱ_1000 = 0.0063 (truncated to
+    // 4 d.p.). toFixed() rounds-to-nearest and prints 0.0064 for the true value
+    // (~0.0063528), which would read as a mismatch against the frozen table on
+    // the same page. Truncate instead of round for THIS display only — the
+    // underlying abarT/sqrt computation is untouched.
+    const truncFixed = (x, d) => { const f = Math.pow(10, d); return (Math.floor(x * f) / f).toFixed(d); };
+    const cSig = () => cssVar("--accent", "#b48cff");
+    const cNoise = () => cssVar("--track-diffusion", "#ff9466");
+    const cAbar = () => cssVar("--accent2", "#54d6c4");
+
+    function draw() {
+      const k = kind();
+      const T = parseInt(Tsel.value, 10);
+      const s = buildSchedule(k, T, bminC.get(), bmaxC.get(), sC.get(), shiftC.get());
+
+      // amplitude plot: abar, sqrt(abar), sqrt(1-abar) on [0,1.05]
+      const p = new Plot(ampCanvas, { xmin: 0, xmax: T, ymin: 0, ymax: 1.05, xlabel: "t", ylabel: "signal / noise coefficient" });
+      p.clear(); p.grid();
+      p.trace(s.ts, s.abar, cAbar(), 2);                 // ᾱ_t = signal power
+      p.trace(s.ts, s.a, cSig(), 2.5);                   // √ᾱ_t = signal coef
+      p.trace(s.ts, s.b, cNoise(), 2.5);                 // √(1-ᾱ_t) = noise coef
+      p.label(T * 0.04, 0.30, "ᾱ_t", cAbar());
+      p.label(T * 0.55, 0.86, "noise", cNoise());
+      p.label(T * 0.55, 0.30, "signal", cSig());
+
+      // SNR plot: log-y
+      const snr = s.ts.map((t, i) => (s.b[i] > 1e-9 ? (s.a[i] * s.a[i]) / (s.b[i] * s.b[i]) : NaN));
+      const finite = snr.filter(v => isFinite(v) && v > 0);
+      const ymin = Math.max(1e-6, Math.min(...finite, 1e-4)) / 2;
+      const ymax = Math.max(...finite, 1e2) * 2;
+      const ps = new Plot(snrCanvas, { xmin: 0, xmax: T, ymin, ymax, ylog: true, xlabel: "t", ylabel: "SNR = ᾱ/(1-ᾱ)" });
+      ps.clear(); ps.grid();
+      ps.hline(1, cssVar("--plot-tick", "#8391ab"), [4, 4]);
+      ps.trace(s.ts, snr, cSig(), 2.5);
+
+      // readout: ᾱ_T + terminal-SNR flag
+      const abarT = s.abar[s.abar.length - 1];
+      const flag = abarT > 1e-6
+        ? `<span class="flag-bad">⚑ nonzero terminal SNR — this model cannot make a pure-black image</span>`
+        : `<span class="flag-ok">✓ zero terminal SNR — endpoint is genuine noise</span>`;
+      out.innerHTML = `schedule <b>${k}</b>, T = <b>${T}</b> · ` +
+        `ᾱ_T = <b>${abarT.toExponential(2)}</b>, √ᾱ_T = <b>${truncFixed(Math.sqrt(abarT), 4)}</b> · ` +
+        `SNR at t=${Math.round(T / 2)}: <b>${(function(){const i=Math.round(T/2);return (s.b[i]>1e-9?((s.a[i]*s.a[i])/(s.b[i]*s.b[i])):Infinity).toPrecision(3);})()}</b><br>${flag}`;
+    }
+
+    document.querySelectorAll('input[name="sched"]').forEach(r => r.addEventListener("change", draw));
+    Tsel.addEventListener("change", draw);
+    [bminC, bmaxC, sC, shiftC].forEach(c => c.onInput(draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- shared: draw a synthetic recognizable scene into a canvas of size N ---- */
+  function paintScene(ctx, N) {
+    // sky gradient
+    const g = ctx.createLinearGradient(0, 0, 0, N);
+    g.addColorStop(0, "#2a5a9a"); g.addColorStop(1, "#bcd6f0");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, N, N);
+    // sun
+    ctx.fillStyle = "#ffd24a"; ctx.beginPath();
+    ctx.arc(N * 0.72, N * 0.28, N * 0.12, 0, 2 * Math.PI); ctx.fill();
+    // mountain
+    ctx.fillStyle = "#31543a"; ctx.beginPath();
+    ctx.moveTo(0, N); ctx.lineTo(N * 0.42, N * 0.40); ctx.lineTo(N * 0.85, N); ctx.closePath(); ctx.fill();
+    // second ridge
+    ctx.fillStyle = "#4a7a52"; ctx.beginPath();
+    ctx.moveTo(N * 0.45, N); ctx.lineTo(N * 0.78, N * 0.55); ctx.lineTo(N, N); ctx.closePath(); ctx.fill();
+  }
+
+  /* ---- DEMO 2: noise ladder filmstrip ---- */
+  (function () {
+    const film = document.getElementById("d-film");
+    const out = document.getElementById("d-film-out");
+    const goBtn = document.getElementById("d-film-go");
+    const TS = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900, 1000];
+    // fixed linear schedule (matches the SNR table / constants §9.6 endpoints)
+    const sched = buildSchedule("linear", 1000, 1e-4, 2e-2, 0.008, 3.0);
+    // truncate-not-round display helper (local to this IIFE; see DEMO 1 note)
+    const truncFixed = (x, d) => { const f = Math.pow(10, d); return (Math.floor(x * f) / f).toFixed(d); };
+
+    // offscreen scene canvas, reused
+    const scene = document.createElement("canvas");
+    const noisedTile = document.createElement("canvas");
+
+    function res() { return parseInt(document.querySelector('input[name="res"]:checked').value, 10); }
+
+    function render() {
+      const N = res();
+      out.textContent = `rendering ${N}² …`;
+      // let the "rendering" note paint before the heavy loop
+      setTimeout(() => {
+        const rng = new NN.RNG(20240716);           // seeded → reproducible
+        scene.width = N; scene.height = N;
+        const sctx = scene.getContext("2d");
+        paintScene(sctx, N);
+        const src = sctx.getImageData(0, 0, N, N).data;
+
+        // filmstrip geometry
+        const dpr = window.devicePixelRatio || 1;
+        const tile = 108, gap = 10, labelH = 22;
+        const W = TS.length * tile + (TS.length + 1) * gap;
+        const H = tile + labelH + gap;
+        film.width = Math.round(W * dpr); film.height = Math.round(H * dpr);
+        film.style.height = H + "px";
+        const fg = film.getContext("2d");
+        fg.setTransform(dpr, 0, 0, dpr, 0, 0);
+        fg.clearRect(0, 0, W, H);
+        fg.font = "11px " + cssVar("--mono", "monospace");
+        fg.fillStyle = cssVar("--text-dim", "#8391ab");
+        fg.textAlign = "center";
+
+        noisedTile.width = N; noisedTile.height = N;
+        const nctx = noisedTile.getContext("2d");
+        const img = nctx.createImageData(N, N);
+        const d = img.data;
+
+        TS.forEach((t, k) => {
+          const sa = sched.a[t], sb = sched.b[t];       // √ᾱ_t , √(1-ᾱ_t)
+          for (let p = 0; p < N * N; p++) {
+            for (let ch = 0; ch < 3; ch++) {
+              const x0 = (src[p * 4 + ch] / 127.5) - 1;  // [0,255] -> [-1,1]
+              const xt = sa * x0 + sb * rng.normal(0, 1);
+              d[p * 4 + ch] = Math.max(0, Math.min(255, Math.round((xt + 1) * 127.5)));
+            }
+            d[p * 4 + 3] = 255;
+          }
+          nctx.putImageData(img, 0, 0);
+          const x = gap + k * (tile + gap);
+          fg.imageSmoothingEnabled = true;
+          fg.drawImage(noisedTile, x, labelH, tile, tile);  // shrink native N² -> tile px
+          fg.strokeStyle = cssVar("--border", "#3b4a6b");
+          fg.strokeRect(x, labelH, tile, tile);
+          fg.fillStyle = cssVar("--text-dim", "#8391ab");
+          fg.fillText("t=" + t, x + tile / 2, 14);
+        });
+
+        out.innerHTML = `native <b>${N}²</b> · signal fraction √ᾱ: t=500 → <b>${sched.a[500].toFixed(3)}</b>, ` +
+          `t=800 → <b>${sched.a[800].toFixed(3)}</b>, t=1000 → <b>${truncFixed(sched.a[1000], 4)}</b>. ` +
+          `Same schedule at every resolution — only the pixel count changes.`;
+      }, 20);
+    }
+
+    goBtn.addEventListener("click", render);
+    document.querySelectorAll('input[name="res"]').forEach(r => r.addEventListener("change", render));
+    render();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(render, 0));
+  })();
+
+  /* ---- DEMO 3: jump vs walk ---- */
+  (function () {
+    const imgC = document.getElementById("d-jw-img");
+    const histC = document.getElementById("d-jw-hist");
+    const out = document.getElementById("d-jw-out");
+    const goBtn = document.getElementById("d-jw-go");
+    const N = 64, T0 = 1000, tTarget = 500;
+    const sched = buildSchedule("linear", 1000, 1e-4, 2e-2, 0.008, 3.0);
+    // per-step betas for the walk (same linear schedule)
+    const betas = [];
+    for (let i = 0; i < T0; i++) betas.push(1e-4 + (2e-2 - 1e-4) * i / (T0 - 1));
+
+    const scene = document.createElement("canvas");
+    const tile = document.createElement("canvas");
+
+    function grayscaleScene() {
+      scene.width = N; scene.height = N;
+      const sctx = scene.getContext("2d");
+      paintScene(sctx, N);
+      const src = sctx.getImageData(0, 0, N, N).data;
+      const x0 = new Float64Array(N * N);
+      for (let p = 0; p < N * N; p++) {
+        const lum = 0.299 * src[p * 4] + 0.587 * src[p * 4 + 1] + 0.114 * src[p * 4 + 2];
+        x0[p] = (lum / 127.5) - 1;                    // [-1,1]
+      }
+      return x0;
+    }
+
+    function stats(arr) {
+      let m = 0; for (const v of arr) m += v; m /= arr.length;
+      let s = 0; for (const v of arr) s += (v - m) * (v - m); s = Math.sqrt(s / arr.length);
+      return { m, s };
+    }
+    function histogram(arr, lo, hi, bins) {
+      const h = new Array(bins).fill(0), w = (hi - lo) / bins;
+      for (const v of arr) { let b = Math.floor((v - lo) / w); if (b < 0) b = 0; if (b >= bins) b = bins - 1; h[b]++; }
+      const xs = [], ys = [];
+      for (let i = 0; i < bins; i++) { xs.push(lo + (i + 0.5) * w); ys.push(h[i] / arr.length); }
+      return { xs, ys };
+    }
+    function drawTile(fg, x, y, side, arr, label) {
+      tile.width = N; tile.height = N;
+      const tctx = tile.getContext("2d");
+      const im = tctx.createImageData(N, N), d = im.data;
+      for (let p = 0; p < N * N; p++) {
+        const g = Math.max(0, Math.min(255, Math.round((arr[p] + 1) * 127.5)));
+        d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = g; d[p * 4 + 3] = 255;
+      }
+      tctx.putImageData(im, 0, 0);
+      fg.imageSmoothingEnabled = false;
+      fg.drawImage(tile, x, y, side, side);
+      fg.strokeStyle = cssVar("--border", "#3b4a6b"); fg.strokeRect(x, y, side, side);
+      fg.fillStyle = cssVar("--text-dim", "#8391ab"); fg.font = "12px system-ui"; fg.textAlign = "left";
+      fg.fillText(label, x, y - 6);
+    }
+
+    function run() {
+      const x0 = grayscaleScene();
+      const rng = new NN.RNG(999);
+
+      // Path A: 500-step walk, fresh eps each step
+      const xa = Float64Array.from(x0);
+      for (let t = 1; t <= tTarget; t++) {
+        const bt = betas[t - 1], keep = Math.sqrt(1 - bt), add = Math.sqrt(bt);
+        for (let p = 0; p < N * N; p++) xa[p] = keep * xa[p] + add * rng.normal(0, 1);
+      }
+      // Path B: one shot, Eq. 3.3
+      const sa = sched.a[tTarget], sb = sched.b[tTarget];
+      const xb = new Float64Array(N * N);
+      for (let p = 0; p < N * N; p++) xb[p] = sa * x0[p] + sb * rng.normal(0, 1);
+
+      // tiles
+      const dpr = window.devicePixelRatio || 1;
+      const side = 130, gap = 26, H = side + 24, W = side * 2 + gap * 3;
+      imgC.width = Math.round(W * dpr); imgC.height = Math.round(H * dpr); imgC.style.height = H + "px";
+      const fg = imgC.getContext("2d"); fg.setTransform(dpr, 0, 0, dpr, 0, 0); fg.clearRect(0, 0, W, H);
+      drawTile(fg, gap, 20, side, xa, "Path A: 500-step walk");
+      drawTile(fg, gap * 2 + side, 20, side, xb, "Path B: Eq. 3.3, one shot");
+
+      // histograms
+      const sA = stats(xa), sB = stats(xb);
+      const hA = histogram(xa, -3, 3, 48), hB = histogram(xb, -3, 3, 48);
+      const ymax = Math.max(...hA.ys, ...hB.ys) * 1.15;
+      const p = new Plot(histC, { xmin: -3, xmax: 3, ymin: 0, ymax, xlabel: "pixel value", ylabel: "fraction" });
+      p.clear(); p.grid();
+      p.trace(hA.xs, hA.ys, cssVar("--accent", "#b48cff"), 2.5);
+      p.trace(hB.xs, hB.ys, cssVar("--track-diffusion", "#ff9466"), 2.5);
+      p.label(-2.8, ymax * 0.92, "Path A (walk)", cssVar("--accent", "#b48cff"));
+      p.label(-2.8, ymax * 0.82, "Path B (jump)", cssVar("--track-diffusion", "#ff9466"));
+
+      out.innerHTML = `t = ${tTarget}, √ᾱ = <b>${sa.toFixed(3)}</b> · ` +
+        `Path A: mean <b>${sA.m.toFixed(3)}</b>, std <b>${sA.s.toFixed(3)}</b> · ` +
+        `Path B: mean <b>${sB.m.toFixed(3)}</b>, std <b>${sB.s.toFixed(3)}</b> — ` +
+        `different pictures, statistically identical.`;
+    }
+
+    goBtn.addEventListener("click", run);
+    run();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(run, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-54", [
+    {
+      q: "On the linear DDPM schedule ($\\beta:10^{-4}\\!\\to\\!0.02$, $T=1000$), the signal fraction $\\sqrt{\\bar\\alpha_{500}}$ is closest to:",
+      num: 0.280, tol: 0.03,
+      why: "The running product $\\bar\\alpha_{500}\\approx0.0786$, so $\\sqrt{\\bar\\alpha_{500}}\\approx0.280$ — barely a quarter of the signal survives to the midpoint, far below 'half'. (The demo and SNR table both compute this live.)"
+    },
+    {
+      q: "What does ComfyUI's <code>scheduler</code> dropdown (karras / normal / sgm_uniform …) actually set?",
+      opts: [
+        "The $\\beta$ noise schedule baked into the checkpoint",
+        "The sampling timestep grid — which of the 1000 steps you stop at",
+        "The number of learnable parameters in the forward process",
+        "The guidance scale $w_g$"
+      ],
+      a: 1,
+      why: "It is an inference-time choice of which timesteps to visit. The $\\beta$ schedule is baked in at training time and defines $\\bar\\alpha_t$ — changing it would make the model wrong. Conflating the two is the named trap."
+    },
+    {
+      q: "How many parameters does the forward noising process learn?",
+      opts: ["About 84 million (the VAE)", "One per timestep ($T=1000$)", "Zero — it is a fixed ruler", "The same as the denoiser"],
+      a: 2,
+      why: "$q(\\mathbf{x}_t\\mid\\mathbf{x}_{t-1})$ has no learnable parameters. It exists only to manufacture (noisy input, known-noise) training pairs — turning generative modelling into supervised regression."
+    },
+    {
+      q: "Two independent zero-mean Gaussian noises with standard deviations 3 and 4 are added. The standard deviation of the sum is:",
+      num: 5, tol: 0.1,
+      why: "Variances add, not stds: $\\sqrt{3^2+4^2}=\\sqrt{25}=5$. (Adding stds would give the wrong 7.) This quadrature rule is exactly why two noising steps merge into one — Eq. 3.3."
+    },
+    {
+      q: "Why can SD1.5 / SDXL not render a genuinely pure-black image?",
+      opts: [
+        "The VAE clips dark values",
+        "Nonzero terminal SNR: $\\sqrt{\\bar\\alpha_{1000}}=0.0063\\ne0$, so a trace of $\\mathbf{x}_0$ leaks to $t=T$",
+        "CFG always brightens the output",
+        "Black is out of the training distribution"
+      ],
+      a: 1,
+      why: "$\\sqrt{\\bar\\alpha_T}=0.0063$ [DER, constants §9.6] means the endpoint is not pure noise; the residual signal pins the mean luminance near the training-set average. <code>noise_offset</code> is a hack for exactly this."
+    },
+    {
+      q: "At $t=500$, the picture in the noise-ladder demo is:",
+      opts: ["Pure static, unrecognizable", "Still clearly visible", "Exactly half-noise, half-signal to the eye", "Pure black"],
+      a: 1,
+      why: "With $\\sqrt{\\bar\\alpha_{500}}=0.28$ the subject is plainly visible even though signal is well under half. 'Half the timesteps means half the noise to the eye' is the linear-perception misconception — perception of noise is nowhere near linear in $t$."
+    },
+    {
+      q: "The <code>noise_offset</code> parameter in your training config is:",
+      opts: [
+        "A learning-rate warmup trick",
+        "A hack that works around the nonzero-terminal-SNR bug",
+        "The CFG scale under another name",
+        "A VAE normalization constant"
+      ],
+      a: 1,
+      why: "Because $\\bar\\alpha_T\\ne0$ the model never trains on truly zero-signal inputs; <code>noise_offset</code> perturbs the mean so it can learn to produce very dark/bright images. The principled fix is a zero-terminal-SNR schedule (Lin 2024)."
+    }
+  ], "Forward process — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,433 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>21. LR Schedules & Warmup — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: two side-by-side canvases collapse to one column on phones,
+   same pattern as page 17's race-grid. */
+@media (max-width: 900px) {
+  .sched-grid { grid-template-columns: 1fr !important; }
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+.overlay-toggle { display:flex; align-items:center; gap:8px; margin:10px 0 2px; font-size:.94em; }
+.overlay-toggle input { width:16px; height:16px; }
+</style>
+</head>
+<body data-page="21-lr-schedules-warmup.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Learning-Rate Schedules and Why Warmup Exists</h1>
+    <p class="subtitle">On page 17 you computed that Adam's second-moment estimate $\hat v$ is off by a factor of
+      $1000$ at the very first step. That single fact is the entire mechanistic reason a training run doesn't just
+      turn $\eta$ on at full strength — and it tells you exactly how long to wait.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread — reopened</span>
+      <b>[THREAD:MEM]</b> Page 18 gave Adam's $m,v$ a real memory cost: two extra copies of every trainable
+      parameter. The schedule you build here costs <b>nothing</b> — $\eta_k$ is a pure function of the step
+      counter $k$, not a learned or stored quantity. It's free to compute and free to keep; the only thing it
+      "remembers" is which step you're on.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You computed on page 17 that Adam's second-moment estimate $\hat v$ is garbage — off by roughly
+      $1000\times$ — for about the first $1000$ steps. Given that, what should the learning rate <em>do</em> for
+      those first ~1000 steps of training? Write down a shape (not a number) before you scroll.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>Big steps to the neighbourhood, small steps to find the house</h2>
+    <p>A learning-rate schedule is annealing, in the metallurgical sense the word borrows from: start hot, so the
+      optimizer can move fast and cover ground, then cool it, so the last stretch is a controlled search rather
+      than an overshoot. Two separate jobs, two separate phases. <b>Warmup</b> is a third phase bolted onto the
+      front for a reason that has nothing to do with "finding the neighbourhood" — it exists to protect Adam's
+      own bookkeeping while it fills up.</p>
+
+    <!-- ===================== THE SCHEDULE ===================== -->
+    <h2>The standard 2026 schedule: linear warmup, cosine decay</h2>
+    <div class="box rule"><span class="box-title">📐 Warmup-cosine, indexed by step $k$</span>
+      $$\eta_k = \begin{cases} \eta_{\max}\cdot\dfrac{k}{T_{\text{warm}}} & k \le T_{\text{warm}} \\[6pt]
+        \eta_{\min} + \dfrac{1}{2}(\eta_{\max}-\eta_{\min})\Big(1+\cos\Big(\pi\,\dfrac{k-T_{\text{warm}}}{T_{\text{total}}-T_{\text{warm}}}\Big)\Big) & k > T_{\text{warm}} \end{cases}$$
+      Two phases, one formula. Linear ramp from $0$ to $\eta_{\max}$ over the first $T_{\text{warm}}$ steps; then
+      a half-cosine glide from $\eta_{\max}$ down to $\eta_{\min}$ over the rest of the run. Typical values
+      (<code>constants.md</code> §9.4, [VP]): $T_{\text{warm}} = $ 1–10% of total steps (or a flat $2000$),
+      $\eta_{\min} = \eta_{\max}/10$.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\eta_k$</td><td>the learning rate actually used at step $k$</td><td>scalar</td><td>computed here — this is what the optimizer reads</td></tr>
+        <tr><td>$k$</td><td>optimizer step</td><td>integer, $0..T_{\text{total}}$</td><td>page 17 — <b>not</b> epoch (page 16)</td></tr>
+        <tr><td>$\eta_{\max}$</td><td>peak learning rate, reached at $k=T_{\text{warm}}$</td><td>scalar</td><td>hyperparameter</td></tr>
+        <tr><td>$\eta_{\min}$</td><td>floor learning rate at the end of the run</td><td>scalar, typically $\eta_{\max}/10$</td><td>hyperparameter</td></tr>
+        <tr><td>$T_{\text{warm}}$</td><td>number of warmup steps</td><td>integer</td><td>hyperparameter — 1–10% of $T_{\text{total}}$</td></tr>
+        <tr><td>$T_{\text{total}}$</td><td>total planned optimizer steps</td><td>integer</td><td>hyperparameter — set from dataset size / batch size / epochs</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ===================== WHY WARMUP ===================== -->
+    <h2>Why warmup exists — three reasons, in order of how much they matter</h2>
+    <p><b>Reason 1 — the one that matters most.</b> Adam's second moment $\hat v_k$ is a running average of
+      squared gradients. At $k=1$ it has seen exactly one gradient, so its <em>variance</em> is enormous even
+      after bias correction fixes its <em>mean</em> (RAdam's whole thesis). Dividing by a wildly noisy
+      $\sqrt{\hat v_k}$ turns an ordinary gradient into an update of unpredictable size — sometimes far too big.
+      <b>This resolves the predict above: the learning rate should ramp up from ~0</b>, so that while $\hat v_k$
+      is still unreliable, no single step is large enough to do damage. By the time $k \approx T_{\text{warm}}$,
+      $\hat v_k$ has had enough gradients to become a trustworthy estimate, and $\eta$ has reached its full value
+      to match.</p>
+    <p><b>Reason 2 — the most memorable, because you computed it yourself.</b> A single bad early gradient (a
+      rare-token spike, a bad init draw) enters $v_k$ and, at the classic $\beta_2=0.999$, takes
+      $1/(1-0.999)=\mathbf{1000}$ steps (<code>constants.md</code> §9.3, [DER] — the exact number from page 17)
+      to decay back out. One unlucky step can poison the optimizer's memory for the next thousand. Ramping $\eta$
+      up slowly gives that one early gradient less leverage before it ever enters $v$.</p>
+    <p><b>Reason 3.</b> LayerNorm combined with a large batch produces its own early instability — the loss
+      landscape right at initialization is unusually steep before the norm layers' statistics settle. Pre-norm
+      placement (page 20) reduces this but does not remove it; warmup is still cheap insurance.</p>
+
+    <h2>Decay to $\eta_{\max}/10$, not to zero</h2>
+    <p>The cosine half-cycle above never reaches $0$ by design — it bottoms out at $\eta_{\min}=\eta_{\max}/10$
+      (sometimes $/20$). A true decay-to-zero schedule means zero learning for the entire tail of the run: whatever
+      fraction of the data is scheduled last gets no update at all. Leaving a floor keeps the optimizer doing real,
+      if gentle, work all the way to the final step.</p>
+
+    <div class="box key"><span class="box-title">🔑 The honest state of 2026</span>
+      Warmup is a <b>patch</b>, not a law of nature. RAdam rescales the update analytically to remove the need for
+      it; T-Fixup and GradInit choose initializations specifically so early training is already stable; some recipes
+      skip warmup entirely with those techniques. <b>None of that is why you'll still see
+      <code>warmup_steps</code> in every training config you open.</b> Plain linear warmup costs two extra
+      hyperparameters and zero extra compute, it composes with anything, and it has worked for years across every
+      architecture people have thrown at it. The field kept the cheap patch instead of adopting the more elegant
+      fix — a genuinely useful thing to know about how ML practice actually works, as opposed to how a textbook
+      might wish it worked.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Five ways to misread this</h2>
+
+    <div class="box warn"><span class="box-title">⚠️ "Warmup is because the model is fragile at the start."</span>
+      Too vague to be useful, and it points at the wrong culprit. The precise mechanism is
+      <b>Adam's second-moment estimate</b>, not the model's weights — a plain SGD run needs warmup far less,
+      because SGD has no $\hat v$ to be unreliable about.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Warmup and warm restarts are the same thing."</span>
+      Unrelated, despite the shared word. Warmup is a one-time ramp at the very start of training. Warm restarts
+      (SGDR) periodically re-raise $\eta$ back up <em>during</em> training, on a repeating cycle. Different
+      problems, different mechanisms.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Schedule by epoch."</span>
+      By <b>step $k$</b>, always. Many LLM fine-tunes never even complete one epoch (page 16), so an
+      epoch-indexed schedule can end up doing nothing at all, or firing at the wrong point in training — a
+      real, common bug.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Decay all the way to zero."</span>
+      Decay to $\eta_{\max}/10$–$/20$. Zero means zero learning for the whole tail of the schedule, which is a
+      worse outcome than a small but nonzero step.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Adam is adaptive, so it doesn't need a schedule."</span>
+      Adam's adaptivity rescales the <em>direction</em> per parameter ($\hat m/\sqrt{\hat v}$, page 17); it never
+      touches the scalar $\eta$ out front. That $\eta$ still needs exactly the shape this page derives.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: shape the schedule, then watch it train</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Leave the defaults and watch the right panel: the <b>realized</b> parameter update size $\|\Delta\theta_k\|$,
+      measured directly from a real training run (not a formula plotted on faith). Drag $T_{\text{warm}}$ down to
+      $0$ — the very first step already jumps to nearly its full eventual size. Bring $T_{\text{warm}}$ back up
+      to a few hundred steps and the same plateau is reached gradually instead, ramping with $\eta_k$. That
+      jump-vs-ramp difference, measured, <b>is</b> what warmup buys you — whether it also shows up as a visible
+      loss spike depends on the model and data (real transformers show it more dramatically than this small
+      demo net does).
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Schedule shaper <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="sched-grid">
+          <div><canvas id="d-sched" height="280"></canvas></div>
+          <div><canvas id="d-loss" height="280"></canvas></div>
+        </div>
+        <div class="controls" id="d-sched-ctrls"></div>
+        <label class="overlay-toggle"><input type="checkbox" id="d-overlay-toggle" checked>
+          measure the realized update size under a real training run stepped through this schedule (MLP[2,8,1],
+          Adam $\beta_2=0.999$ — the classic setting, the one where warmup matters most)</label>
+        <div class="readout" id="d-sched-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      <b><code>code/21_schedule.py</code></b> implements this exact warmup-cosine schedule as a
+      <code>torch.optim.lr_scheduler.LambdaLR</code>, plots $\eta_k$, and plots it against the step index
+      specifically to expose the classic "scheduled by epoch, not step" off-by-one — the bug page 24's
+      instrumentation panel checks for on your own fine-tuning run.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">warmup_cosine</span>(k, T_warm, T_total, eta_min_ratio=<span class="tok-num">0.1</span>):</span>
+<span class="line">    <span class="tok-com"># k is the OPTIMIZER STEP, not the epoch — the bug this function exists to prevent.</span></span>
+<span class="line">    <span class="tok-kw">if</span> k <= T_warm:</span>
+<span class="line">        <span class="tok-kw">return</span> k / <span class="tok-fn">max</span>(T_warm, <span class="tok-num">1</span>)</span>
+<span class="line">    progress = (k - T_warm) / <span class="tok-fn">max</span>(T_total - T_warm, <span class="tok-num">1</span>)</span>
+<span class="line">    cosine = <span class="tok-num">0.5</span> * (<span class="tok-num">1</span> + torch.cos(torch.tensor(torch.pi * progress)))</span>
+<span class="line">    <span class="tok-kw">return</span> eta_min_ratio + (<span class="tok-num">1</span> - eta_min_ratio) * cosine.item()</span>
+<span class="line"></span>
+<span class="line">model = torch.nn.<span class="tok-fn">Sequential</span>(torch.nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">8</span>), torch.nn.<span class="tok-fn">Tanh</span>(), torch.nn.<span class="tok-fn">Linear</span>(<span class="tok-num">8</span>, <span class="tok-num">1</span>))</span>
+<span class="line">opt = torch.optim.<span class="tok-fn">AdamW</span>(model.<span class="tok-fn">parameters</span>(), lr=<span class="tok-num">2e-4</span>, betas=(<span class="tok-num">0.9</span>, <span class="tok-num">0.95</span>))</span>
+<span class="line hl">scheduler = torch.optim.lr_scheduler.<span class="tok-fn">LambdaLR</span>(</span>
+<span class="line">    opt, lr_lambda=<span class="tok-kw">lambda</span> k: <span class="tok-fn">warmup_cosine</span>(k, T_warm=<span class="tok-num">2000</span>, T_total=<span class="tok-num">100000</span>))</span>
+<span class="line"></span>
+<span class="line">x = torch.<span class="tok-fn">randn</span>(<span class="tok-num">32</span>, <span class="tok-num">2</span>); y = torch.<span class="tok-fn">randn</span>(<span class="tok-num">32</span>, <span class="tok-num">1</span>)</span>
+<span class="line"><span class="tok-kw">for</span> k <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">100000</span>):    <span class="tok-com"># k, not epoch — call scheduler.step() every OPTIMIZER step</span></span>
+<span class="line">    loss = torch.nn.functional.<span class="tok-fn">mse_loss</span>(model(x), y)</span>
+<span class="line">    loss.<span class="tok-fn">backward</span>()</span>
+<span class="line">    opt.<span class="tok-fn">step</span>(); scheduler.<span class="tok-fn">step</span>(); opt.<span class="tok-fn">zero_grad</span>()</span></code></pre>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why $T_{\text{warm}}$ is usually 1–10% of $T_{\text{total}}$, not a fixed count</summary><div>
+      <p>The 1000-step figure from page 17 is about $\beta_2$'s memory, not about how long training is. A run of
+        $5{,}000$ total steps and a run of $500{,}000$ total steps both need $\hat v$ to fill before trusting
+        $\eta_{\max}$ — but spending $1000$ steps on warmup is $20\%$ of the short run and $0.2\%$ of the long
+        one. Practice compromises: use a percentage (so warmup scales with the run) with a floor around the
+        $1000$-ish mark the Adam memory sets, and a common flat default of $2000$ steps when in doubt
+        (<code>constants.md</code> §9.4).</p>
+    </div></details>
+
+    <p><b>Where this connects.</b> ← Page 17 (Adam's $1000$-step $\hat v$ memory — the mechanism this page turns
+      into a policy), page 16 (step vs. epoch — the index this schedule insists on), page 20 (pre-norm reduces,
+      but does not remove, warmup's necessity). → Page 24 reads the <em>actual</em> LR curve off a real fine-tune
+      and catches the silent by-epoch scheduler bug live.</p>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz21"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---------------- DEMO: schedule shaper + real training overlay ---------------- */
+  (function () {
+    const schedCanvas = document.getElementById("d-sched");
+    const lossCanvas = document.getElementById("d-loss");
+    const ctrlsEl = document.getElementById("d-sched-ctrls");
+    const overlayToggle = document.getElementById("d-overlay-toggle");
+    const out = document.getElementById("d-sched-out");
+    const accent = () => cssVar("--accent", "#b48cff");
+    const accent2 = () => cssVar("--accent2", "#4fd1c5");
+    const warnC = () => cssVar("--warn", "#f0a848");
+    const dimC = () => cssVar("--text-dim", "#8391ab");
+    const badC = () => cssVar("--bad", "#ff6b6b");
+
+    // η_max is a log-scale slider: the control carries the base-10 exponent,
+    // η_max = 10**value (same pattern as page 4's LR slider).
+    const etaMaxC = makeCtrl(ctrlsEl,
+      { label: "η_max (log scale)", min: -5, max: -2, step: 0.05, value: -2.5,
+        fmt: v => Math.pow(10, v).toExponential(1) });
+    const twarmC = makeCtrl(ctrlsEl,
+      { label: "T_warm (warmup steps)", min: 0, max: 3000, step: 25, value: 150,
+        fmt: v => v.toFixed(0) });
+    const ttotalC = makeCtrl(ctrlsEl,
+      { label: "T_total (total steps)", min: 5000, max: 100000, step: 1000, value: 20000,
+        fmt: v => Math.round(v).toLocaleString() });
+    const ratioC = makeCtrl(ctrlsEl,
+      { label: "η_min / η_max", min: 0, max: 0.5, step: 0.01, value: 0.1,
+        fmt: v => v.toFixed(2) });
+
+    // THE SCHEDULE — the exact piecewise function from the .box rule above.
+    // Real math: no lookup table, computed fresh for every k requested.
+    function etaAt(k, etaMax, Twarm, Ttotal, etaMin) {
+      if (Twarm > 0 && k <= Twarm) return etaMax * (k / Twarm);
+      const span = Math.max(Ttotal - Twarm, 1);
+      const frac = Math.min(Math.max((k - Twarm) / span, 0), 1);
+      return etaMin + 0.5 * (etaMax - etaMin) * (1 + Math.cos(Math.PI * frac));
+    }
+
+    const TRAIN_STEPS = 350;   // fixed, small budget so the overlay trains in one frame
+    const DATA = NN.makeDataset("moons", 40, { noise: 0.18, rng: new NN.RNG(7) });
+
+    function drawSchedule() {
+      const etaMax = Math.pow(10, etaMaxC.get());
+      const Twarm = twarmC.get();
+      const Ttotal = ttotalC.get();
+      const ratio = ratioC.get();
+      const etaMin = etaMax * ratio;
+
+      const p = new Plot(schedCanvas, {
+        xmin: 0, xmax: Ttotal, ymin: 0, ymax: etaMax * 1.08,
+        xlabel: "optimizer step k", ylabel: "η_k",
+      });
+      p.clear(); p.grid();
+      const xs = [], ys = [];
+      const N = 400;
+      for (let i = 0; i <= N; i++) { const k = Ttotal * i / N; xs.push(k); ys.push(etaAt(k, etaMax, Twarm, Ttotal, etaMin)); }
+      p.trace(xs, ys, accent(), 2.5);
+      if (Twarm > 0) p.vline(Twarm, warnC(), [4, 3]);
+      p.hline(etaMin, dimC(), [3, 3]);
+      p.label(Math.min(Twarm + Ttotal * 0.02, Ttotal * 0.94), etaMax * 0.98, "T_warm", warnC());
+
+      return { etaMax, Twarm, Ttotal, ratio, etaMin };
+    }
+
+    // A REAL training run, stepped under the schedule above. Fresh model +
+    // fresh optimizer every draw so the comparison across slider settings is
+    // apples-to-apples; seeded RNGs make it reproducible. What we plot is the
+    // REALIZED parameter update norm ‖Δθ_k‖ — measured by diffing every
+    // parameter before/after each real step, not asserted. This is the
+    // quantity warmup directly controls: Adam's bias-corrected direction
+    // m̂/√v̂ is already ≈unit-scaled per parameter (that's Adam's whole
+    // design), so ‖Δθ_k‖ tracks η_k almost exactly. Without warmup it jumps
+    // to full size on step 1; with warmup it ramps up with η_k. (Whether that
+    // translates into a visible loss spike depends on model depth, batch
+    // noise, and LayerNorm placement — real factors this small toy net
+    // mostly lacks — so the loss is reported honestly as a secondary stat,
+    // not staged to spike.)
+    function runOverlay(sched) {
+      const model = new NN.MLP([2, 8, 1], { act: "tanh", rng: new NN.RNG(123) });
+      // β2 = 0.999 deliberately — the classic default (page 17) whose 1000-step
+      // memory is exactly the mechanism this page's warmup is protecting.
+      const opt = new NN.Adam(model.parameters(), { lr: sched.etaMax, beta1: 0.9, beta2: 0.999 });
+      const trainer = new NN.Trainer({ model, X: DATA.X, y: DATA.y, loss: "bce", opt });
+      const params = model.parameters();
+
+      const xs = [], dnorms = [];
+      const initLoss = trainer.evalLoss();
+      for (let k = 1; k <= TRAIN_STEPS; k++) {
+        opt.lr = etaAt(k, sched.etaMax, sched.Twarm, sched.Ttotal, sched.etaMin);
+        const before = params.map(p => p.data);
+        trainer.step();
+        let ss = 0;
+        for (let i = 0; i < before.length; i++) { const d = params[i].data - before[i]; ss += d * d; }
+        xs.push(k); dnorms.push(Math.sqrt(ss));
+      }
+      const finalLoss = trainer.evalLoss();
+      return { xs, dnorms, initLoss, finalLoss, plateau: Math.max(...dnorms.slice(-20)) };
+    }
+
+    function drawUpdatePanel(run) {
+      const p = new Plot(lossCanvas, {
+        xmin: 0, xmax: TRAIN_STEPS, ymin: Math.max(run.plateau * 1e-3, 1e-6), ymax: run.plateau * 1.3, ylog: true,
+        xlabel: `optimizer step k (first ${TRAIN_STEPS})`, ylabel: "‖Δθ_k‖ (realized)",
+      });
+      p.clear(); p.grid();
+      p.trace(run.xs, run.dnorms, accent2(), 2.2);
+      p.hline(run.plateau, dimC(), [3, 3]);
+    }
+
+    function clearUpdatePanel() {
+      const p = new Plot(lossCanvas, { xmin: 0, xmax: TRAIN_STEPS, ymin: 0, ymax: 1, xlabel: "optimizer step k", ylabel: "‖Δθ_k‖" });
+      p.clear(); p.grid();
+    }
+
+    function draw() {
+      const sched = drawSchedule();
+      const warmPart = sched.Twarm > 0
+        ? `η_k = <b>${sched.etaMax.toExponential(2)}</b>·k / <b>${sched.Twarm}</b> for k ≤ ${sched.Twarm}; then `
+        : `T_warm = 0 (no warmup) — starts straight at η_max: `;
+      const eq = warmPart +
+        `<b>${sched.etaMin.toExponential(2)}</b> + ½(${sched.etaMax.toExponential(2)} − ${sched.etaMin.toExponential(2)})(1+cos(π·(k−${sched.Twarm})/(${sched.Ttotal - sched.Twarm})))`;
+      const peakCheck = etaAt(sched.Twarm, sched.etaMax, sched.Twarm, sched.Ttotal, sched.etaMin);
+
+      if (overlayToggle.checked) {
+        const run = runOverlay(sched);
+        drawUpdatePanel(run);
+        const step1 = run.dnorms[0], step1Pct = (100 * step1 / run.plateau).toFixed(0);
+        out.innerHTML = `${eq}<br>peak-of-warmup check: η(T_warm) = <b>${peakCheck.toExponential(2)}</b> = η_max ✓` +
+          `<br>training overlay (β₂=0.999, ${TRAIN_STEPS} real Adam steps on a moons MLP): realized ‖Δθ<sub>1</sub>‖ = <b>${step1.toExponential(2)}</b>` +
+          ` — <b>${step1Pct}%</b> of its eventual plateau (${run.plateau.toExponential(2)}) on the very first step` +
+          `. Loss: ${run.initLoss.toFixed(3)} → ${run.finalLoss.toFixed(3)} over the run.`;
+      } else {
+        clearUpdatePanel();
+        out.innerHTML = `${eq}<br>peak-of-warmup check: η(T_warm) = <b>${peakCheck.toExponential(2)}</b> = η_max ✓` +
+          `<br>training overlay off — check the box above to measure the realized update size under this schedule.`;
+      }
+    }
+
+    // Debounce heavy re-draws (the overlay trains a real network) to at most
+    // one per animation frame, so a fast slider drag stays responsive.
+    let rafId = null;
+    function requestDraw() {
+      if (rafId != null) cancelAnimationFrame(rafId);
+      rafId = requestAnimationFrame(() => { rafId = null; draw(); });
+    }
+
+    etaMaxC.onInput(requestDraw);
+    twarmC.onInput(requestDraw);
+    ttotalC.onInput(requestDraw);
+    ratioC.onInput(requestDraw);
+    overlayToggle.addEventListener("change", requestDraw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz21", [
+    {
+      q: "At the classic $\\beta_2 = 0.999$ (page 17), warmup should cover roughly how many steps?",
+      num: 1000, tol: 200, unit: "steps",
+      why: "$1/(1-\\beta_2) = 1/(1-0.999) = 1000$ steps (constants.md §9.3, [DER]) — Adam's second moment needs that long to fill before $\\sqrt{\\hat v_k}$ is a trustworthy denominator."
+    },
+    {
+      q: "What is the strongest reason warmup exists?",
+      opts: [
+        "The model's weights are fragile immediately after initialization",
+        "Adam's second-moment estimate $\\hat v_k$ has huge variance for roughly the first 1000 steps, even after bias correction fixes its mean (RAdam's thesis)",
+        "Warmup prevents NaN losses on any optimizer, including plain SGD",
+        "It is a requirement of the chain rule for deep networks"
+      ],
+      a: 1,
+      why: "The precise mechanism is Adam's $\\hat v_k$ variance, not a vague notion of model fragility (distractor 1) — plain SGD, which has no $\\hat v$, needs warmup far less."
+    },
+    {
+      q: "A learning-rate schedule should be indexed by:",
+      opts: ["Epoch", "Optimizer step $k$", "Wall-clock time", "Batch size"],
+      a: 1,
+      why: "By step $k$, always (page 16 / page 17's $k$-not-$t$ notation). Many LLM fine-tunes never complete one epoch, so an epoch-indexed schedule can fire at the wrong point in training or never at all."
+    },
+    {
+      q: "The cosine schedule should decay to:",
+      opts: ["Exactly 0", "$\\eta_{\\max}/10$ (or $/20$) — never all the way to zero", "$\\eta_{\\max}$ itself, held flat", "The value it had before warmup began"],
+      a: 1,
+      why: "Decaying to 0 means zero learning for the entire tail of the run. A floor around $\\eta_{\\max}/10$ keeps the optimizer doing real, if gentle, work to the last step."
+    },
+    {
+      q: "True or false: warmup and warm restarts (SGDR) are the same technique.",
+      opts: [
+        "True — same mechanism, different names",
+        "False — warm restarts periodically re-raise $\\eta$ during training on a repeating cycle; warmup is a one-time ramp at the very start"
+      ],
+      a: 1,
+      why: "They share a word and nothing else. Warmup fires once, at the start. Warm restarts fire repeatedly, throughout training."
+    },
+    {
+      q: "What is the honest 2026 status of warmup?",
+      opts: [
+        "A solved, first-principles requirement derived from optimization theory",
+        "A cheap patch the field keeps because it costs almost nothing and reliably works, even though RAdam / T-Fixup / GradInit reduce or remove the underlying need for it",
+        "A technique that only applies to convex loss landscapes",
+        "Obsolete now that Adam is described as \"adaptive\""
+      ],
+      a: 1,
+      why: "Warmup is a patch, not a law — more principled fixes exist (RAdam's rescaling, T-Fixup/GradInit's initializations), but two cheap extra hyperparameters that compose with anything and have worked for years are why every config still has warmup_steps."
+    }
+  ], "LR schedules & warmup — self-check");
+
+});
+</script>
+</body>
+</html>

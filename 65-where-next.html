@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>65. Where This Goes Next — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: confidence-tag chip (course-wide convention, defined per page
+     since course.css doesn't ship one globally) + the map demo's controls. */
+  .tag { font-family: var(--mono); font-size: .72rem; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+         background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent2); white-space: nowrap; }
+  .seg-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 2px; }
+  .seg-row button {
+    padding: 6px 13px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .84rem; font-family: var(--font);
+  }
+  .seg-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .seg-row button:disabled { opacity: .35; cursor: not-allowed; }
+  .seg-label { display: block; font-size: .8rem; color: var(--text-dim); margin: 10px 0 2px; }
+  .map-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 2px; font-size: .82rem; color: var(--text-dim); }
+  .map-legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .map-legend .ring { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; border: 1.5px solid currentColor; }
+  .demo .ctrl.chk-row { flex-direction: row; align-items: center; gap: 8px; min-width: 260px; }
+  .demo .ctrl.chk-row label { display: flex; align-items: center; gap: 7px; font-size: .85rem; color: var(--text); cursor: pointer; }
+  .demo .ctrl.chk-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  .map-row { display: flex; justify-content: space-between; gap: 10px; padding: 3px 0; border-bottom: 1px solid var(--border); font-size: .82rem; }
+  .map-row:last-child { border-bottom: none; }
+  .map-row .m-name { color: var(--text); font-weight: 600; }
+  .map-row .m-val { font-family: var(--mono); color: var(--accent2); white-space: nowrap; }
+  .farewell-quote {
+    margin: 1.4em 0; padding: 22px 26px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: var(--bg-panel); font-size: 1.06rem; line-height: 1.75; font-style: italic; color: var(--text);
+  }
+  .farewell-quote b.close-tag { font-style: normal; font-size: .68rem; letter-spacing: .5px; color: var(--accent2); opacity: .85; }
+</style>
+</head>
+<body data-page="65-where-next.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VII · Capstone · 🚩 Final Milestone</span>
+    <h1>Where This Goes Next</h1>
+    <p class="subtitle">Page&nbsp;64 showed you that the machine never changed — only the target did. This page
+      shows you the one place that story gets more complicated: in 2026, the two tracks converged
+      <em>architecturally</em> and split <em>economically</em>. Then it hands you the receipts, the honest state
+      of the tooling, and three things to run tonight on hardware you already own.</p>
+
+    <!-- on-page-resolution: answered in the "Converged, then diverged" section immediately below,
+         and again by the demo's down-left / up-right split. -->
+    <div class="box predict"><span class="box-title">🔮 One trend prediction before the epilogue</span>
+      Over the next two years, do image models get <b>bigger</b> — the way LLMs did, generation after
+      generation — or <b>smaller</b>? Bet one way, one sentence of why, then read: the 2026 data is already
+      surprising, and it didn't go the way most people guess.
+    </div>
+
+    <h2>Converged in architecture, then diverged in economics</h2>
+    <p>Architecturally, the story closed on the last page: FLUX.2's text encoder is a 40-layer Mistral-3
+      transformer — GQA, RoPE, a KV cache, the same block you spent Part&nbsp;V learning to fine-tune.
+      <b>Economically, 2026 split the two fields</b>, and this is the part almost nobody predicts correctly:</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea — draw this deliberately (D-17)</span>
+      LLMs are still scaling. <b>Image models are consolidating.</b> The evidence, all <span class="tag">VP</span>
+      (constants §9.6):
+      <ul style="margin:8px 0 0">
+        <li><b>Z-Image-Turbo</b> — 6B, 8 NFE, Apache-2.0 — is <b>#1 open-weights on the AA Image Arena</b>,
+          <em>above</em> FLUX.2-dev, a 32B model.</li>
+        <li><b>FLUX.2-klein-4B</b> runs <b>4 steps at guidance 1.0 in ~13 GB</b> — a model you could run
+          comfortably on a laptop GPU.</li>
+      </ul>
+      A 6B model beat a 32B model, and a 4B model runs on a phone-class budget — in the same year the LLM
+      world was still stacking parameters (Llama-3.3-70B, the reference point three pages taught you to
+      QLoRA, is bigger than either FLUX.2 point). <b>Converged in architecture, diverged in economics.</b> That
+      is a better answer than "everything is one thing now" — and it's the honest resolution of the predict
+      box above: image models, at the frontier, are trending <em>smaller</em> and cheaper per unit of quality,
+      exactly backwards from how the LLM story went. If your bet was "bigger," you're not alone — it's the
+      naive extrapolation from three years of LLM scaling, and it's the one the 2026 data overturns.
+    </div>
+
+    <h2>The tooling, honestly</h2>
+    <p>What you'd actually reach for next, with the caveats a course that respects your time gives you up
+      front (constants §7, hardware-ground-truth §3):</p>
+
+    <div class="box rule"><span class="box-title">📐 The honest tooling map</span>
+      <ul style="margin:4px 0 0">
+        <li><b>torchtune is wound down.</b> The best-documented DGX Spark fine-tune in existence — Llama-3.1-8B,
+          seq 16,384, ~8&nbsp;h/epoch, ~80% of 128&nbsp;GB — runs on a library that is no longer actively
+          maintained <span class="tag">VP</span>. <code>torchforge</code> is <b>not</b> a drop-in successor: it
+          targets RL/agentic workloads and is explicitly experimental. Build nothing new on torchtune.</li>
+        <li><b>vLLM works on sm_121</b> — but the validated path is the container
+          <code>vllm/vllm-openai:cu130-nightly</code>, pinned by digest. The PyPI aarch64 wheel is built
+          against CUDA&nbsp;12 and fails on the Spark's CUDA-13-only stack.</li>
+        <li><b>bitsandbytes ships native sm_121 only into the aarch64+CUDA-13 wheel</b> — the Spark is
+          <em>better</em> served here than an x86 box. This is what "Add release for DGX Spark" in its build
+          script means, and it's the opposite of the "aarch64 is painful" framing you'd expect.</li>
+        <li>The real trap is narrower than "aarch64 is hard": <b>any package pinning
+          <code>libcudart.so.12</code> fails at import</b> on CUDA-13-only DGX OS, before kernel compatibility
+          is even evaluated.</li>
+      </ul>
+      <p style="margin:10px 0 0">Pin versions (constants §7): <code>torch==2.13.0</code>
+        · <code>transformers==5.14.1</code> · <code>peft==0.19.1</code> · <code>trl&gt;=1.8,&lt;2</code>
+        · <code>diffusers==0.39.0</code> · <code>bitsandbytes==0.49.2</code>. And install into a
+        <b>fresh venv — never ComfyUI's.</b> His installed stack is ComfyUI's venv only (torch 2.12.1+cu130,
+        no peft/trl/accelerate/bitsandbytes anywhere); the LLM stack is a second, separate venv, always.</p>
+    </div>
+
+    <h2>The meta-thread payoff</h2>
+    <p>Here is the course's actual destination, stated once, plainly, with the receipts:</p>
+
+    <div class="box worked"><span class="box-title">✍️ Walk the receipts</span>
+      You counted your tokens before you ever loaded a checkpoint. You computed <code>16P</code> and
+      watched 122.05&nbsp;GiB miss your measured 121.6875&nbsp;GiB by a hair, <em>before</em> you ran anything.
+      From the throughput table you predicted a LoRA run's wall-clock — and then you ran it and the
+      prediction held. From one formula, $I = S_{\text{fwd}}$, you predicted that decode would crawl and
+      diffusion sampling would fly on the <em>same</em> 273&nbsp;GB/s machine — and the measured 20.5&nbsp;→
+      368&nbsp;tok/s batch scaling (18×, flat prefill) confirmed it, on your box, not a slide.
+      <p style="margin:8px 0 0"><b>A learner who can predict his own hardware's behaviour from first
+        principles, before running anything</b> — that was the destination, stated in constants.md's own
+        preamble. You are there.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ What is still yours to measure</span>
+      One number never got printed as fact, all the way to this last page: the <b>dense BF16 ceiling on your
+      GB10</b> — is it ~62&nbsp;TFLOP/s (FP32-accumulate) or ~125&nbsp;TFLOP/s (FP16-accumulate)? NVIDIA
+      publishes neither <span class="tag">INF</span>. The SDXL BF16 datapoint (69.7&nbsp;TF/s, if CFG was on)
+      leans toward 125; community GEMM reports lean toward 62. <b>Whichever it lands at, understanding
+      <em>why</em> teaches accumulate precision better than any paragraph</b> — and it's the number that fixes
+      your roofline's ridge (227 vs 458, p.63) for good. A course that told you this would be lying. You
+      measure it, with <code>09_spark_capability_probe.py</code>.
+    </div>
+
+    <h2>A concrete next step on your box</h2>
+    <p>You already own the material. Nothing below is a toy — every model named is one already on
+      <code>~/ComfyUI/</code> or <code>~/.cache/huggingface/</code>:</p>
+
+    <div class="box try"><span class="box-title">Try it — tonight, on your own box</span>
+      <ol style="margin:4px 0 0">
+        <li><b>Train a Qwen3-8B LoRA on your own writing.</b> $r{=}16$, all-linear: 17.08&nbsp;GB state,
+          ~12 minutes (constants §2.3, §6.7). You have already done this once, on the exercises; do it again
+          on a corpus that's actually yours.</li>
+        <li><b>Re-render one of your <code>bench_baseline/</code> FLUX jobs</b> and check the wall-clock
+          against the roofline you built on p.63. You already benchmark this box — this time, predict the
+          number first.</li>
+        <li><b>Run <code>bench_spark.py</code></b>: FLUX.1-dev, 28 steps, bf16 vs FP4, timed against both
+          rooflines (62 and 125&nbsp;TF). This is the exercise that finally closes the ceiling question above —
+          for your unit, not the aggregate internet's.</li>
+      </ol>
+      Your 12&nbsp;GB of LoRAs in <code>~/ComfyUI/models/loras/</code> (9 files), your FP8-quantized
+      checkpoints, your Wan&nbsp;2.2 I2V and LTX video pipelines — all of it is fair game for the same
+      predict-then-measure habit this course spent 65 pages building.
+    </div>
+
+    <h2>The 2026 map: size vs. capability</h2>
+    <p>One last real-data plot, drawn from the facts above (constants §9.6, all <span class="tag">VP</span>
+      unless noted) and the memory ledger you already own (p.18, p.63). Flip the class filter and watch which
+      way each family trends.</p>
+
+    <div class="demo">
+      <div class="demo-head">Size vs. capability, 2026 <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-map" height="340"></canvas>
+        <div class="map-legend">
+          <span><span class="dot" style="background:#4fc3f7"></span>value known and stated</span>
+          <span><span class="ring" style="color:#8391ab"></span>fact known qualitatively; no numeric rank published — not fabricated</span>
+        </div>
+        <div class="seg-label">Model class:</div>
+        <div class="seg-row" id="d-map-class">
+          <button data-cls="image" class="active">Image models</button>
+          <button data-cls="llm">LLM models (size references)</button>
+        </div>
+        <div class="seg-label">Y-axis metric:</div>
+        <div class="seg-row" id="d-map-axis">
+          <button data-ax="vram" class="active">VRAM to run</button>
+          <button data-ax="steps">Steps / NFE</button>
+          <button data-ax="arena">Arena standing</button>
+        </div>
+        <div class="controls" id="d-map-ctrls"></div>
+        <div class="readout" id="d-map-out"></div>
+      </div>
+    </div>
+    <p>Filter to <b>image models</b>: Z-Image-Turbo (6B) sits far down-left of FLUX.2-dev (32B) on the size
+      axis, yet beats it on the arena — smaller and winning. Filter to <b>LLM models</b>: Qwen3-0.6B →
+      Qwen3-8B → Llama-3.3-70B walks straight up-right, VRAM climbing with params the way it always has. Two
+      families, same 2026, opposite slopes.</p>
+
+    <h2>Four threads, closing</h2>
+    <p>Every one of them ran under every page since it first appeared. Each closes here, by its first guise:
+      <b class="close-tag">[THREAD:chain-rule beat CLOSE]</b> the <code>Value</code> class ·
+      <b class="close-tag">[THREAD:TN1 beat CLOSE]</b> TN-1, grown to a 40-layer Mistral ·
+      <b class="close-tag">[THREAD:dot-product beat CLOSE]</b> a parameter count that closed to the byte ·
+      <b class="close-tag">[THREAD:memory-ledger beat CLOSE]</b> a measured wall, on a machine that says it
+      has memory it doesn't.</p>
+
+    <div class="milestone" data-progress="100">
+      <span class="milestone-flag">Milestone</span>
+      The course, complete. <span class="milestone-pct">100%</span>.
+    </div>
+
+    <div class="farewell-quote">
+      You wrote a <code>Value</code> class and made it do calculus. You trained a 9-parameter network with a
+      pencil and watched the loss go down. You read a parameter count off a checkpoint and it matched to the
+      byte. You measured a wall on a machine that says it has memory it doesn't. And your image model's
+      prompt reader turned out to be a Mistral. The machine never changed. Only ever the target did.
+    </div>
+
+    <p>The four threads loop back to <a href="index.html">the course's front door</a> — restart any of them,
+      any time. This page also closes with p.63's roofline (reused above as the VRAM overlay), p.64's Mistral
+      reveal, and p.52's GRPO run: the last new technique you learned before this one.</p>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-65"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- The 2026 map: size vs capability — one reflective, real-data scatter ---- */
+  (function () {
+    const canvas = document.getElementById("d-map");
+    const out = document.getElementById("d-map-out");
+    if (!canvas) return;
+
+    // Real 2026 data. VRAM = weights-only, bf16, computed live as P*2B/2^30 GiB
+    // unless a published figure exists (klein-4B). Tags travel with each point
+    // so the readout never launders an estimate into a fact.
+    const IMAGE = [
+      { name: "Z-Image-Turbo", P: 6e9, steps: 8, vramGiB: null, vramGB: null, vramTag: "DER",
+        arena: { known: true, y: 1, note: "#1 open-weights, AA Image Arena" }, tag: "VP" },
+      { name: "FLUX.2-dev", P: 32e9, steps: null, vramGiB: null, vramGB: null, vramTag: "DER",
+        arena: { known: false, y: 0.3, note: "below Z-Image-Turbo — exact rank not published" }, tag: "VP" },
+      { name: "FLUX.2-klein-4B", P: 4e9, steps: 4, vramGB: 13, vramTag: "VP", // published figure, not weights-derived
+        arena: { known: false, y: 0.3, note: "rank not published" }, tag: "VP" },
+      { name: "FLUX.1-dev", P: 12e9, steps: 28, vramGiB: null, vramGB: null, vramTag: "DER",
+        arena: { known: false, y: 0.3, note: "rank not published" }, tag: "VP" },
+    ];
+    const LLM = [
+      { name: "Qwen3-0.6B", P: 0.6e9, vramTag: "DER", tag: "VP (name-derived size)" },
+      { name: "Qwen3-1.7B", P: 1.7e9, vramTag: "DER", tag: "VP (name-derived size)" },
+      { name: "Qwen3-8B", P: 8190735360, vramTag: "DER", tag: "DER, constants §1.2 exact P" },
+      { name: "Llama-3.3-70B", P: 70e9, vramTag: "DER", tag: "nominal, from the model name — course does not compute its exact P" },
+    ];
+    const CEILING_GIB = 121.6875; // [MEA-DEV] hardware-ground-truth §2, frozen precision
+
+    // Live equation: VRAM_weights (GiB) = P * 2 bytes / 2^30 (bf16, weights only)
+    function vramGiB(m) {
+      if (m.vramGB != null) return m.vramGB * 0.9313; // published GB -> GiB, [DER] conversion
+      return (m.P * 2) / Math.pow(2, 30);
+    }
+
+    let cls = "image", axis = "vram", showCeiling = true;
+
+    function dot(p, x, y, color, r, filled) {
+      const g = p.g; g.save();
+      g.beginPath(); g.arc(p._tx(x), p._ty(y), r || 6, 0, 2 * Math.PI);
+      if (filled) { g.fillStyle = color; g.fill(); }
+      else { g.strokeStyle = color; g.lineWidth = 2; g.stroke(); }
+      g.restore();
+    }
+
+    function draw() {
+      const data = cls === "image" ? IMAGE : LLM;
+      const accent = vizUtils.cssVar("--accent", "#4fc3f7");
+      const accent2 = vizUtils.cssVar("--accent2", "#7fd1ff");
+      const dim = vizUtils.cssVar("--plot-tick", "#8391ab");
+
+      let ylog = false, ymin, ymax, ylabel;
+      if (axis === "vram") { ylog = true; ymin = 0.5; ymax = 220; ylabel = "VRAM to run, GiB (weights only, bf16, log)"; }
+      else if (axis === "steps") { ymin = 0; ymax = 32; ylabel = "steps / NFE"; }
+      else { ymin = 0; ymax = 1.3; ylabel = "arena standing (1 = #1 open-weights; ring = not published)"; }
+
+      const p = new Plot(canvas, {
+        xmin: 0.3, xmax: 100, xlog: true, ymin, ymax, ylog,
+        xlabel: "parameters, B (log)", ylabel
+      });
+      p.clear(); p.grid();
+
+      if (axis === "vram" && showCeiling) {
+        p.hline(CEILING_GIB, dim, [4, 4]);
+        p.label(0.35, CEILING_GIB * 1.05, "your Spark — 121.6875 GiB usable [MEA-DEV]", dim);
+      }
+
+      const rows = [];
+      const Pb = m => m.P / 1e9;
+
+      if (cls === "image") {
+        data.forEach(m => {
+          if (axis === "vram") {
+            const gib = vramGiB(m);
+            dot(p, Pb(m), gib, accent, 6, true);
+            p.label(Pb(m) * 1.08, gib, m.name, accent2);
+            rows.push({ name: m.name, val: `${gib.toFixed(2)} GiB weights [${m.vramTag}]` + (m.vramGB ? ` (~${m.vramGB} GB published [VP])` : "") });
+          } else if (axis === "steps") {
+            if (m.steps != null) {
+              dot(p, Pb(m), m.steps, accent, 6, true);
+              p.label(Pb(m) * 1.08, m.steps, m.name, accent2);
+              rows.push({ name: m.name, val: `${m.steps} steps/NFE [VP]` });
+            } else {
+              dot(p, Pb(m), 1, dim, 6, false);
+              p.label(Pb(m) * 1.08, 1.6, m.name + " (steps not published)", dim);
+              rows.push({ name: m.name, val: "steps not published — not plotted as a number" });
+            }
+          } else { // arena
+            dot(p, Pb(m), m.arena.y, m.arena.known ? accent : dim, 6, m.arena.known);
+            p.label(Pb(m) * 1.08, m.arena.y, m.name, m.arena.known ? accent2 : dim);
+            rows.push({ name: m.name, val: m.arena.note + (m.arena.known ? " [VP]" : "") });
+          }
+        });
+      } else {
+        // LLM class: only VRAM is a meaningful metric here (steps/arena are
+        // diffusion-track concepts) — axis is forced to vram by the UI wiring below.
+        data.forEach(m => {
+          const gib = vramGiB(m);
+          dot(p, Pb(m), gib, "#ffb74d", 6, true);
+          p.label(Pb(m) * 1.08, gib, m.name, accent2);
+          rows.push({ name: m.name, val: `${gib.toFixed(2)} GiB weights [${m.vramTag}] — ${m.tag}` });
+        });
+      }
+
+      out.innerHTML = `<div style="font-size:.82rem;color:var(--text-dim);margin-bottom:4px">` +
+        `live: $\\text{VRAM}_{\\text{weights}} \\approx P \\times 2\\,\\text{B} / 2^{30}$ GiB &mdash; bf16, weights only, no KV cache/activations</div>` +
+        rows.map(r => `<div class="map-row"><span class="m-name">${r.name}</span><span class="m-val">${r.val}</span></div>`).join("");
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    // class segmented buttons
+    const clsBox = document.getElementById("d-map-class");
+    const axisBox = document.getElementById("d-map-axis");
+    clsBox.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+      clsBox.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      cls = b.dataset.cls;
+      // steps/arena are image-only concepts (diffusion NFE, AA Image Arena) —
+      // force the LLM class onto the one metric that applies to both, honestly.
+      const stepsBtn = axisBox.querySelector('[data-ax="steps"]');
+      const arenaBtn = axisBox.querySelector('[data-ax="arena"]');
+      const disable = cls === "llm";
+      stepsBtn.disabled = disable; arenaBtn.disabled = disable;
+      if (disable && axis !== "vram") {
+        axisBox.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+        axisBox.querySelector('[data-ax="vram"]').classList.add("active");
+        axis = "vram";
+      }
+      draw();
+    }));
+    axisBox.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+      if (b.disabled) return;
+      axisBox.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+      b.classList.add("active");
+      axis = b.dataset.ax;
+      draw();
+    }));
+
+    // ceiling overlay checkbox
+    const chkWrap = document.createElement("div");
+    chkWrap.className = "ctrl chk-row";
+    chkWrap.innerHTML = `<label><input type="checkbox" id="d-map-ceiling" checked> overlay your Spark's 121.6875 GiB usable ceiling (VRAM axis only)</label>`;
+    document.getElementById("d-map-ctrls").appendChild(chkWrap);
+    document.getElementById("d-map-ceiling").addEventListener("change", e => { showCeiling = e.target.checked; draw(); });
+
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ: 5 questions, kept light — this is the send-off ---- */
+  renderQuiz("quiz-65", [
+    {
+      q: "In 2026 the two tracks this course taught…",
+      opts: [
+        "Converged architecturally and diverged economically",
+        "Became the same field for all practical purposes",
+        "Diverged architecturally but converged economically",
+        "Remained as separate as they started"
+      ],
+      a: 0,
+      why: "Page 64 showed the identical transformer block — GQA, RoPE, a KV cache — inside FLUX.2's Mistral-3 encoder: that's the architectural convergence. But Z-Image-Turbo (6B) beating FLUX.2-dev (32B) on the arena, and FLUX.2-klein-4B running in ~13 GB, show image models consolidating while LLMs keep scaling: that's the economic divergence. \"Became the same field\" is the tidy-but-wrong reading D-17 warns against."
+    },
+    {
+      q: "The open-weights leader on the AA Image Arena among the models on this page has how many billion parameters?",
+      num: 6, tol: 0, unit: "B",
+      why: "Z-Image-Turbo — 6B, 8 NFE, Apache-2.0 — ranked #1 open-weights, above FLUX.2-dev's 32B [VP, constants §9.6]."
+    },
+    {
+      q: "You want throughput serving of an LLM on the Spark. The honest path is…",
+      opts: [
+        "pip install vllm and run it directly",
+        "The vllm/vllm-openai:cu130-nightly container, pinned by digest",
+        "Compile vLLM from source against CUDA 12",
+        "There is no working vLLM path on sm_121"
+      ],
+      a: 1,
+      why: "The PyPI aarch64 wheel is built against CUDA 12 and fails at import on the Spark's CUDA-13-only stack — the same trap that catches any package pinning libcudart.so.12. The validated path is the nightly container, pinned by digest (constants §6.9)."
+    },
+    {
+      q: "Which is true of the best-documented DGX Spark fine-tuning result (Llama-3.1-8B, seq 16,384, ~8 h/epoch)?",
+      opts: [
+        "It runs on torchtune, which is wound down and no longer actively maintained",
+        "It runs on torchforge, torchtune's actively-maintained successor",
+        "It requires a custom CUDA-12 build",
+        "It was measured on a different Spark than the learner's own"
+      ],
+      a: 0,
+      why: "torchtune is wound down; torchforge is not a drop-in successor — it targets RL/agentic workloads and is explicitly experimental (constants §7.4). The pytorch.org benchmark is real and worth citing, with exactly that footnote attached."
+    },
+    {
+      q: "The course refused to print one number as fact, all the way to this last page. Which, and why?",
+      opts: [
+        "The dense BF16 ceiling (62 vs 125 TF) — genuinely unpublished and unresolved, so the course ships a measurement script instead of a fact",
+        "Qwen3-8B's exact parameter count — it's a trade secret",
+        "The 121.6875 GiB usable memory figure — NVIDIA never confirmed it",
+        "FLUX.2's Mistral-3 encoder's layer count — it isn't public"
+      ],
+      a: 0,
+      why: "62 vs 125 TF (constants §6.3) is the one number this course would not launder into a fact. Everything else on this page — the 8,190,735,360 params, the 121.6875 GiB wall, the Mistral config on disk — is measured or verified. This one, you still measure yourself, with 09_spark_capability_probe.py."
+    }
+  ], "Send-off self-check");
+
+});
+</script>
+</body>
+</html>

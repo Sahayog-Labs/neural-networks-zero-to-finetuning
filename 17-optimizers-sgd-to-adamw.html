@@ -1,0 +1,560 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>17. Optimizers: SGD → AdamW — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the update-rule ledgers carry KaTeX fractions/subscripts wider
+   than a phone. Let each ledger scroll inside its own box on narrow screens so
+   the page body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+  .race-grid { grid-template-columns: 1fr !important; }
+}
+.opt-legend { display:flex; flex-wrap:wrap; gap:14px; margin:2px 0 10px; font-size:.92em; }
+.opt-legend span { display:inline-flex; align-items:center; gap:6px; }
+.opt-legend i { width:22px; height:3px; border-radius:2px; display:inline-block; }
+.opt-pick { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 2px; }
+</style>
+</head>
+<body data-page="17-optimizers-sgd-to-adamw.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns · ⭐</span>
+    <h1>Optimizers: SGD → Momentum → RMSProp → Adam → AdamW</h1>
+    <p class="subtitle">One update rule was never enough. Each optimizer in the lineage exists to fix one specific
+      way the previous one failed. We follow that chain of failures to the exact optimizer you will call on your
+      LoRA in Part V — and we motivate it with nine gradients you already computed by hand.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:TN1 — the object, input 2's nine gradients reopened from page 14]</b> ·
+      <b>[THREAD:MEM — Adam's $m,v$ are optimizer state]</b>. On page 14 you hand-computed TN-1's nine gradients for
+      the input $x=[0.60,\,-0.20]$. This page reopens those exact nine numbers — same object, new question:
+      <em>they span an order of magnitude, and a single global learning rate cannot serve all of them at once.</em>
+      That fact is the entire reason Adam exists. And Adam's memory of past gradients ($m$ and $v$) is the optimizer
+      state that will dominate the memory ledger on page 18.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: this PREDICT is answered below, in "The spread
+         beat" section, and the demo lands on it (Adam erases the anisotropy). -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      On TN-1's input 2 (page 14) you computed nine gradients. The largest in magnitude is
+      $\partial\mathcal{L}/\partial b_2 = -0.4593$; the smallest is $\partial\mathcal{L}/\partial W_1[0][1] = +0.0449$.
+      <b>By what factor do they differ</b> — and what does that imply for a single global learning rate $\eta$ that
+      must move all nine at once? Write a number before you scroll.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>The lineage: each optimizer fixes one failure</h2>
+    <p>Gradient descent gave us one rule: step downhill, $\theta_{k+1} = \theta_k - \eta\,\mathbf{g}_k$. It has two
+      honest failures, and the history of optimizers is the history of fixing them one at a time. The first failure
+      is <em>geometric</em> — on a stretched valley the gradient points across the valley, not along it, so the
+      iterate zigzags (page 13's ravine). The second is <em>scale</em> — different parameters have gradients of wildly
+      different magnitude, and one $\eta$ either over-steps the big ones or starves the small ones. Momentum attacks
+      the first. RMSProp attacks the second. Adam does both. AdamW fixes a bug Adam introduced. Nothing here is a
+      speed hack bolted on for fun; each piece is a repair.</p>
+
+    <div class="box rule"><span class="box-title">📐 Translation note — the step index is $k$, not $t$</span>
+      Optimisation papers write the update with a step index $t$: $\theta_{t+1} = \theta_t - \eta\nabla\mathcal{L}(\theta_t)$,
+      and Adam's bias correction as $\beta_1^t,\beta_2^t$. <b>This course reserves $t$ for the diffusion timestep</b>
+      (Part VI), so our optimizer step is <b>$k$</b>. When you read the Adam paper, its $t$ is our $k$. The one word
+      that changes; the maths does not. (Bonus: $k$ makes "step vs epoch" typographically obvious — schedules are
+      indexed by step, page 21.)
+    </div>
+
+    <!-- ===================== SGD ===================== -->
+    <h2>SGD — and the failure it can't fix</h2>
+    <div class="box rule"><span class="box-title">📐 Plain SGD</span>
+      $$\theta_{k+1} = \theta_k - \eta\,\mathbf{g}_k, \qquad \mathbf{g}_k = \nabla_\theta\mathcal{L}(\theta_k)$$
+      One learning rate, applied identically to every parameter. On the ravine of page 13 it zigzags across the
+      valley floor and creeps along it: the very oscillation you watched blow up past $\eta_{\text{crit}} = 2/\lambda_{\max} = 0.1$.
+    </div>
+    <p>SGD's problem is that $\eta$ is a single scalar shared by directions with very different curvature. Turn it up
+      to make progress along the gentle direction and it diverges in the steep one; turn it down to stay stable in
+      the steep direction and it crawls along the gentle one. There is no good single value. <b>The next three
+      optimizers are three ways of giving different directions different effective steps.</b></p>
+
+    <!-- ===================== MOMENTUM ===================== -->
+    <h2>Momentum — a conditioning fix, not a speed hack</h2>
+    <p>Keep a running average of the gradient and step with <em>that</em> instead of the raw gradient. Across the
+      valley the gradient flips sign every step, so the running average <em>cancels</em>; along the valley it points
+      the same way every step, so the average <em>accumulates</em>. The zigzag is damped and the along-valley motion
+      is amplified — that is a change to the <em>dynamics</em> (the conditioning), not merely a bigger step.</p>
+
+    <div class="box rule"><span class="box-title">📐 SGD with momentum</span>
+      $$\mathbf{v}_k = \mu\,\mathbf{v}_{k-1} + \mathbf{g}_k, \qquad \theta_{k+1} = \theta_k - \eta\,\mathbf{v}_k$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\mathbf{v}_k$</td><td>velocity — the running (leaky) sum of past gradients</td><td>$(P,)$</td><td>updated here; starts at $\mathbf{0}$</td></tr>
+          <tr><td>$\mu$</td><td>momentum coefficient — how much of the past to keep</td><td>scalar</td><td>a hyperparameter, typically $0.9$</td></tr>
+          <tr><td>$\mathbf{g}_k$</td><td>this step's gradient</td><td>$(P,)$</td><td>backprop (page 14)</td></tr>
+          <tr><td>$\eta$</td><td>learning rate</td><td>scalar</td><td>a hyperparameter</td></tr>
+          <tr><td>$\theta_k$</td><td>parameters at step $k$</td><td>$(P,)$</td><td>the previous step</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: the momentum amplification, $\mu = 0.9$</span>
+      Point the gradient the same direction every step (motion along the valley), with $\mathbf{g}_k = \mathbf{g}$
+      constant. The velocity is a geometric series:
+      $$\mathbf{v}_\infty = \mathbf{g}\,(1 + \mu + \mu^2 + \cdots) = \frac{\mathbf{g}}{1-\mu}.$$
+      At $\mu = 0.9$ the steady-state velocity is $\dfrac{1}{1-0.9} = \mathbf{10\times}$ the raw gradient
+      (<code>constants.md</code> §9.3, [DER]). Momentum takes a persistent gentle slope and gives it a tenfold
+      effective step — while a sign-flipping slope averages toward zero. That asymmetry is the whole point.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Momentum just makes it faster."</span>
+      It changes the <em>dynamics</em>. It damps oscillation across a ravine and accumulates motion along it — a
+      conditioning fix. On a perfectly round bowl (no anisotropy) momentum buys you almost nothing; its value is
+      precisely in the stretched directions where plain SGD zigzags.
+    </div>
+
+    <!-- ===================== RMSPROP ===================== -->
+    <h2>RMSProp — give every parameter its own step</h2>
+    <p>Momentum fixed the geometry but still uses one $\eta$ for every parameter. RMSProp fixes the scale: divide each
+      parameter's step by the root-mean-square of <em>its own</em> recent gradients. A parameter with big gradients
+      gets a small effective step; one with tiny gradients gets a large one. The single global $\eta$ becomes,
+      effectively, one learning rate per parameter — which is exactly what a spread of gradient magnitudes demands.</p>
+    <div class="box rule"><span class="box-title">📐 RMSProp (per-parameter scaling)</span>
+      $$s_k = \beta_2\,s_{k-1} + (1-\beta_2)\,g_k^2, \qquad \theta_{k+1} = \theta_k - \frac{\eta}{\sqrt{s_k}+\varepsilon}\,g_k$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$s_k$</td><td>running mean of the <em>squared</em> gradient, per parameter</td><td>updated here; $s_0 = 0$</td></tr>
+          <tr><td>$\beta_2$</td><td>decay of that mean</td><td>hyperparameter ($\sim 0.99$)</td></tr>
+          <tr><td>$g_k$</td><td>this parameter's gradient (one component)</td><td>backprop (page 14)</td></tr>
+          <tr><td>$\eta,\varepsilon,\theta_k$</td><td>learning rate, stability floor, parameter</td><td>as in the momentum rule above</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">$\sqrt{s_k}$ is the typical recent magnitude of that parameter's gradient, and
+        dividing by it normalises every parameter to a comparable step. This is the piece that directly attacks the
+        order-of-magnitude spread you are about to see.</p>
+    </div>
+
+    <!-- ===================== ADAM ===================== -->
+    <h2>Adam — momentum + RMSProp + one honest correction</h2>
+    <p>Adam is exactly what it looks like: momentum (the first moment $m$) and RMSProp (the second moment $v$), run
+      together, plus a <b>bias correction</b> that repairs a real defect at start-up.</p>
+
+    <div class="box rule"><span class="box-title">📐 Adam</span>
+      $$m_k = \beta_1 m_{k-1} + (1-\beta_1)g_k, \qquad v_k = \beta_2 v_{k-1} + (1-\beta_2)g_k^2$$
+      $$\hat m_k = \frac{m_k}{1-\beta_1^{\,k}}, \qquad \hat v_k = \frac{v_k}{1-\beta_2^{\,k}}, \qquad
+        \theta_{k+1} = \theta_k - \eta\,\frac{\hat m_k}{\sqrt{\hat v_k}+\varepsilon}$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Range / value</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$m_k$</td><td>first moment — EMA of the gradient (the momentum part)</td><td>$(P,)$</td><td>updated here; $m_0 = 0$</td></tr>
+          <tr><td>$v_k$</td><td>second moment — EMA of the squared gradient (the RMSProp part)</td><td>$(P,)$</td><td>updated here; $v_0 = 0$</td></tr>
+          <tr><td>$\beta_1$</td><td>first-moment decay — always a numeric subscript</td><td>$0.9$</td><td>hyperparameter</td></tr>
+          <tr><td>$\beta_2$</td><td>second-moment decay</td><td>$0.95$ or $0.999$</td><td>hyperparameter</td></tr>
+          <tr><td>$\hat m_k,\hat v_k$</td><td>bias-corrected moments — undo the $m_0{=}v_0{=}0$ start</td><td>$(P,)$</td><td>the correction</td></tr>
+          <tr><td>$\varepsilon$</td><td>stability floor (never divide by zero)</td><td>$10^{-8}$</td><td>hyperparameter</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">Because $m_0 = v_0 = 0$, both EMAs start too small — a start-up artifact, not a
+        property of the gradient. The $1/(1-\beta^{\,k})$ factors remove exactly that artifact and fade to $1$.</p>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: why bias correction, and the $1000$-step memory</span>
+      At the first step, $k=1$, with $\beta_2 = 0.999$: the raw second moment is
+      $v_1 = (1-\beta_2)\,g_1^2 = 0.001\,g_1^2$ — it is <b>$1000\times$ too small</b> (<code>constants.md</code> §9.3).
+      The correction restores it exactly: $\hat v_1 = v_1/(1-\beta_2^{\,1}) = v_1/0.001 = g_1^2$. Without it, the
+      update divides by $\sqrt{v_1}$, which is $\sqrt{1000}\approx 31.6\times$ too small, so the very first step would
+      be $\approx 31.6\times$ too large. And the timescale of that memory is
+      $$\frac{1}{1-\beta_2} = \frac{1}{1-0.999} = \mathbf{1000}\ \text{steps} \quad(\text{[DER]}).$$
+      $\beta_2 = 0.999$ means $v$ averages over the last $\sim 1000$ gradients. That long memory is
+      <b>the mechanistic reason warmup exists</b> — the denominator is untrustworthy until it has seen enough
+      gradients to fill, so you ease $\eta$ in. We build that on <b>page 21</b>. <b>[THREAD:MEM]</b>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Adam adapts the learning rate."</span>
+      It does not touch $\eta$. Adam adapts the <em>per-parameter scaling of the gradient</em> (the
+      $\hat m/\sqrt{\hat v}$ term). The scalar $\eta$ out front is untouched, and you still need a schedule for it
+      (page 21). Reading "adaptive" as "you don't need to tune the learning rate" is how people ship a bad run.
+    </div>
+
+    <!-- ===================== ADAMW ===================== -->
+    <h2>AdamW — decouple the weight decay</h2>
+    <p>Weight decay pulls every parameter gently toward zero (regularisation, page 22). The classic way folds it into
+      the gradient: $g_k \leftarrow g_k + \lambda\theta_k$. For plain SGD that is identical to L2 regularisation. For
+      Adam it is <b>not</b> — because Adam then divides that $\lambda\theta_k$ term by $\sqrt{\hat v}$ too, so
+      parameters with large gradients get <em>less</em> decay than parameters with small ones. The decay you asked for
+      is silently rescaled per parameter. AdamW's one change: apply the decay <em>straight to the weights</em>,
+      outside Adam's scaling.</p>
+
+    <div class="box rule"><span class="box-title">📐 AdamW — the entire content of the paper</span>
+      $$\theta_{k+1} = \theta_k - \eta\left(\frac{\hat m_k}{\sqrt{\hat v_k}+\varepsilon} \;+\; \lambda\,\theta_k\right)$$
+      <table class="ledger">
+        <tbody>
+          <tr><td>$\lambda$</td><td>weight decay — pulls each weight toward zero at rate $\eta\lambda$</td><td>hyperparameter ($0.1$)</td></tr>
+          <tr><td>$\hat m_k,\hat v_k,\varepsilon,\eta,\theta_k$</td><td>exactly as in the Adam ledger above</td><td>reopened</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">The $\lambda\theta_k$ term is added <em>after</em> the $\sqrt{\hat v}$ division, so
+        Adam's per-parameter scaling never touches it — every weight decays at the same rate $\eta\lambda$. In this
+        course's engine, that is one flag: <code>NN.Adam(params, {weightDecay: 0.1, decoupled: true})</code>
+        <b>is</b> AdamW. $\lambda$ is weight decay and nothing else in the trunk.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Weight decay is the same as L2 regularisation."</span>
+      <b>For SGD, yes; for Adam, no.</b> Folding $\lambda\theta$ into the gradient lets Adam's $1/\sqrt{\hat v}$
+      rescale it per parameter, so the effective decay is no longer uniform. That divergence is the whole reason
+      AdamW exists — it is not a cosmetic rename.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The 2026 AdamW defaults for LLM fine-tuning ([VP])</span>
+      The configuration you will actually paste (<code>constants.md</code> §9.3–9.4 / training):
+      <table class="ledger">
+        <thead><tr><th>Knob</th><th>Value</th><th>Why this, not the textbook default</th></tr></thead>
+        <tbody>
+          <tr><td>$\beta_1$</td><td>$0.9$</td><td>standard first-moment memory</td></tr>
+          <tr><td>$\beta_2$</td><td>$\mathbf{0.95}$ — <em>not</em> $0.999$</td><td>text has huge gradient spikes from rare tokens; a $1000$-step memory poisons the denominator. $0.95$ forgets in $\sim 20$ steps.</td></tr>
+          <tr><td>$\varepsilon$</td><td>$10^{-8}$</td><td>stability floor</td></tr>
+          <tr><td>$\lambda$ (weight decay)</td><td>$\mathbf{0.1}$</td><td>decoupled (AdamW); applied to weights, not the gradient</td></tr>
+          <tr><td>grad clip</td><td>$\mathbf{1.0}$</td><td>near-universal ([VP]); caps the rare-token spikes before they reach the optimizer</td></tr>
+          <tr><td>schedule</td><td>cosine to $\eta_{\max}/10$</td><td>page 21</td></tr>
+          <tr><td>no-decay list</td><td>biases, norm gains, usually embeddings</td><td>decaying a bias or a LayerNorm gain toward zero is meaningless — those are not capacity</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===================== THE SPREAD BEAT — resolves PREDICT ===================== -->
+    <h2>The spread beat — why one <span style="white-space:nowrap">$\eta$</span> can't serve nine gradients</h2>
+    <p><b>[THREAD:TN1 — input 2's nine gradients, reopened from page 14]</b>. Here are the nine numbers you computed
+      by hand, for $x=[0.60,\,-0.20]$ (<code>constants.md</code> §8.7):</p>
+
+    <div class="box worked"><span class="box-title">✍️ The spread: $10.22\times$, all nine live — resolving the prediction</span>
+      $$\left|\frac{\partial\mathcal{L}}{\partial\theta}\right| \in
+        \{0.1348,\ \mathbf{0.0449},\ 0.2214,\ 0.0738,\ 0.2246,\ 0.3690,\ 0.1975,\ 0.1504,\ \mathbf{0.4593}\}$$
+      The largest is $\partial\mathcal{L}/\partial b_2 = 0.4593$; the smallest live one is
+      $\partial\mathcal{L}/\partial W_1[0][1] = 0.0449$. Their ratio:
+      $$\frac{\max|g|}{\min|g|} = \frac{0.459260}{0.044917} = \mathbf{10.2246\times} \approx \mathbf{10.22\times}.$$
+      <b>That is the answer to the prediction:</b> the largest gradient is about ten times the smallest — one order
+      of magnitude — and every one of the nine is live (no dead unit this input). A single global $\eta$ must either
+      over-step $b_2$ or starve $W_1[0][1]$. It cannot do right by both. <b>Per-parameter scaling is the fix, and
+      that is precisely what RMSProp and Adam do.</b>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The spread is structural — "just normalise your inputs" doesn't save you</span>
+      You might object: the spread comes from the input, so normalise the input and it goes away. It does not. Since
+      $\partial\mathcal{L}/\partial W_1[i][j] = \delta_{1,i}\,x_j$, you can inflate the spread by widening the feature
+      ratio $|x_0/x_1|$ — an input like $[0.10,\,-2.00]$ reaches $42\times$. But the honest answer to <em>that</em> is
+      "normalise your inputs," not "use Adam." The decisive check: <b>even at a perfectly balanced $1{:}1$ feature
+      ratio, the best achievable spread across the nine gradients is still $8.64\times$</b> (<code>constants.md</code>
+      §8.7). The spread survives normalisation because it comes from the network's own structure — different layers,
+      different roles — not just the data. That is what makes "therefore Adam" honest rather than a workaround for
+      un-normalised inputs. <code>[0.60, -0.20]</code>'s mild $3{:}1$ ratio is where the story is transparent, not rigged.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Adam is strictly better than SGD."</span>
+      Well-tuned SGD + momentum still generalises better on vision benchmarks. Adam's win is on transformers — and,
+      crucially, it wins <em>untuned</em>: the per-parameter scaling makes it forgiving of a learning rate that would
+      break SGD. For the models this course targets, that forgiveness is why AdamW is the default.
+    </div>
+
+    <!-- ===================== DEMO: OPTIMIZER RACE ===================== -->
+    <h2>See it: four optimizers race down the same ravine</h2>
+    <p>The same anisotropic bowl as page 13 — $f(\theta) = \tfrac12(\theta_x^2 + 20\,\theta_y^2)$, curvature
+      $\lambda_{\max} = 20$ — from the same start $(-4,\,3)$. Four <b>real</b> optimizers run over the two
+      parameters: plain SGD, SGD + momentum, Adam, AdamW. The right panel races all four loss curves at once; the
+      left panel draws the selected optimizer's actual path on the contour. Every step is computed live by the same
+      <code>NN.SGD</code> / <code>NN.Adam</code> engine the training demos use.</p>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Start with the defaults and watch the loss race, then pick each path in turn. <b>SGD zigzags</b> across the
+      valley (detour $\approx 2$) and is the slow baseline. <b>Momentum accelerates</b> the along-valley motion and
+      reaches the floor in a fraction of the steps — but crank $\mu$ past $\sim 0.8$ and watch it <em>overshoot</em>
+      instead (too much momentum is a real failure mode). <b>Adam and AdamW take the straightest path</b> — detour
+      $\approx 1$ — because per-parameter scaling erases the anisotropy, and they do it without tuning. On this clean
+      bowl a well-tuned SGD is fast too; Adam's real payoff is that robustness, on the messy $10\times$-spread
+      problems you actually face. Finally, drag $\beta_2$ from $0.95$ up to $0.999$ and watch Adam's early steps turn
+      sluggish — the long memory you will fix with warmup on page 21.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Optimizer race · $f=\tfrac12(\theta_x^2+20\theta_y^2)$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="opt-legend">
+          <span><i id="lg-sgd"></i>SGD</span>
+          <span><i id="lg-mom"></i>SGD + momentum</span>
+          <span><i id="lg-adam"></i>Adam</span>
+          <span><i id="lg-adamw"></i>AdamW</span>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1.15fr;gap:16px" class="race-grid">
+          <div>
+            <canvas id="d-surf" height="300"></canvas>
+            <div class="opt-pick" id="d-pick"></div>
+          </div>
+          <div><canvas id="d-loss" height="300"></canvas></div>
+        </div>
+        <div class="controls" id="d-ctrls"></div>
+        <div class="readout" id="d-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>The optimizer you will actually call</h2>
+    <p>Everything above collapses to a few lines of PyTorch. This is the exact optimizer you will use on your LoRA in
+      Part V — same call, same defaults:</p>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line">model = torch.nn.<span class="tok-fn">Sequential</span>(</span>
+<span class="line">    torch.nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">2</span>), torch.nn.<span class="tok-fn">Tanh</span>(), torch.nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">1</span>),</span>
+<span class="line">)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># AdamW = Adam with DECOUPLED weight decay. Modern LLM defaults:</span></span>
+<span class="line">opt = torch.optim.<span class="tok-fn">AdamW</span>(</span>
+<span class="line">    model.<span class="tok-fn">parameters</span>(),</span>
+<span class="line">    lr=<span class="tok-num">2e-4</span>, betas=(<span class="tok-num">0.9</span>, <span class="tok-num">0.95</span>), eps=<span class="tok-num">1e-8</span>, weight_decay=<span class="tok-num">0.1</span>,</span>
+<span class="line">)</span>
+<span class="line"></span>
+<span class="line">x = torch.<span class="tok-fn">randn</span>(<span class="tok-num">32</span>, <span class="tok-num">2</span>)</span>
+<span class="line">y = torch.<span class="tok-fn">randn</span>(<span class="tok-num">32</span>, <span class="tok-num">1</span>)</span>
+<span class="line hl"><span class="tok-kw">for</span> k <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">1000</span>):                       <span class="tok-com"># k is the OPTIMIZER STEP, not t</span></span>
+<span class="line">    loss = torch.nn.functional.<span class="tok-fn">mse_loss</span>(model(x), y)</span>
+<span class="line">    loss.<span class="tok-fn">backward</span>()</span>
+<span class="line">    torch.nn.utils.<span class="tok-fn">clip_grad_norm_</span>(model.<span class="tok-fn">parameters</span>(), <span class="tok-num">1.0</span>)  <span class="tok-com"># grad clip 1.0</span></span>
+<span class="line">    opt.<span class="tok-fn">step</span>(); opt.<span class="tok-fn">zero_grad</span>()</span></code></pre>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <b><code>code/17_optimizer_race.py</code></b> trains the TN-1 MLP (input-2 config) to convergence under SGD,
+      Adam, and AdamW, logs steps-to-target for each, and prints the per-parameter update magnitudes so you can watch
+      Adam equalise the $10.22\times$ gradient spread on your own box.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: Muon halves the optimizer state but is not your path (yet)</summary><div>
+      <p>Optimisation is not a settled field. <b>Muon</b> (2024–25) keeps <em>one</em> momentum buffer instead of
+        Adam's two moments — <b>half the optimizer state</b> — and, per its authors, reaches comparable loss at
+        roughly <b>52% of AdamW's FLOPs</b> on the matrices it handles. The catch: it applies only to <b>2-D
+        parameters</b> (weight matrices), so every real "Muon" run is an <b>AdamW hybrid</b> — Muon on the matrices,
+        AdamW on the biases, norm gains, and embeddings. These figures are <b>reported / [EST]</b>, not values this
+        course measured, and Muon is a moving target. Ship it as evidence that "which optimizer" is still live
+        research — not as the optimizer you should reach for on your first LoRA. That is AdamW, for the reasons above.</p>
+    </div></details>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz17"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---------------- DEMO: OPTIMIZER RACE ----------------
+     Four REAL optimizers (NN.SGD / NN.Adam) over the 2-parameter anisotropic
+     quadratic f = 1/2 (x^2 + 20 y^2) — page 13's ravine. The optimizers only
+     read p.data and write via p.grad, so a plain {data,grad} param works. */
+  (function () {
+    const B = 20;                                  // λ_max = 20  (same ravine as p.13)
+    const f = (x, y) => 0.5 * (x * x + B * y * y);
+    const grad = (x, y) => [x, B * y];             // ∇f  — real, exact
+    const START = [-4, 3];
+    const MAXSTEPS = 200;
+    const THRESH = 1e-3;                            // "converged" when f(θ) < THRESH
+
+    const colors = {
+      sgd:   () => cssVar("--bad", "#ff6b6b"),
+      mom:   () => cssVar("--warn", "#f0a848"),
+      adam:  () => cssVar("--accent", "#b48cff"),
+      adamw: () => cssVar("--accent2", "#4fd1c5"),
+    };
+    const names = { sgd: "SGD", mom: "SGD + momentum", adam: "Adam", adamw: "AdamW" };
+
+    // Build the right optimizer instance for a kind, over two fresh params.
+    function makeOpt(kind, p, eta, mu, beta2) {
+      if (kind === "sgd")   return new NN.SGD(p, { lr: eta });
+      if (kind === "mom")   return new NN.SGD(p, { lr: eta, momentum: mu });
+      if (kind === "adam")  return new NN.Adam(p, { lr: eta, beta1: 0.9, beta2: beta2 });
+      if (kind === "adamw") return new NN.Adam(p, { lr: eta, beta1: 0.9, beta2: beta2, weightDecay: 0.1, decoupled: true });
+    }
+
+    const DIRECT = Math.hypot(START[0], START[1]);  // straight-line distance start→min (~5)
+
+    // Run one optimizer to MAXSTEPS (or convergence/divergence). REAL steps.
+    // detour = path length / straight-line distance: 1.0 = perfectly straight,
+    // large = zigzag/overshoot. This measures "marches straight down" honestly,
+    // where raw step-count on a clean bowl just flatters whoever is tuned best.
+    function run(kind, eta, mu, beta2) {
+      const p = [{ data: START[0], grad: 0 }, { data: START[1], grad: 0 }];
+      const opt = makeOpt(kind, p, eta, mu, beta2);
+      const pts = [[p[0].data, p[1].data]];
+      const losses = [f(p[0].data, p[1].data)];
+      let steps = MAXSTEPS, status = "running", len = 0, px = START[0], py = START[1];
+      for (let k = 0; k < MAXSTEPS; k++) {
+        const g = grad(p[0].data, p[1].data);
+        p[0].grad = g[0]; p[1].grad = g[1];
+        opt.step();
+        const x = p[0].data, y = p[1].data, L = f(x, y);
+        len += Math.hypot(x - px, y - py); px = x; py = y;
+        if (!isFinite(L) || L > 1e6) { pts.push([x, y]); losses.push(NaN); status = "diverged"; steps = k + 1; break; }
+        pts.push([x, y]); losses.push(L);
+        if (L < THRESH) { status = "converged"; steps = k + 1; break; }
+      }
+      // Not converged & not diverged: either crawling (still falling) or dithering.
+      if (status === "running") {
+        const end = losses[losses.length - 1], mid = losses[Math.floor(losses.length * 0.7)];
+        status = (end < 0.7 * mid) ? "crawling" : "dithering";
+      }
+      return { pts, losses, steps, status, detour: len / DIRECT, final: losses[losses.length - 1] };
+    }
+
+    const KINDS = ["sgd", "mom", "adam", "adamw"];
+    let pick = "sgd";
+
+    // Legend swatches
+    for (const k of KINDS) { const el = document.getElementById("lg-" + k); if (el) el.style.background = colors[k](); }
+
+    const surf = new Surface3D(document.getElementById("d-surf"), {
+      fn: f, xmin: -5, xmax: 5, ymin: -4.2, ymax: 4.2, mode: "contour", levels: 12,
+    });
+    const lossCanvas = document.getElementById("d-loss");
+    const out = document.getElementById("d-out");
+
+    const etaC = makeCtrl(document.getElementById("d-ctrls"),
+      { label: "learning rate η (shared)", min: 0.01, max: 0.12, step: 0.005, value: 0.07, fmt: v => v.toFixed(3) });
+    const muC = makeCtrl(document.getElementById("d-ctrls"),
+      { label: "momentum μ", min: 0, max: 0.98, step: 0.02, value: 0.6, fmt: v => v.toFixed(2) });
+    const b2C = makeCtrl(document.getElementById("d-ctrls"),
+      { label: "Adam β₂", min: 0.9, max: 0.999, step: 0.001, value: 0.95, fmt: v => v.toFixed(3) });
+
+    // Path-picker buttons
+    const pickWrap = document.getElementById("d-pick");
+    const btns = {};
+    for (const k of KINDS) {
+      const b = document.createElement("button");
+      b.className = "btn secondary"; b.type = "button"; b.textContent = "path: " + names[k];
+      b.style.fontSize = ".82em"; b.style.padding = "4px 9px";
+      b.addEventListener("click", () => { pick = k; draw(); });
+      pickWrap.appendChild(b); btns[k] = b;
+    }
+
+    function statusWord(r) {
+      const path = `path ×<b>${r.detour.toFixed(2)}</b>`;
+      if (r.status === "converged") return `<b>${r.steps}</b> steps · ${path}`;
+      if (r.status === "diverged")  return `<b style="color:var(--bad)">DIVERGED</b>`;
+      if (r.status === "crawling")  return `crawling (${MAXSTEPS}+) · ${path}`;
+      return `dithering near min (needs LR decay → p.21) · ${path}`;
+    }
+
+    function draw() {
+      const eta = etaC.get(), mu = muC.get(), beta2 = b2C.get();
+      const runs = {}; for (const k of KINDS) runs[k] = run(k, eta, mu, beta2);
+
+      // LEFT: contour + the selected optimizer's real path.
+      surf.setTrajectory(runs[pick].pts);
+      for (const k of KINDS) btns[k].style.outline = (k === pick) ? ("2px solid " + colors[k]()) : "none";
+
+      // RIGHT: all four loss curves on one log-y axis, live.
+      const p = new Plot(lossCanvas, {
+        xmin: 0, xmax: MAXSTEPS, ymin: 1e-6, ymax: 200, ylog: true,
+        xlabel: "optimizer step k", ylabel: "loss f(θ_k)",
+      });
+      p.clear(); p.grid();
+      for (const k of KINDS) {
+        const L = runs[k].losses, xs = L.map((_, i) => i);
+        p.trace(xs, L, colors[k](), k === pick ? 3 : 1.8);
+      }
+
+      // READOUT: live update rule for the selected optimizer + steps-to-target.
+      let rule;
+      if (pick === "sgd") rule = `θ<sub>k+1</sub> = θ<sub>k</sub> − <b>${eta.toFixed(3)}</b>·g<sub>k</sub>`;
+      else if (pick === "mom") rule = `v<sub>k</sub> = <b>${mu.toFixed(2)}</b>·v<sub>k−1</sub> + g<sub>k</sub>,&nbsp; θ<sub>k+1</sub> = θ<sub>k</sub> − <b>${eta.toFixed(3)}</b>·v<sub>k</sub>`;
+      else rule = `θ<sub>k+1</sub> = θ<sub>k</sub> − <b>${eta.toFixed(3)}</b>·m̂<sub>k</sub>/(√v̂<sub>k</sub>+ε),&nbsp; β₂=<b>${beta2.toFixed(3)}</b>` + (pick === "adamw" ? ` + decoupled λ=0.1` : ``);
+      const scoreboard = KINDS.map(k =>
+        `<span style="color:${colors[k]()}">${names[k]}</span>: ${statusWord(runs[k])}`).join(" &nbsp;·&nbsp; ");
+      out.innerHTML =
+        `<b>${names[pick]}</b> update: &nbsp;${rule}<br>` +
+        `<span style="font-size:.92em">${scoreboard}</span><br>` +
+        `<span style="font-size:.84em;opacity:.75">path ×1.00 = perfectly straight to the minimum; larger = zigzag/overshoot.</span>`;
+    }
+
+    etaC.onInput(draw); muC.onInput(draw); b2C.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => {
+      for (const k of KINDS) { const el = document.getElementById("lg-" + k); if (el) el.style.background = colors[k](); }
+      surf.draw(); draw();
+    }, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz17", [
+    {
+      q: "On TN-1's second input, the nine gradients span from $|{\\partial\\mathcal{L}}/{\\partial b_2}| = 0.4593$ down to $|{\\partial\\mathcal{L}}/{\\partial W_1[0][1]}| = 0.0449$. The spread $\\max|g|/\\min|g|$ is:",
+      num: 10.22, tol: 0.1, unit: "×",
+      why: "$0.459260 / 0.044917 = 10.2246 \\approx 10.22\\times$ (constants.md §8.7) — one order of magnitude, all nine live. A single $\\eta$ cannot serve both ends, which is exactly what Adam's per-parameter scaling fixes."
+    },
+    {
+      q: "With a constant gradient and momentum $\\mu = 0.9$, the steady-state velocity is what multiple of the raw gradient?",
+      num: 10, tol: 0.5, unit: "×",
+      why: "The geometric series gives $\\mathbf{v}_\\infty = \\mathbf{g}/(1-\\mu) = 1/(1-0.9) = 10\\times$. A persistent slope gets a tenfold effective step; a sign-flipping one averages toward zero."
+    },
+    {
+      q: "With $\\beta_2 = 0.999$, over roughly how many past gradients does Adam's second moment $v$ average?",
+      num: 1000, tol: 10, unit: "steps",
+      why: "$1/(1-\\beta_2) = 1/(1-0.999) = 1000$ steps. That long memory is the mechanistic reason warmup exists — the $\\sqrt{\\hat v}$ denominator is untrustworthy until it has filled (page 21)."
+    },
+    {
+      q: "AdamW differs from Adam by exactly one thing. What is it?",
+      opts: [
+        "It uses a different, larger learning rate $\\eta$",
+        "It decouples weight decay — applying $\\lambda\\theta$ straight to the weights instead of folding it into the gradient",
+        "It drops the bias correction $1/(1-\\beta^k)$",
+        "It adds a third moment for the gradient's skew"
+      ],
+      a: 1,
+      why: "Decoupled weight decay is the entire content of the AdamW paper. Folding $\\lambda\\theta$ into the gradient lets Adam's $1/\\sqrt{\\hat v}$ rescale the decay per parameter; applying it to the weights keeps decay uniform. It changes nothing about $\\eta$ (distractor 1's misconception)."
+    },
+    {
+      q: "Why do 2026 LLM recipes set $\\beta_2 = 0.95$ instead of the classic $0.999$?",
+      opts: [
+        "$\\beta_2 = 0.95$ uses less optimizer memory",
+        "Text has huge gradient spikes from rare tokens; a 1000-step memory poisons the denominator, so a faster-forgetting $\\beta_2$ is more robust",
+        "$0.999$ is only valid for convex problems",
+        "It makes the learning rate schedule unnecessary"
+      ],
+      a: 1,
+      why: "$\\beta_2$ sets the second-moment memory, not the memory footprint (distractor 1's misconception). Rare-token spikes make a 1000-step average unreliable; $\\beta_2 = 0.95$ forgets in ~20 steps and shrugs them off. You still need a schedule (distractor 4)."
+    },
+    {
+      q: "\"Adam adapts the learning rate, so you don't have to tune $\\eta$.\" What's wrong with this?",
+      opts: [
+        "Nothing — Adam genuinely removes the need for a learning rate",
+        "Adam adapts the per-parameter scaling of the gradient ($\\hat m/\\sqrt{\\hat v}$); the scalar $\\eta$ out front is untouched and still needs a schedule",
+        "Adam adapts $\\eta$ but only for the first 1000 steps",
+        "Adam replaces $\\eta$ with the weight decay $\\lambda$"
+      ],
+      a: 1,
+      why: "\"Adaptive\" refers to the per-parameter gradient scaling, not the global $\\eta$, which Adam never touches. Reading it as \"no learning rate to tune\" is a classic way to ship a bad run."
+    },
+    {
+      q: "TN-1's gradient spread comes partly from the input. Doesn't normalising the inputs remove the case for Adam?",
+      opts: [
+        "Yes — with normalised inputs a single $\\eta$ is fine and Adam is unnecessary",
+        "No — even at a perfectly balanced 1:1 feature ratio the spread is still ~8.64×; it is structural (different layers, different roles) and survives normalisation",
+        "No — normalising inputs actually increases the spread",
+        "Yes, but only for networks deeper than TN-1"
+      ],
+      a: 1,
+      why: "You can inflate the spread with a lopsided input (e.g. 42× at [0.10, −2.00]), and the right answer to that is normalise. But the spread bottoms out at 8.64× even at 1:1 (constants.md §8.7) — it comes from the network's structure, so per-parameter scaling still earns its place."
+    }
+  ], "Optimizers: SGD → AdamW — self-check");
+
+});
+</script>
+</body>
+</html>

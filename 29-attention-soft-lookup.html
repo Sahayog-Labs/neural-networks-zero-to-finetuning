@@ -1,0 +1,651 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>29. Attention I: The Soft Lookup — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The flagship demo is the Q/K/V dot-product widget: a geometry
+   panel (the same six tokens, projected by W_Q in violet and W_K in orange) beside
+   a live heatmap of the score matrix S = QKᵀ. Two matrix editors drive both.
+   Wide artifacts scroll inside their own box so the page body never scrolls. */
+.qk-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; align-items: start; }
+.qk-editors { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 6px; }
+.qk-editor { border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.qk-editor h4 { margin: 0 0 6px; font-size: .82rem; font-weight: 600; }
+.qk-editor.wq h4 { color: var(--accent); }
+.qk-editor.wk h4 { color: #e08a3c; }
+.qk-editor .ctrl { margin: 4px 0; }
+.qk-editor .ctrl label { font-size: .72rem; }
+.qk-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 4px; }
+.qk-stat { font-family: var(--mono, monospace); }
+.qk-key-q { color: var(--accent); font-weight: 600; }
+.qk-key-k { color: #e08a3c; font-weight: 600; }
+@media (max-width: 860px) { .qk-grid { grid-template-columns: 1fr; } }
+@media (max-width: 780px) { .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="29-attention-soft-lookup.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Attention I: The Soft Lookup</h1>
+    <p class="subtitle">Every transformer you have ever run — every LLM, every
+      cross-attention block in your ComfyUI graph — is built from the operation on
+      this page. We are going to <em>derive</em> it, not memorize it: attention is a
+      dictionary lookup with the sharp edges filed off until gradients can flow
+      through it. Four pages cover the mechanism (soft lookup here, the
+      $\sqrt{d_{\text{head}}}$ scale and heads on page 30, self vs cross on page 31,
+      causal masking on page 32). This one earns the formula.</p>
+
+    <!-- ===================== THREAD ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product beat 4]</b> — the atom, again. <em>Same object</em> as
+      the neuron's weighted sum (page 3) and page 27's similarity meter between
+      <code>king</code> and <code>queen</code>. <em>What is new:</em> here the dot
+      product is computed <em>between every pair of tokens at once</em> — the matrix
+      $QK^\top$ is nothing but a table of dot products, one per query–key pair.
+      <em>Reopen:</em> page 27, where you saw that a dot product's value depends on
+      <em>which directions you measure along</em>. On this page the network gets to
+      <em>learn those directions</em> — that is what $W_Q$ and $W_K$ are.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: killed one paragraph later in prose, formalized in the
+         projections section, and boxed as the #1 misconception. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Self-attention has every token produce three things — a <b>query</b>, a
+      <b>key</b>, and a <b>value</b>. Before you scroll: are those three
+      <em>different things the token stores</em> (like three memory slots), or three
+      <em>views of one and the same vector</em>? Commit to an answer.
+    </div>
+    <p>The answer is <b>three views of one vector</b>, and the whole page turns on it.
+      In code the resolution is a single line — <code>q, k, v = x @ Wq.T, x @ Wk.T, x @ Wv.T</code>
+      — the <em>same</em> <code>x</code>, projected three times. Hold that; we will
+      earn it below and box it as the misconception that, left uncorrected, makes
+      cross-attention (and therefore diffusion conditioning) impossible to read.</p>
+
+    <!-- ===================== F1: derive the intuition ===================== -->
+    <h2>Start from a lookup you already know</h2>
+    <p>You have written this a thousand times:</p>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">memory = {<span class="tok-str">"cat"</span>: v_cat, <span class="tok-str">"dog"</span>: v_dog, <span class="tok-str">"car"</span>: v_car}</span>
+<span class="line">memory[<span class="tok-str">"cat"</span>]     <span class="tok-com"># -> v_cat</span></span>
+<span class="line">memory[<span class="tok-str">"kitten"</span>]  <span class="tok-com"># -> KeyError</span></span></code></pre>
+    </div>
+    <p>A Python dict has exactly three kinds of object: the <b>query</b> you look up
+      (<code>"kitten"</code>), the <b>keys</b> it is compared against
+      (<code>"cat"</code>, <code>"dog"</code>, …), and the <b>values</b> returned
+      (<code>v_cat</code>, …). It has two flaws that make it useless as a layer in a
+      learning machine:</p>
+    <ul>
+      <li><b>It is brittle.</b> <code>"kitten"</code> is cat-ish, but exact-match
+        equality returns nothing. We want graded relevance, not a yes/no.</li>
+      <li><b>It is not differentiable.</b> Hard equality is a step function —
+        its derivative is zero almost everywhere. No gradient means the network can
+        <em>never learn what to look up</em>. This is the chain rule's veto: a link
+        with zero local slope kills the whole product (page 5).</li>
+    </ul>
+
+    <p>Soften both flaws with one move you have made before. Replace <em>equality</em>
+      with a graded <b>similarity score</b> — the dot product, page 27's atom — and
+      replace <em>"return the one match"</em> with a <b>weighted average of every
+      value</b>, weighted by how well each key scored. For a single query
+      $\mathbf{q}$ against keys $\mathbf{k}_j$ and values $\mathbf{v}_j$:</p>
+
+    <p>$$\text{output} \;=\; \sum_j \underbrace{\frac{\exp(\mathbf{q}\cdot\mathbf{k}_j)}{\sum_{j'}\exp(\mathbf{q}\cdot\mathbf{k}_{j'})}}_{A_{j}\;=\;\text{how much key }j\text{ matched}} \,\mathbf{v}_j$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{q}$</td><td>the query — "what am I looking for?"</td><td>$(d_{\text{head}},)$</td><td>a projection of one token, below</td></tr>
+        <tr><td>$\mathbf{k}_j$</td><td>key $j$ — "what does token $j$ advertise?"</td><td>$(d_{\text{head}},)$</td><td>a projection of token $j$</td></tr>
+        <tr><td>$\mathbf{v}_j$</td><td>value $j$ — "what does token $j$ hand over if picked?"</td><td>$(d_{\text{head}},)$</td><td>a projection of token $j$</td></tr>
+        <tr><td>$\mathbf{q}\cdot\mathbf{k}_j$</td><td>the raw match score (a dot product)</td><td>scalar</td><td>the atom, page 27</td></tr>
+        <tr><td>$A_j$</td><td>the softmax weight on value $j$ (rows sum to 1)</td><td>scalar in $(0,1)$</td><td>softmax of the scores</td></tr>
+        <tr><td>$\text{output}$</td><td>the blended value returned to the query</td><td>$(d_{\text{head}},)$</td><td>weighted average of the $\mathbf{v}_j$</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The one sentence</span>
+      Attention is a dictionary lookup where the keys don't have to match exactly,
+      and instead of one value you get a <em>blend</em> of all of them, weighted by
+      how well each key matched. Softening the lookup is what makes it
+      <em>differentiable</em> — and differentiable means the network can
+      <b>learn what to look for</b>.
+    </div>
+
+    <!-- ===================== F1 step 4: learned projections ===================== -->
+    <h2>Tokens don't arrive with a query, key, and value — they compute them</h2>
+    <p>The one thing missing: a raw token embedding $\mathbf{x}_i$ is <em>not</em> a
+      query, or a key, or a value. Each of those is a <b>learned projection</b> of
+      $\mathbf{x}_i$. Stack the whole sequence as rows of $X$ and project all tokens
+      at once (row-batched, as all attention is):</p>
+
+    <p>$$Q = X W_Q^\top, \qquad K = X W_K^\top, \qquad V = X W_V^\top$$</p>
+
+    <div class="shape-ribbon codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">X            (S, d)                 # S tokens, each a d = d_model vector</span>
+<span class="line">W_Q, W_K     (d_head, d)            # (out, in) — ALWAYS</span>
+<span class="line">W_V          (d_head, d)            # (out, in)</span>
+<span class="line">Q = X @ W_Q.T                       (S, d_head)</span>
+<span class="line">K = X @ W_K.T                       (S, d_head)</span>
+<span class="line">V = X @ W_V.T                       (S, d_head)</span></code></pre>
+    </div>
+
+    <div class="box rule"><span class="box-title">🌐 Translation note</span>
+      Papers write $\mathbf{q} = W_Q\mathbf{x}$ with <em>column</em> vectors and
+      $W_Q \in \mathbb{R}^{d\times d_{\text{head}}}$. We use the <b>row-batched</b>
+      form for all attention (notation §1.3), so the weight is transposed in the
+      matmul and its shape stays $(d_{\text{out}}, d_{\text{in}}) = (d_{\text{head}}, d)$
+      — the invariant never moves; only the batch placement does. Papers also write
+      the per-head width as $d_k$, $d_v$, $d_h$, or <code>head_dim</code>; we write
+      $d_{\text{head}}$. And position is $i$ (papers use $t$, $i$, $n$, or $j$;
+      sequence length is $S$, papers' $T$, $L$, $N$, or <code>seq_len</code>).
+    </div>
+
+    <p>The three roles, said plainly, are the entire intuition:</p>
+    <ul>
+      <li><b>$\mathbf{q}_i = \mathbf{x}_i W_Q^\top$</b> — <em>"what am I looking for?"</em></li>
+      <li><b>$\mathbf{k}_j = \mathbf{x}_j W_K^\top$</b> — <em>"what do I advertise?"</em></li>
+      <li><b>$\mathbf{v}_j = \mathbf{x}_j W_V^\top$</b> — <em>"what do I hand over if I'm picked?"</em></li>
+    </ul>
+
+    <!-- ===================== Why three ===================== -->
+    <h2>Why three projections and not one?</h2>
+    <p>The natural objection: if a query and a key are both just a token, why not use
+      one projection for both and save two-thirds of the weights? Two reasons, and
+      each is load-bearing.</p>
+
+    <p><b>1. $Q \ne K$ buys asymmetric relevance.</b> Take the sentence <em>"the
+      animal didn't cross the street because <u>it</u> was too tired."</em> The token
+      <code>it</code> needs to look hard at <code>animal</code> — but
+      <code>animal</code> has little reason to look back at <code>it</code>.
+      Relevance is <em>directed</em>. If $W_Q = W_K$ then every score is
+      $S_{ij} = \mathbf{q}_i\cdot\mathbf{k}_j = (\mathbf{x}_i W_Q^\top)\cdot(\mathbf{x}_j W_Q^\top)$,
+      which is symmetric in $i$ and $j$: $S_{ij} = S_{ji}$, forced. Directed relations
+      are <em>gone</em>. Choosing <em>different</em> directions for the asker and the
+      advertiser is exactly what breaks the symmetry — and it is the same fact you
+      met on page 27, where <code>king·queen</code> depended on which directions you
+      measured along. $W_Q$ and $W_K$ are that choice of directions, now learned, and
+      chosen <em>separately</em>.</p>
+
+    <p><b>2. $V \ne K$ separates "how I'm found" from "what I contribute."</b> A key is
+      the token's advertisement; a value is its payload. <code>Paris</code> should
+      advertise <em>"ask me about France"</em> (via $\mathbf{k}$) while carrying the
+      geographic content it will actually hand over (via $\mathbf{v}$). The analogy is
+      a database: the <b>index</b> you search is not the <b>row</b> it points at — you
+      do not store the whole row inside the B-tree. Tying $V$ to $K$ would force the
+      thing a token is <em>found by</em> to equal the thing it <em>gives you</em>, and
+      those are genuinely different jobs.</p>
+
+    <!-- ===================== Misconception ===================== -->
+    <div class="box warn"><span class="box-title">⚠️ The #1 attention misconception</span>
+      <em>"Q, K, V are three different things the model has — like three memories."</em>
+      They are not. They are <b>three projections of the same vector</b>. In
+      self-attention every token makes all three from its own $\mathbf{x}_i$:
+      <div class="codeblock" data-lang="python" style="margin-top:8px">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">q, k, v = x @ Wq.T, x @ Wk.T, x @ Wv.T   <span class="tok-com"># same x, three times</span></span></code></pre>
+      </div>
+      This is the exact hinge for <b>cross-attention</b> (page 31): a learner who
+      believes Q/K/V are three separate memories cannot understand how a query can
+      come from an <em>image</em> while keys and values come from <em>text</em> —
+      which is precisely how diffusion conditioning works. Fix the picture now and
+      that page is free.
+    </div>
+
+    <!-- ===================== F2: the boxed formula ===================== -->
+    <h2>Scaled dot-product attention, every shape</h2>
+    <p>Assemble the pieces. Every score at once is the matrix $QK^\top$; a softmax
+      over each row turns scores into weights; those weights blend the values. In
+      frozen notation:</p>
+
+    <div class="box rule"><span class="box-title">📐 The formula</span>
+      $$\text{Attention}(Q,K,V) \;=\; \text{softmax}\!\left(\frac{QK^\top}{\sqrt{d_{\text{head}}}} + M\right)V$$
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$X$</td><td>the input token sequence</td><td>$(S, d)$</td><td>the residual stream</td></tr>
+        <tr><td>$W_Q, W_K, W_V$</td><td>the three projections</td><td>$(d_{\text{head}}, d)$ — (out, in)</td><td>learned parameters</td></tr>
+        <tr><td>$Q$</td><td>queries, one row per token</td><td>$(S, d_{\text{head}})$</td><td>$X W_Q^\top$</td></tr>
+        <tr><td>$K$</td><td>keys</td><td>$(S_{\text{kv}}, d_{\text{head}})$</td><td>$X W_K^\top$ (kv source)</td></tr>
+        <tr><td>$V$</td><td>values</td><td>$(S_{\text{kv}}, d_{\text{head}})$</td><td>$X W_V^\top$ (kv source)</td></tr>
+        <tr><td>$QK^\top$</td><td>the raw score table (dot products)</td><td>$(S, S_{\text{kv}})$</td><td>every query · every key</td></tr>
+        <tr><td>$\sqrt{d_{\text{head}}}$</td><td>the scale (a thermostat — page 30)</td><td>scalar</td><td>$\sqrt{128}=11.3137$ for Qwen3</td></tr>
+        <tr><td>$M$</td><td>additive mask ($0$ or $-\infty$)</td><td>$(S, S_{\text{kv}})$</td><td>identity here; masks on p.32</td></tr>
+        <tr><td>$A$</td><td>attention weights, row-softmaxed</td><td>$(S, S_{\text{kv}})$ — <b>rows sum to 1</b></td><td>$\text{softmax}_{\text{row}}$</td></tr>
+        <tr><td>$AV$</td><td>the output, one row per query</td><td>$(S, d_{\text{head}})$</td><td>weighted blend of values</td></tr>
+      </tbody>
+    </table>
+
+    <p>In production every attention runs with a batch axis and $H$ heads in
+      parallel. The full shape ribbon:</p>
+
+    <div class="shape-ribbon codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon · batched, with heads</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">Q          (B, H, S,     d_head)</span>
+<span class="line">K          (B, H, S_kv,  d_head)</span>
+<span class="line">scores = Q @ K.transpose(-1,-2)          (B, H, S, S_kv)     # / sqrt(d_head)</span>
+<span class="line">A = softmax(scores, dim=-1)              (B, H, S, S_kv)     # last axis = keys</span>
+<span class="line">O = A @ V                                (B, H, S, d_head)</span></code></pre>
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Three shape facts to hammer</span>
+      <ol style="margin:4px 0 0">
+        <li><b>The output has $S$ rows — one per query.</b> The key/value set
+          $S_{\text{kv}}$ can be <em>any length</em>, independent of $S$. This single
+          fact is what makes cross-attention obvious on page 31: let $K,V$ come from a
+          different, shorter sequence and nothing else changes.</li>
+        <li><b>Softmax is over the last axis — the keys.</b> So <span class="qk-stat">row&nbsp;$i$
+          of $A$ sums to&nbsp;1; columns do <em>not</em>.</span> Reading a heatmap
+          the other way (columns as probabilities) is the single most common misread
+          of an attention map.</li>
+        <li><b>The wiring is dimensionally rigid.</b> $d_{\text{head}}$ links $Q$ and
+          $K$; $S_{\text{kv}}$ links $K$ and $V$; $d = d_{\text{model}}$ never appears
+          again after the projections. There is exactly one legal way to connect
+          these tensors — <b>[THREAD:Qwen3-8B beat 6]</b> for Qwen3-8B that is
+          $d_{\text{head}}=128$ and $H=32$ (<code>constants.md</code> §1.1), the same
+          fourteen numbers we count all the way to the full parameter tally on
+          page 36.</li>
+      </ol>
+    </div>
+
+    <p><b>Why softmax specifically?</b> Two reasons, both the "soften to
+      differentiate" move made concrete. First, softmax forces $\sum_j A_{ij}=1$ with
+      every $A_{ij}>0$, so the output is a <em>convex combination</em> of the value
+      vectors — it lives inside their convex hull and cannot blow up; the layer is
+      stable by construction. Second, it is <em>smooth</em>, so gradient flows to
+      <em>every</em> key, including the ones that lost. A hard <code>argmax</code>
+      would hand all the gradient to the single winner and none to the rest —
+      nothing else could ever learn to compete. (The softmax's sharpness is set by
+      the logit scale, which is exactly what $\sqrt{d_{\text{head}}}$ controls — the
+      whole story of page 30.)</p>
+
+    <!-- ===================== Worked example ===================== -->
+    <div class="box worked"><span class="box-title">✍️ Worked example — one score, both directions</span>
+      Take $d = d_{\text{head}} = 2$ so we can do it by hand, with
+      $$W_Q = \begin{bmatrix} 1 & 0.3 \\ -0.2 & 1 \end{bmatrix},\qquad
+        W_K = \begin{bmatrix} 0.8 & -0.4 \\ 0.5 & 0.9 \end{bmatrix},$$
+      and two tokens $\mathbf{x}_{\text{it}} = (0.9,\,0.3)$,
+      $\mathbf{x}_{\text{animal}} = (0.6,\,0.9)$. Project (row-batched
+      $\mathbf{q} = \mathbf{x}W_Q^\top$, which equals the column form
+      $W_Q\mathbf{x}$):
+      <div style="margin:6px 0">
+        $\mathbf{q}_{\text{it}} = (1\cdot0.9 + 0.3\cdot0.3,\; -0.2\cdot0.9 + 1\cdot0.3) = (0.99,\,0.12)$<br>
+        $\mathbf{k}_{\text{animal}} = (0.8\cdot0.6 - 0.4\cdot0.9,\; 0.5\cdot0.6 + 0.9\cdot0.9) = (0.12,\,1.11)$
+      </div>
+      The score <code>it</code> gives <code>animal</code> is the dot product:
+      $$S_{\text{it},\,\text{animal}} = \mathbf{q}_{\text{it}}\cdot\mathbf{k}_{\text{animal}}
+        = 0.99(0.12) + 0.12(1.11) = 0.1188 + 0.1332 = \mathbf{0.2520}.$$
+      Now the <em>reverse</em> direction. With
+      $\mathbf{q}_{\text{animal}} = (0.87,\,0.78)$ and
+      $\mathbf{k}_{\text{it}} = (0.60,\,0.72)$:
+      $$S_{\text{animal},\,\text{it}} = 0.87(0.60) + 0.78(0.72) = 0.522 + 0.5616 = \mathbf{1.0836}.$$
+      $0.2520 \ne 1.0836$: the score matrix is <b>asymmetric</b>, exactly because
+      $W_Q \ne W_K$. These are the same two tokens the widget below starts on — hover
+      the <span class="qk-key-q">it</span>→<span class="qk-key-k">animal</span> cell
+      and read <code>0.2520</code> back.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Edit $W_Q$ (violet) and $W_K$ (orange) and watch two things move together: the
+      projected query/key arrows in the geometry panel, and the live score matrix
+      $S = QK^\top$. Three things to make happen: press <b>Set $W_Q = W_K$</b> and
+      watch the matrix snap <em>symmetric</em>; <b>Rotate $W_Q$ 90°</b> and watch
+      which tokens count as "similar" completely change; <b>Collapse $W_K$ → rank 1</b>
+      and watch every column go proportional — attention loses the ability to tell
+      keys apart.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">The Q/K/V dot-product widget · $S = QK^\top$ live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="qk-grid">
+          <div>
+            <canvas id="qk-geo" height="300"></canvas>
+            <p style="font-size:.78rem;color:var(--text-dim);margin:6px 2px 0">
+              Six tokens, projected. Faint gray = raw $\mathbf{x}_i$;
+              <span class="qk-key-q">violet</span> = $\mathbf{q}_i = \mathbf{x}_i W_Q^\top$;
+              <span class="qk-key-k">orange</span> = $\mathbf{k}_i = \mathbf{x}_i W_K^\top$.
+            </p>
+          </div>
+          <div>
+            <canvas id="qk-heat" height="300"></canvas>
+            <p style="font-size:.78rem;color:var(--text-dim);margin:6px 2px 0">
+              Score matrix $S_{ij} = \mathbf{q}_i\cdot\mathbf{k}_j$. Rows = queries,
+              columns = keys. Hover a cell to read the dot product live.
+            </p>
+          </div>
+        </div>
+
+        <div class="qk-editors">
+          <div class="qk-editor wq"><h4>$W_Q$ (out, in) — violet query projection</h4>
+            <div id="wq-ctrls"></div></div>
+          <div class="qk-editor wk"><h4>$W_K$ (out, in) — orange key projection</h4>
+            <div id="wk-ctrls"></div></div>
+        </div>
+
+        <div class="qk-btns">
+          <button class="btn secondary" id="qk-eq">Set $W_Q = W_K$</button>
+          <button class="btn secondary" id="qk-rot">Rotate $W_Q$ 90°</button>
+          <button class="btn secondary" id="qk-rank1">Collapse $W_K$ → rank 1</button>
+          <button class="btn secondary" id="qk-reset">Reset</button>
+        </div>
+        <div class="readout" id="qk-out"></div>
+      </div>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ What rank collapse foreshadows</span>
+      When you press <b>Collapse $W_K$ → rank 1</b>, all six key arrows fall onto a
+      single line and the score matrix's columns become proportional — every query
+      gets nearly the same answer, and the layer can no longer distinguish keys. That
+      failure has a name and a cure: it is a <em>rank-deficient</em> weight, and the
+      machinery for measuring and exploiting the rank of a weight matrix is
+      <b>SVD and LoRA</b> (Part IV, pages 39–40) — the exact tool you will use to
+      fine-tune. Attention is also the first place you meet the idea that <em>the
+      rank of a projection is a real, visible thing</em>.
+    </div>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <div class="box try"><span class="box-title">Run this · <code>code/attention_from_scratch.py</code></span>
+      The boxed formula on real tensor shapes, checked against PyTorch's fused kernel.
+      The two asserts are the lesson: rows of $A$ sum to 1 (columns do not), and the
+      hand-written version matches <code>F.scaled_dot_product_attention</code> to
+      floating-point tolerance.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/attention_from_scratch.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line">torch.manual_seed(<span class="tok-num">0</span>)</span>
+<span class="line">S, S_kv, d_head = <span class="tok-num">4</span>, <span class="tok-num">6</span>, <span class="tok-num">8</span>          <span class="tok-com"># queries, keys/values, per-head width</span></span>
+<span class="line">Q = torch.randn(S,    d_head)</span>
+<span class="line">K = torch.randn(S_kv, d_head)</span>
+<span class="line">V = torch.randn(S_kv, d_head)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">attention</span>(Q, K, V):</span>
+<span class="line">    scores = Q @ K.T / (d_head ** <span class="tok-num">0.5</span>)   <span class="tok-com"># (S, S_kv) — a table of dot products</span></span>
+<span class="line">    scores = scores - scores.max(dim=-<span class="tok-num">1</span>, keepdim=<span class="tok-kw">True</span>).values  <span class="tok-com"># online-safe softmax</span></span>
+<span class="line">    A = scores.exp()</span>
+<span class="line">    A = A / A.sum(dim=-<span class="tok-num">1</span>, keepdim=<span class="tok-kw">True</span>)      <span class="tok-com"># softmax over LAST axis = keys</span></span>
+<span class="line">    <span class="tok-kw">return</span> A @ V, A                          <span class="tok-com"># (S, d_head), (S, S_kv)</span></span>
+<span class="line"></span>
+<span class="line">O, A = attention(Q, K, V)</span>
+<span class="line"><span class="tok-kw">print</span>(<span class="tok-str">"Q"</span>, tuple(Q.shape), <span class="tok-str">"K"</span>, tuple(K.shape), <span class="tok-str">"scores/A"</span>, tuple(A.shape), <span class="tok-str">"O"</span>, tuple(O.shape))</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Rows sum to 1; columns do NOT (notation §7).</span></span>
+<span class="line"><span class="tok-kw">assert</span> torch.allclose(A.sum(dim=-<span class="tok-num">1</span>), torch.ones(S), atol=<span class="tok-num">1e-6</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-kw">not</span> torch.allclose(A.sum(dim=<span class="tok-num">0</span>), torch.ones(S_kv), atol=<span class="tok-num">1e-3</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Matches PyTorch's fused kernel (same 1/sqrt(d_head) scale).</span></span>
+<span class="line">O_ref = F.scaled_dot_product_attention(Q, K, V)</span>
+<span class="line"><span class="tok-kw">assert</span> torch.allclose(O, O_ref, atol=<span class="tok-num">1e-5</span>)</span>
+<span class="line"><span class="tok-kw">print</span>(<span class="tok-str">"ok: hand-written attention == F.scaled_dot_product_attention"</span>)</span></code></pre>
+    </div>
+
+    <p>That is the mechanism, whole. Page 30 asks the one question we skipped —
+      <em>why divide by $\sqrt{d_{\text{head}}}$ and not something else?</em> — and
+      turns that scalar into a thermostat on the softmax's temperature. Page 31 takes
+      the "keys can be any length" fact and lets $K,V$ come from a different sequence
+      entirely: cross-attention, the diffusion hinge.</p>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-29"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- The Q/K/V dot-product widget ---- */
+  (function () {
+    const { Mat } = NN;
+
+    // Six fixed tokens in 2-D (d = d_head = 2 for visualizability).
+    const labels = ["it", "animal", "street", "the", "was", "tired"];
+    const X = Mat.from([
+      [ 0.9,  0.3],
+      [ 0.6,  0.9],
+      [-0.8,  0.5],
+      [-0.3, -0.2],
+      [ 0.2, -0.9],
+      [-0.7, -0.7],
+    ]);
+
+    // Default projections (stored (out,in)); these reproduce the worked example.
+    const WQ0 = [[1, 0.3], [-0.2, 1]];
+    const WK0 = [[0.8, -0.4], [0.5, 0.9]];
+
+    const geo = document.getElementById("qk-geo");
+    const out = document.getElementById("qk-out");
+    let hovered = { i: 0, j: 1 };  // start on it -> animal (the worked cell)
+
+    // Build 8 sliders: WQ[0][0..1], WQ[1][0..1], then WK likewise.
+    function mkMatCtrls(parentId, names, init) {
+      const parent = document.getElementById(parentId);
+      const ctrls = [];
+      names.forEach((nm, idx) => {
+        const c = makeCtrl(parent, {
+          label: nm, min: -2, max: 2, step: 0.1,
+          value: init[idx], fmt: v => v.toFixed(1),
+        });
+        c.onInput(draw);
+        ctrls.push(c);
+      });
+      return ctrls;
+    }
+
+    // Read a 2x2 (out,in) matrix from a group of 4 ctrls: [a,b,c,d] -> [[a,b],[c,d]]
+    function readMat(ctrls) {
+      return Mat.from([[ctrls[0].get(), ctrls[1].get()], [ctrls[2].get(), ctrls[3].get()]]);
+    }
+    function setCtrls(ctrls, vals) {
+      vals.forEach((v, i) => {
+        // clamp into slider range so programmatic sets never desync the thumb
+        const cv = Math.max(-2, Math.min(2, Math.round(v * 10) / 10));
+        ctrls[i].input.value = cv;
+        ctrls[i].input.dispatchEvent(new Event("input"));
+      });
+    }
+
+    const wqCtrls = mkMatCtrls("wq-ctrls",
+      ["$W_Q$[0,0]", "$W_Q$[0,1]", "$W_Q$[1,0]", "$W_Q$[1,1]"],
+      [WQ0[0][0], WQ0[0][1], WQ0[1][0], WQ0[1][1]]);
+    const wkCtrls = mkMatCtrls("wk-ctrls",
+      ["$W_K$[0,0]", "$W_K$[0,1]", "$W_K$[1,0]", "$W_K$[1,1]"],
+      [WK0[0][0], WK0[0][1], WK0[1][0], WK0[1][1]]);
+
+    // Heatmap of the score matrix (diverging: negatives cool, positives warm).
+    const hm = new Heatmap(document.getElementById("qk-heat"), {
+      data: [[0]], rowLabels: labels, colLabels: labels,
+      colormap: "diverging", cellText: (v) => v.toFixed(1), colorbar: true, hover: true,
+      onHover: (i, j) => { if (i != null) { hovered = { i, j }; draw(); } },
+      height: 300,
+    });
+
+    function computeQK() {
+      const WQ = readMat(wqCtrls), WK = readMat(wkCtrls);
+      const Q = X.matmul(WQ.T());   // (6,2) = X (6,2) @ WQ^T (2,2)
+      const K = X.matmul(WK.T());   // (6,2)
+      const S = Q.matmul(K.T());    // (6,6) raw scores = table of dot products
+      return { WQ, WK, Q, K, S };
+    }
+
+    function drawGeo(Q, K) {
+      // Fit through the shared vizUtils.fitCanvas helper (same path #qk-heat
+      // takes via Heatmap): it caches the CSS height ONCE in geo.dataset.baseH
+      // and only reallocates the backing store when the CSS size actually
+      // changes. The old bespoke code re-read geo.getAttribute("height") every
+      // frame — but geo.height reflects back into that attribute already scaled
+      // by dpr, so on any dpr != 1 display each redraw multiplied the height by
+      // dpr again, compounding geometrically until the tab ran out of memory.
+      const { g, W: w, H: h } = vizUtils.fitCanvas(geo, 300);
+      g.clearRect(0, 0, w, h);
+      const cx = w / 2, cy = h / 2;
+      // scale so the largest projected coordinate fits with margin
+      let m = 1;
+      for (let i = 0; i < 6; i++) {
+        m = Math.max(m, Math.abs(Q.get(i, 0)), Math.abs(Q.get(i, 1)), Math.abs(K.get(i, 0)), Math.abs(K.get(i, 1)));
+      }
+      const sc = (Math.min(w, h) / 2 - 34) / m;
+      const grid = vizUtils.cssVar("--plot-grid", "#243049");
+      const dim = vizUtils.cssVar("--text-dim", "#8391ab");
+      const violet = vizUtils.cssVar("--accent", "#b48cff");
+      const orange = "#e08a3c";
+      // axes
+      g.strokeStyle = grid; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(0, cy); g.lineTo(w, cy); g.moveTo(cx, 0); g.lineTo(cx, h); g.stroke();
+      const P = (x, y) => [cx + x * sc, cy - y * sc];
+      // faint raw tokens
+      g.fillStyle = dim;
+      for (let i = 0; i < 6; i++) {
+        const [px, py] = P(X.get(i, 0), X.get(i, 1));
+        g.globalAlpha = 0.4; g.beginPath(); g.arc(px, py, 3, 0, 2 * Math.PI); g.fill(); g.globalAlpha = 1;
+      }
+      function arrow(x, y, color, lab, hi) {
+        const [px, py] = P(x, y);
+        g.strokeStyle = color; g.fillStyle = color; g.lineWidth = hi ? 3 : 1.6;
+        g.globalAlpha = hi ? 1 : 0.85;
+        g.beginPath(); g.moveTo(cx, cy); g.lineTo(px, py); g.stroke();
+        g.beginPath(); g.arc(px, py, hi ? 4 : 3, 0, 2 * Math.PI); g.fill();
+        g.globalAlpha = 1;
+        g.font = (hi ? "bold " : "") + "11px system-ui";
+        g.fillText(lab, px + 5, py - 4);
+      }
+      for (let i = 0; i < 6; i++) arrow(K.get(i, 0), K.get(i, 1), orange, labels[i], hovered.j === i);
+      for (let i = 0; i < 6; i++) arrow(Q.get(i, 0), Q.get(i, 1), violet, labels[i], hovered.i === i);
+    }
+
+    function draw() {
+      const { WK, Q, K, S } = computeQK();
+      // symmetric domain so 0 sits at the neutral mid-color
+      let amax = 1e-6; for (let i = 0; i < S.data.length; i++) amax = Math.max(amax, Math.abs(S.data[i]));
+      hm.o.domain = [-amax, amax];
+      hm.setData(S.toArray());
+      drawGeo(Q, K);
+
+      // symmetry metric: max |S_ij - S_ji|
+      let asym = 0;
+      for (let i = 0; i < 6; i++) for (let j = 0; j < 6; j++)
+        asym = Math.max(asym, Math.abs(S.get(i, j) - S.get(j, i)));
+      // rank of W_K via |det|
+      const det = Math.abs(WK.get(0, 0) * WK.get(1, 1) - WK.get(0, 1) * WK.get(1, 0));
+      const rankTxt = det < 0.02 ? "1 (det ≈ 0 — collapsed)" : "2 (full)";
+
+      const i = hovered.i, j = hovered.j;
+      const qi = [Q.get(i, 0), Q.get(i, 1)], kj = [K.get(j, 0), K.get(j, 1)];
+      const dotp = qi[0] * kj[0] + qi[1] * kj[1];
+      out.innerHTML =
+        `<b>S[<span class="qk-key-q">${labels[i]}</span>, <span class="qk-key-k">${labels[j]}</span>]</b> = ` +
+        `q·k = (${qi[0].toFixed(2)})(${kj[0].toFixed(2)}) + (${qi[1].toFixed(2)})(${kj[1].toFixed(2)}) = <b>${dotp.toFixed(4)}</b> &nbsp;·&nbsp; ` +
+        `symmetry gap max|S<sub>ij</sub>−S<sub>ji</sub>| = <b>${asym.toFixed(3)}</b> ` +
+        `(→ 0 iff W<sub>Q</sub>=W<sub>K</sub>) &nbsp;·&nbsp; rank(W<sub>K</sub>) = <b>${rankTxt}</b>`;
+    }
+
+    // Buttons
+    document.getElementById("qk-eq").addEventListener("click", () => {
+      setCtrls(wkCtrls, [wqCtrls[0].get(), wqCtrls[1].get(), wqCtrls[2].get(), wqCtrls[3].get()]);
+    });
+    document.getElementById("qk-rot").addEventListener("click", () => {
+      // W_Q <- R(90°) @ W_Q,  R = [[0,-1],[1,0]]
+      const a = wqCtrls[0].get(), b = wqCtrls[1].get(), c = wqCtrls[2].get(), d = wqCtrls[3].get();
+      setCtrls(wqCtrls, [-c, -d, a, b]);
+    });
+    document.getElementById("qk-rank1").addEventListener("click", () => {
+      // Force row 2 = 2 x row 1 -> rank(W_K)=1
+      const a = wkCtrls[0].get(), b = wkCtrls[1].get();
+      setCtrls(wkCtrls, [a, b, 2 * a, 2 * b]);
+    });
+    document.getElementById("qk-reset").addEventListener("click", () => {
+      setCtrls(wqCtrls, [WQ0[0][0], WQ0[0][1], WQ0[1][0], WQ0[1][1]]);
+      setCtrls(wkCtrls, [WK0[0][0], WK0[0][1], WK0[1][0], WK0[1][1]]);
+    });
+
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-29", [
+    {
+      q: "In self-attention, the query, key, and value for one token are:",
+      opts: [
+        "Three separate memory slots the model stores per token",
+        "Three consecutive tokens in the sequence",
+        "Three learned projections of the same input vector $\\mathbf{x}_i$",
+        "The same vector, copied three times unchanged"
+      ],
+      a: 2,
+      why: "They are $\\mathbf{q}=\\mathbf{x}W_Q^\\top$, $\\mathbf{k}=\\mathbf{x}W_K^\\top$, $\\mathbf{v}=\\mathbf{x}W_V^\\top$ — the same $\\mathbf{x}$, three different learned projections. 'Three memories' is the boxed misconception that makes cross-attention unreadable."
+    },
+    {
+      q: "Setting $W_Q = W_K$ forces the raw score matrix $S = QK^\\top$ to be:",
+      opts: ["Diagonal", "Symmetric", "Rank 1", "All zeros"],
+      a: 1,
+      why: "With $W_Q=W_K$, $S_{ij}=(\\mathbf{x}_iW_Q^\\top)\\cdot(\\mathbf{x}_jW_Q^\\top)=S_{ji}$. Relevance becomes mutual, and directed relations like 'it'→'animal' without 'animal'→'it' are impossible."
+    },
+    {
+      q: "$X$ is $(128, 4096)$ and $W_Q$ is $(128, 4096)$ in (out, in) order. In $Q = XW_Q^\\top$, how many ROWS does $Q$ have?",
+      num: 128, tol: 0,
+      why: "Rows of $Q$ = rows of $X$ = the number of tokens $S = 128$. One query per token; that count comes from $X$, not from $W_Q$."
+    },
+    {
+      q: "Same tensors: $X\\,(128,4096)$, $W_Q\\,(128,4096)$ as (out, in). How many COLUMNS does $Q = XW_Q^\\top$ have?",
+      num: 128, tol: 0,
+      why: "Columns of $Q$ = $W_Q$'s out-features = $d_{\\text{head}} = 128$. It happens to equal $S$ here, but it comes from a different place — the projection's output width, not the sequence length."
+    },
+    {
+      q: "In $A = \\text{softmax}(QK^\\top/\\sqrt{d_{\\text{head}}})$, the softmax runs over:",
+      opts: [
+        "The query axis, so each column of $A$ sums to 1",
+        "Both axes, so the whole matrix sums to 1",
+        "The key axis (the last axis), so each query-row of $A$ sums to 1",
+        "Neither — softmax is applied elementwise"
+      ],
+      a: 2,
+      why: "Softmax is over the last (key) axis: row $i$ of $A$ sums to 1, columns do not. Reading the columns as probabilities is the most common attention-heatmap misread."
+    },
+    {
+      q: "Why is $V$ a separate projection from $K$, rather than reusing the keys as values?",
+      opts: [
+        "Because $V$ must have more rows than $K$",
+        "Because values must be normalized and keys must not",
+        "Because $V$ is what makes the scores symmetric",
+        "Because 'how I'm found' ($\\mathbf{k}$) and 'what I contribute' ($\\mathbf{v}$) are different jobs"
+      ],
+      a: 3,
+      why: "A key is the searchable index; the value is the payload it points at — like a database index vs the row it points to. 'Paris' can advertise 'ask me about France' while carrying different geographic content."
+    },
+    {
+      q: "Your attention output comes out with the wrong number of rows. The most likely cause is:",
+      opts: [
+        "Your $d_{\\text{head}}$ is too small",
+        "You softmaxed or indexed the query axis, or swapped the $K$/$V$ lengths — output rows must equal the number of queries $S$",
+        "You forgot to divide by $\\sqrt{d_{\\text{head}}}$",
+        "Your temperature is set below 1"
+      ],
+      a: 1,
+      why: "The output has exactly $S$ rows, one per query — $AV$ is $(S,d_{\\text{head}})$. Wrong row count means you contracted the wrong axis: softmaxed columns, or mismatched $K$ and $V$ lengths. The scale and temperature change values, never shapes."
+    }
+  ], "Attention I — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,660 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>58. The Denoiser I: The U-Net — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tags, shape ribbon, level table, radio rows. The PREDICT
+     box, Symbol Ledgers and callouts come from the shared course.css components. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .84rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .ribbon b { color: var(--text); font-weight: 700; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .canvaswrap { overflow-x: auto; }
+</style>
+</head>
+<body data-page="58-the-unet-in-depth.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · The Denoiser I</span>
+    <h1>The Denoiser's Body I: the U-Net, in Depth</h1>
+    <p class="subtitle">For five pages the network was a black box called $\epsilon_\theta$ — we knew its
+      <em>job</em> (predict the noise) but never opened it. Here we open it. Its whole silhouette is forced by one
+      shape constraint, its famous skips carry <em>information</em> rather than gradients, and its cross-attention
+      matrix is — literally — your prompt, laid over the picture.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: answered in the "Skips carry information" section
+         ("So the predict answer is...") and again by the D58.1 ablation demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Take a working U-Net and <strong>cut its skip connections</strong> — the wires that jump straight from the
+      down-path to the matching level of the up-path. Does the crippled network (a) <strong>train more slowly</strong>
+      but eventually reach the same quality, or (b) produce <strong>permanently blurry</strong> output no matter how
+      long you train? Commit to one before the ablation demo below.
+    </div>
+
+    <!-- ============================ SHAPE CONSTRAINT ============================ -->
+    <h2>The job is a shape constraint</h2>
+
+    <p>You already know what this network is <em>for</em>: pages 54–57 handed it a noisy latent and a timestep and
+      asked it to name the noise (or the velocity — same triangle, page 55). What we never wrote down is the
+      network's <strong>type signature</strong>, and the type signature is what forces the architecture:</p>
+
+    <p>$$\epsilon_\theta:\ \underbrace{\mathbb{R}^{C\times H_{\text{lat}}\times W_{\text{lat}}}}_{\text{noisy latent}}
+        \times \underbrace{\mathbb{R}}_{\text{noise level }t}
+        \times \underbrace{\mathbb{R}^{S_{\text{txt}}\times d_c}}_{\text{text}}
+        \ \longrightarrow\ \underbrace{\mathbb{R}^{C\times H_{\text{lat}}\times W_{\text{lat}}}}_{\text{predicted noise}}$$
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{x}_t$</td><td>the noisy latent going in</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$, e.g. $(4,64,64)$</td><td>the VAE encode (p.53), noised by Eq. 3.3 (p.54)</td></tr>
+        <tr><td>$t$</td><td>the noise level — one scalar</td><td>scalar, $0..T$</td><td>sampled uniformly each step</td></tr>
+        <tr><td>$\mathbf{c}$</td><td>the text conditioning</td><td>$(S_{\text{txt}}, d_c)$, e.g. $(77, 768)$</td><td>CLIP text encoder over your prompt</td></tr>
+        <tr><td>$\hat{\boldsymbol\epsilon}$</td><td>the predicted noise</td><td><strong>same as $\mathbf{x}_t$</strong></td><td>what we regress against $\boldsymbol\epsilon$</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 Output shape equals input shape — this is dense prediction</span>
+      An image classifier collapses $(C,H,W)$ down to $V$ class logits. This network must emit a full tensor the
+      <strong>same shape</strong> as its input — a noise value <em>per latent element</em>. It is not a classifier
+      and it is not an LLM; it is a <strong>dense predictor</strong>, an image-to-image map that happens to be
+      steered by a scalar and a caption. Two architecture families satisfy that constraint, and you own checkpoints
+      of both: the <strong>U-Net</strong> (SD1.5, SDXL) and the <strong>DiT</strong> (SD3.5, FLUX, Z-Image,
+      Qwen-Image). This page is the U-Net; page 59 is the DiT.
+    </div>
+
+    <div class="ribbon">noisy latent  <b>x_t</b>   (C=4, H_lat=64, W_lat=64)     # an SD1.5 latent, p.53
+noise level   <b>t</b>     scalar in 0..1000             # one number
+text cond     <b>c</b>     (S_txt=77, d_c=768)           # CLIP tokens, p.31 / p.53
+                    │
+              ε_θ ( the U-Net )
+                    │
+pred. noise   <b>ε̂</b>    (C=4, H_lat=64, W_lat=64)      # SAME shape as x_t — dense prediction</div>
+
+    <!-- ============================ U-NET STRUCTURE ============================ -->
+    <h2>The U-Net silhouette</h2>
+
+    <p>A dense predictor has a problem: to decide what a pixel should be, you need <em>global</em> context
+      (is this region sky or water?) <em>and</em> <em>local</em> detail (where exactly is this edge?). Convolutions
+      see locally and cheaply; to see globally you must shrink the map so a fixed kernel covers more ground. So the
+      U-Net does both in sequence — squeeze down to a tiny, wide bottleneck to reason about <em>what</em>, then
+      expand back up to full resolution to place <em>where</em>. The classic SD1.5 body:</p>
+
+    <div class="box worked"><span class="box-title">✍️ SD1.5 U-Net levels (512² image → 64² latent) <span class="xref" style="font-weight:400">[EST] — read your own <code>unet/config.json</code> to confirm the multipliers</span></span>
+      <table class="data">
+        <thead><tr><th>path</th><th>spatial</th><th>channels</th><th>block</th></tr></thead>
+        <tbody>
+          <tr><td>in</td><td>64²</td><td>320</td><td>ResBlock ×2 + Transformer2D</td></tr>
+          <tr><td>down 1</td><td>32²</td><td>640</td><td>ResBlock + Transformer2D</td></tr>
+          <tr><td>down 2</td><td>16²</td><td>1280</td><td>ResBlock + Transformer2D</td></tr>
+          <tr><td><b>bottleneck</b></td><td>8²</td><td>1280</td><td>ResBlock + Transformer2D + ResBlock</td></tr>
+          <tr><td>up 2</td><td>16²</td><td>1280 → (concat)</td><td>ResBlock + Transformer2D</td></tr>
+          <tr><td>up 1</td><td>32²</td><td>640 → (concat)</td><td>ResBlock + Transformer2D</td></tr>
+          <tr><td>out</td><td>64²</td><td>320 → (concat)</td><td>ResBlock ×3, then conv → 4 ch</td></tr>
+        </tbody>
+      </table>
+      Spatial goes <strong>64² → 8² → 64²</strong>, channels <strong>320 → 1280 → 320</strong> — the "U". The up-path
+      convolutions take <strong>double</strong> the input channels you might expect, because each level
+      <strong>concatenates</strong> the matching down-path activation before convolving. That concat is the skip, and
+      it is the whole story.
+    </div>
+
+    <!-- ============================ SKIPS ============================ -->
+    <h2>★ The skips carry information, not gradients</h2>
+
+    <p>Here is the explanation almost every tutorial gets wrong. At the $8\times8$ bottleneck, each of the 64
+      activations summarizes an $8\times8$ patch of latent — a $64\times64$-pixel patch of image at the VAE's $f=8$.
+      That activation genuinely <em>knows</em> "there is a face in the upper-left" — that is the <em>what</em>. But it
+      <strong>cannot possibly know</strong> where each eyelash goes: that information was averaged away three
+      downsamples ago and is <strong>physically not in the tensor</strong> anymore. No amount of clever up-path
+      convolution can invent it back from an $8\times8$ summary.</p>
+
+    <div class="box key"><span class="box-title">🔑 The skip is a wire carrying information that would otherwise not exist</span>
+      Down-path decides <strong>what</strong>. Up-path decides <strong>where</strong>. The skip hands the up-path the
+      original high-resolution activation from <em>before</em> the bottleneck destroyed it — routing the fine detail
+      <em>around</em> the squeeze instead of through it. It is not an optimization aid that makes training converge
+      faster. It is the only path by which the <em>where</em> survives the trip. Sever it and the detail is gone for
+      good — not slow to learn, <strong>impossible to produce</strong>.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "U-Net skips help gradients, like ResNet"</span>
+      Different mechanism, and even a different <em>operation</em>. A <strong>ResNet residual</strong> is
+      $\mathbf{h}_{\text{out}} = \mathbf{h}_{\text{in}} + F(\mathbf{h}_{\text{in}})$ — it <strong>adds</strong>, same
+      shape in and out, and its job is to give gradients a short-circuit so deep stacks train (page 34). A
+      <strong>U-Net skip</strong> <strong>concatenates</strong> a high-res down-path tensor onto a low-res up-path
+      tensor at the matching level — that is why the up-path convs take double channels. One is a highway for
+      gradients through depth; the other is a highway for spatial information around a bottleneck. Conflating them is
+      the single most common U-Net error. <strong>So the predict answer is (b): a skip-free U-Net is permanently
+      blurry</strong> — the ablation demo below severs skips one band at a time and you can watch the edges leave.
+    </div>
+
+    <!-- ============================ DEMO 1 ============================ -->
+    <h2>Demo — sever the skips, watch the detail die</h2>
+
+    <div class="box try"><span class="box-title">Try it — an MNIST digit through the skip pathway</span>
+      The spec's ablation is two tiny MNIST diffusion U-Nets, identical except their skips are severed. A browser
+      can't <em>train</em> one, so rather than fake its pixels this computes, bit-exactly, the one thing a U-Net skip
+      actually carries: the high-frequency detail band the bottleneck destroyed. The image is an <strong>MNIST-style
+      digit</strong> at MNIST's native $28^2$ grid. Its encoder is a Gaussian pyramid (repeated $2\times2$
+      average-pooling); each <strong>skip</strong> is one detail band $D_k = L_k - \text{up}(L_{k+1})$ — precisely the
+      edges downsampling threw away. Reconstruct from the $8^2$ bottleneck by upsampling and adding the skip bands
+      back; with all skips active the reconstruction is <em>bit-exact</em> — the same guarantee the skips give the
+      real U-Net. Drag "skips cut" up and each severed band is <strong>physically absent</strong> from the digit. Cut
+      them all and only the $8^2$ blur survives: a right-shaped blob, no edges — a structurally blurry digit, not a
+      slow-training one. The ablation, on the exact quantity the skip is responsible for.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">MNIST digit · U-Net skip ablation (exact detail-band severing), computed live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="canvaswrap"><canvas id="d-skip" height="200"></canvas></div>
+        <div class="controls" id="d-skip-ctrls"></div>
+        <div class="readout" id="d-skip-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ WHERE t ENTERS ============================ -->
+    <h2>Where the timestep enters — as gain, not signal</h2>
+
+    <p>The latent flows through the convolutions as the <em>signal</em>. The timestep $t$ does not join that stream as
+      an extra channel; it enters as <strong>modulation</strong> (FiLM), rescaling and shifting each normalized
+      feature map:</p>
+
+    <p>$$\mathbf{h}\ \leftarrow\ \mathrm{GroupNorm}(\mathbf{h})\odot\big(1+\gamma_{\text{film}}(t)\big)\ +\ \boldsymbol\beta_{\text{film}}(t)$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf{h}$</td><td>a feature map inside a ResBlock</td><td>$(C_\ell, H_\ell, W_\ell)$</td><td>the conv stream</td></tr>
+        <tr><td>$\gamma_{\text{film}}(t)$</td><td>per-channel <em>scale</em> (gain)</td><td>$(C_\ell,)$</td><td>a small MLP on the $t$-embedding</td></tr>
+        <tr><td>$\boldsymbol\beta_{\text{film}}(t)$</td><td>per-channel <em>shift</em></td><td>$(C_\ell,)$</td><td>the same MLP</td></tr>
+        <tr><td>$\odot$</td><td>elementwise (broadcast over $H_\ell,W_\ell$)</td><td>—</td><td>—</td></tr>
+      </tbody>
+    </table>
+
+    <p class="thread"><b>Translation.</b> FiLM's scale/shift are conventionally named $\gamma,\beta$; the shift here is
+      $\boldsymbol\beta_{\text{film}}(t)$, <strong>not</strong> the noise-schedule $\beta_t$ of page 54 — different
+      object, same Greek letter, so we subscript it.</p>
+
+    <p class="thread"><b>[THREAD: Qwen3-8B · beat]</b> Same object, new use. Before the MLP, $t$ is turned into a vector
+      by a <strong>sinusoidal embedding</strong> — the <em>exact same function</em> as the LLM track's positional
+      encoding (p.33), applied to a scalar noise level instead of a token position. Reopen p.33: sines and cosines at
+      geometric frequencies. We do not re-derive it; we reuse it.</p>
+
+    <p>Why gain and not an extra input channel? Because $t$ is a <strong>global mode switch</strong> — it tells every
+      block <em>which job it is doing right now</em>: at high $t$ (near pure noise) the network's job is coarse
+      composition; at low $t$ it is fine texture. A mode switch that reconfigures how a whole layer behaves belongs in
+      the layer's <em>gain</em>, applied identically across every spatial position — not smuggled in as one more
+      pixel-like signal the convolution has to disentangle.</p>
+
+    <!-- ============================ SELF VS CROSS ============================ -->
+    <h2>Self- and cross-attention, told apart by their shapes</h2>
+
+    <p>Each Transformer2D block does two attentions, and you already own attention mask-agnostically from the trunk
+      (p.29–31). The only new thing here is <em>what plays $Q$, $K$, $V$</em> — and that is entirely a statement about
+      shapes. Flatten the feature map $[B,C,H,W]\to[B,HW,C]$ so each spatial location is one "image token":</p>
+
+    <div class="ribbon">h        (B, C=640, 32, 32)              # SD1.5 down-1 feature map
+flatten  (B, <b>1024</b>, 640)                 # HW = 32×32 = 1024 image tokens
+── self-attention: "let distant pixels talk" ──
+Q, K, V  all from h                    (B, 1024, 640)
+A = softmax(QKᵀ / √d_head)             (B, <b>1024, 1024</b>)   # image ↔ image,  cost O((HW)²)
+── cross-attention: "inject the prompt" ──
+Q        from h                        (B, 1024, 640)
+K, V     from c (text)                 (B, <b>77</b>, 640)      # S_txt = 77 CLIP tokens
+A = softmax(QKᵀ / √d_head)             (B, <b>1024, 77</b>)     # image ↔ prompt, cost O(HW·S_txt)</div>
+
+    <div class="box key"><span class="box-title">🔑 The $[1024\times77]$ matrix is your prompt, laid over the picture</span>
+      Read that cross-attention matrix literally. It has <strong>1024 rows</strong>, one per image patch, and
+      <strong>77 columns</strong>, one per CLIP prompt token. Entry $(i,j)$ answers: <em>how much does patch $i$ look
+      at prompt token $j$?</em> The softmax is over the last axis (the 77 tokens), so <strong>each row sums to 1;
+      columns do not</strong> (page 30's rule — learners read heatmaps backwards constantly). The 77 columns are your
+      prompt. Take column $j$ for the word "dog," reshape its 1024 entries back to $32\times32$, and you have a heatmap
+      of <em>where the model is drawing the dog</em>. This one matrix is the entire mechanism of text-to-image;
+      everything else in the block is plumbing — and it is exactly what the attention-map nodes in your ComfyUI graph
+      visualize.
+    </div>
+
+    <p class="thread"><b>[THREAD: The dot product · beat]</b> Every entry of that matrix is a dot product —
+      $\langle\mathbf{q}_i,\mathbf{k}_j\rangle/\sqrt{d_{\text{head}}}$, patch-query against token-key — the same atom
+      from p.3, scaled the same way as p.30. Cross-attention is just: <em>let the keys come from somewhere else.</em>
+      Reopen p.31 (self vs cross): the only difference between the two attentions above is where $K,V$ are read from.</p>
+
+    <!-- ============================ DEMO 2 ============================ -->
+    <h2>Demo — the cross-attention matrix, computed live</h2>
+
+    <div class="box try"><span class="box-title">Try it — layer × timestep, computed live</span>
+      Real maps come from a diffusers run with forward hooks on a $512^2$ generation. A browser has no such model, so
+      rather than ship fabricated "captured" maps this runs the <em>identical</em> operation,
+      $\mathrm{softmax}(QK^\top/\sqrt{d})$, live on an explicit toy: a <strong>red cube on a blue sphere</strong> laid
+      out on SD1.5's $64^2$ latent grid, with hand-labelled patch features (which concept each patch carries) and
+      token features (which concept each word names). Nothing is looked up. Click a word to reshape its column of the
+      cross-attention matrix into a spatial map: <strong>"red" and "cube" light the cube; "blue" and "sphere" light
+      the sphere.</strong> Then drive the two sliders the spec asks for. <strong>Layer $\ell$</strong> is the U-Net
+      level the attention lives at: coarse levels ($8^2, 16^2$) attend through large receptive fields and give diffuse
+      blobs, fine levels ($32^2, 64^2$) resolve the object's edge — and the $32^2$ level is exactly the
+      $[1024\times77]$ matrix from the ribbon above. <strong>Timestep $t$</strong> (modeled as attention temperature)
+      runs the other axis: high $t$ maps are diffuse blobs (deciding <em>roughly where</em>), low $t$ tight and
+      object-shaped — <strong>composition early, detail late</strong>, the same story as p.54's SNR≈1 band and p.57's
+      logit-normal timestep sampling, now visible in one drag.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Cross-attention: which patch attends to which word · layer × timestep <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:16px" class="d-xattn-grid">
+          <div><canvas id="d-xattn-scene" height="230"></canvas></div>
+          <div><canvas id="d-xattn-map" height="230"></canvas></div>
+        </div>
+        <div class="radio-row" id="d-xattn-word" style="margin-top:12px">
+          <span class="grp-label">prompt token:</span>
+        </div>
+        <div class="controls" id="d-xattn-ctrls"></div>
+        <div class="readout" id="d-xattn-out"></div>
+      </div>
+    </div>
+
+    <p>The left tile is the toy scene's layout (which concept lives where); the right tile is one column of the
+      attention matrix <em>at the selected layer</em>, reshaped. Notice the map for a <em>background</em> word
+      ("a", "on") lights the space
+      <em>around</em> the objects — the padding of your prompt is not idle, it attends somewhere. And watch the readout:
+      the selected column does <em>not</em> sum to 1, but every patch's row across all seven words does. Rows are
+      probabilities; columns are just a slice.</p>
+
+    <div class="box try"><span class="box-title">Try it — on your own box</span>
+      Run <code>code/ddpm_mnist.py</code>: a ~1.5M-parameter <strong>U-Net</strong> trained on $28\times28$ MNIST, real
+      images from noise in ~10 min on your Spark. It ships with a <strong>skip-severing flag</strong> — flip it and
+      regenerate to reproduce the ablation above on a network that actually learned. (It is deliberately a U-Net, not
+      a DiT: at 1.5M params the spatial hierarchy is an <em>asset</em>, not a cage — page 59 is where that flips.)
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-58"></div>
+
+    <p class="xref" style="margin-top:2em">← p.54–57 gave $\epsilon_\theta$ its <em>job</em> (predict the noise / the
+      velocity); this page gave it a <em>body</em>. The attention shapes and the FiLM/sinusoidal machinery come from
+      the trunk: attention self-vs-cross (p.31), sinusoidal embeddings (p.33), residuals (p.34). → p.59 keeps the job
+      and the attention but throws away the convolutional hierarchy for a pure transformer (DiT/MMDiT); p.61 shows the
+      cross-attention here <em>is</em> the conditioning that CFG steers; p.62 fine-tunes exactly the
+      <code>to_q/k/v/out</code> matrices you just met.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- paint an MNIST-style digit: rendered at 28² (MNIST's native grid),
+         white ink on a near-black ground, then hard-upscaled (no smoothing) to
+         size N so the pyramid runs on authentic chunky 28² pixels — the same
+         data source the spec's ablation demo asks for. ---- */
+  function paintDigit(ctx, N) {
+    const M = 28;
+    const sm = document.createElement("canvas"); sm.width = M; sm.height = M;
+    const s = sm.getContext("2d");
+    s.fillStyle = "#07070d"; s.fillRect(0, 0, M, M);                       // MNIST black ground
+    s.fillStyle = "#f2f2f7"; s.textAlign = "center"; s.textBaseline = "middle";
+    s.font = "bold 26px Georgia, 'Times New Roman', serif";
+    s.fillText("3", M / 2, M / 2 + 1);                                     // a curvy digit: plenty of edges to lose
+    ctx.imageSmoothingEnabled = false;
+    ctx.fillStyle = "#07070d"; ctx.fillRect(0, 0, N, N);
+    ctx.drawImage(sm, 0, 0, N, N);
+  }
+
+  /* ======================================================================
+     DEMO 1 — U-Net skip ablation as an exact Laplacian pyramid.
+     Encoder = repeated 2x2 average-pool (Gaussian pyramid L0..Ltop).
+     Skip band  D_k = L_k - up(L_{k+1}).  Reconstruction from the bottleneck:
+       R = L_top;  for k = top-1 .. 0:  R = up(R);  if skip[k] active: R += D_k
+     All skips active => R == L0 exactly. Cutting a skip drops that detail band.
+     Everything below is real per-channel arithmetic on the RGB pixels.
+     ====================================================================== */
+  (function () {
+    const canvas = document.getElementById("d-skip");
+    const out = document.getElementById("d-skip-out");
+    const N = 128, LEVELS = 4;   // 128 -> 64 -> 32 -> 16 -> 8 (bottleneck)
+
+    // source RGB in [0,1], 3 planes
+    const scene = document.createElement("canvas"); scene.width = N; scene.height = N;
+    const sctx = scene.getContext("2d"); paintDigit(sctx, N);
+    const raw = sctx.getImageData(0, 0, N, N).data;
+    const src = [new Float64Array(N * N), new Float64Array(N * N), new Float64Array(N * N)];
+    for (let p = 0; p < N * N; p++) for (let c = 0; c < 3; c++) src[c][p] = raw[p * 4 + c] / 255;
+
+    // 2x2 average-pool one plane: size n -> n/2
+    function down(plane, n) {
+      const m = n >> 1, o = new Float64Array(m * m);
+      for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) {
+        const a = 2 * y * n + 2 * x;
+        o[y * m + x] = 0.25 * (plane[a] + plane[a + 1] + plane[a + n] + plane[a + n + 1]);
+      }
+      return o;
+    }
+    // bilinear upsample one plane: size n -> 2n
+    function up(plane, n) {
+      const m = n << 1, o = new Float64Array(m * m);
+      for (let y = 0; y < m; y++) for (let x = 0; x < m; x++) {
+        const fy = (y + 0.5) / 2 - 0.5, fx = (x + 0.5) / 2 - 0.5;
+        let y0 = Math.floor(fy), x0 = Math.floor(fx);
+        const wy = fy - y0, wx = fx - x0;
+        const y1 = Math.min(n - 1, Math.max(0, y0 + 1)), x1 = Math.min(n - 1, Math.max(0, x0 + 1));
+        y0 = Math.min(n - 1, Math.max(0, y0)); x0 = Math.min(n - 1, Math.max(0, x0));
+        o[y * m + x] = (1 - wy) * ((1 - wx) * plane[y0 * n + x0] + wx * plane[y0 * n + x1])
+                     +      wy  * ((1 - wx) * plane[y1 * n + x0] + wx * plane[y1 * n + x1]);
+      }
+      return o;
+    }
+
+    // build per-channel Gaussian pyramid + detail (skip) bands
+    // gauss[c] = [L0(128), L1(64), L2(32), L3(16), L4(8)]; detail[c][k] = L_k - up(L_{k+1})
+    const gauss = [[], [], []], detail = [[], [], []], sizeAt = [];
+    for (let c = 0; c < 3; c++) {
+      let cur = src[c], n = N; gauss[c].push(cur);
+      if (c === 0) sizeAt.push(n);
+      for (let k = 0; k < LEVELS; k++) { cur = down(cur, n); n >>= 1; gauss[c].push(cur); if (c === 0) sizeAt.push(n); }
+      for (let k = 0; k < LEVELS; k++) {
+        const upNext = up(gauss[c][k + 1], sizeAt[k + 1]);
+        const d = new Float64Array(gauss[c][k].length);
+        for (let p = 0; p < d.length; p++) d[p] = gauss[c][k][p] - upNext[p];
+        detail[c][k] = d;
+      }
+    }
+
+    // reconstruct with the finest `cut` skip bands severed (skip active if k >= cut)
+    function reconstruct(cut) {
+      const planes = [];
+      for (let c = 0; c < 3; c++) {
+        let R = gauss[c][LEVELS].slice(), n = sizeAt[LEVELS];
+        for (let k = LEVELS - 1; k >= 0; k--) {
+          R = up(R, n); n <<= 1;
+          if (k >= cut) for (let p = 0; p < R.length; p++) R[p] += detail[c][k][p];
+        }
+        planes.push(R);
+      }
+      return planes; // 3 planes at full res N
+    }
+    // fraction of high-frequency energy discarded by cutting the finest `cut` bands
+    function energyDropped(cut) {
+      let dropped = 0, total = 0;
+      for (let c = 0; c < 3; c++) for (let k = 0; k < LEVELS; k++) {
+        let e = 0; for (let p = 0; p < detail[c][k].length; p++) e += detail[c][k][p] * detail[c][k][p];
+        total += e; if (k < cut) dropped += e;
+      }
+      return total > 0 ? dropped / total : 0;
+    }
+
+    function blit(fg, planes, x0, y0, side) {
+      const tmp = document.createElement("canvas"); tmp.width = N; tmp.height = N;
+      const tctx = tmp.getContext("2d"); const im = tctx.createImageData(N, N), d = im.data;
+      for (let p = 0; p < N * N; p++) {
+        for (let c = 0; c < 3; c++) d[p * 4 + c] = Math.max(0, Math.min(255, Math.round(planes[c][p] * 255)));
+        d[p * 4 + 3] = 255;
+      }
+      tctx.putImageData(im, 0, 0);
+      fg.imageSmoothingEnabled = true; fg.drawImage(tmp, x0, y0, side, side);
+      fg.strokeStyle = cssVar("--border", "#3b4a6b"); fg.strokeRect(x0, y0, side, side);
+    }
+
+    const cutC = makeCtrl(document.getElementById("d-skip-ctrls"),
+      { label: "skips cut (finest bands severed)", min: 0, max: LEVELS, step: 1, value: 0, fmt: v => v.toFixed(0) });
+
+    function draw() {
+      const cut = Math.round(cutC.get());
+      const dpr = window.devicePixelRatio || 1;
+      const side = 180, gap = 26, labelH = 22, W = side * 2 + gap * 3, H = side + labelH + gap;
+      canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); canvas.style.height = H + "px";
+      const fg = canvas.getContext("2d"); fg.setTransform(dpr, 0, 0, dpr, 0, 0); fg.clearRect(0, 0, W, H);
+      fg.font = "12px system-ui"; fg.textAlign = "left"; fg.fillStyle = cssVar("--text-dim", "#8391ab");
+      fg.fillText("digit · all skips", gap, labelH - 6);
+      fg.fillText(cut === 0 ? "reconstruction (all skips)" : "reconstruction (" + cut + " skip" + (cut > 1 ? "s" : "") + " cut)", gap * 2 + side, labelH - 6);
+      blit(fg, [src[0], src[1], src[2]], gap, labelH, side);
+      blit(fg, reconstruct(cut), gap * 2 + side, labelH, side);
+
+      const bnSize = sizeAt[LEVELS];               // 8
+      const rf = N / bnSize;                        // 16 px per bottleneck cell
+      const drop = energyDropped(cut);
+      const effRes = cut === 0 ? N : (N >> cut);
+      out.innerHTML = `bottleneck <b>${bnSize}²</b> (each cell = a <b>${rf}×${rf}</b> px patch of this ${N}² digit) · ` +
+        `skips cut <b>${cut}/${LEVELS}</b> → high-frequency (edge) energy discarded <b>${(drop * 100).toFixed(1)}%</b> · ` +
+        `effective detail resolution <b>${effRes}²</b>. ` +
+        (cut === 0
+          ? `All skips active → reconstruction is bit-exact.`
+          : (cut >= LEVELS
+            ? `<span class="flag-bad">All skips severed — only the ${bnSize}² blur survives: right-shaped blobs, no edges.</span>`
+            : `The severed band is <span class="flag-bad">physically absent</span>, not slow to learn.`));
+    }
+    cutC.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ======================================================================
+     DEMO 2 — cross-attention over an EXPLICIT toy, with the two sliders the
+     spec requires: LAYER (U-Net cross-attn resolution) and TIMESTEP.
+     Concept axes: [red, blue, cube, sphere, bg]. Patch features come from the
+     toy layout at SD1.5's native 64² latent grid; token features name concepts.
+     A "layer" is a real coarser feature map: the 64² concept field is average-
+     pooled to the level's resolution R∈{8,16,32,64}, then attention is the real
+     softmax(QKᵀ/√d) over the 7 prompt tokens, per patch, computed live at that R.
+     Timestep is modeled as attention temperature (labelled as such): high t =>
+     diffuse maps; low t => sharp, object-shaped maps. Nothing is looked up.
+     ====================================================================== */
+  (function () {
+    const GN = 64, D = 5;                          // 64x64 native latent grid, 5 concept axes
+    const AX = { red: 0, blue: 1, cube: 2, sphere: 3, bg: 4 };
+    const words = [
+      { t: "a",      f: [0, 0, 0, 0, 1] },
+      { t: "red",    f: [1, 0, 0, 0, 0] },
+      { t: "cube",   f: [0, 0, 1, 0, 0] },
+      { t: "on",     f: [0, 0, 0, 0, 1] },
+      { t: "a",      f: [0, 0, 0, 0, 1] },
+      { t: "blue",   f: [0, 1, 0, 0, 0] },
+      { t: "sphere", f: [0, 0, 0, 1, 0] },
+    ];
+    const Stxt = words.length;                     // the 7 semantically-active tokens
+    const dScale = Math.sqrt(D);
+    const RES = [8, 16, 32, 64];                    // SD1.5 cross-attn resolutions (all divide 64)
+
+    // toy layout in normalized [0,1) coords, so it renders at any resolution
+    function inCube(u, v)   { return u >= 0.13 && u <= 0.48 && v >= 0.28 && v <= 0.64; }
+    function inSphere(u, v) { const du = u - 0.72, dv = v - 0.52; return du * du + dv * dv <= 0.22 * 0.22; }
+
+    // native 64² concept field, with a little seeded jitter
+    const rng = new NN.RNG(58);
+    const field0 = [];                             // GN*GN vectors of length D
+    for (let gy = 0; gy < GN; gy++) for (let gx = 0; gx < GN; gx++) {
+      const u = (gx + 0.5) / GN, v = (gy + 0.5) / GN;
+      const f = [0, 0, 0, 0, 0];
+      if (inCube(u, v)) { f[AX.red] = 1; f[AX.cube] = 1; }
+      else if (inSphere(u, v)) { f[AX.blue] = 1; f[AX.sphere] = 1; }
+      else f[AX.bg] = 1;
+      for (let d = 0; d < D; d++) f[d] += 0.06 * rng.normal(0, 1);   // seeded jitter
+      field0.push(f);
+    }
+
+    // average-pool the native field to an R×R feature map (a real coarser layer)
+    function poolField(R) {
+      if (R === GN) return field0;
+      const s = GN / R, out = [];                  // s = 8,4,2 for R = 8,16,32
+      for (let ry = 0; ry < R; ry++) for (let rx = 0; rx < R; rx++) {
+        const acc = [0, 0, 0, 0, 0];
+        for (let dy = 0; dy < s; dy++) for (let dx = 0; dx < s; dx++) {
+          const f = field0[(ry * s + dy) * GN + (rx * s + dx)];
+          for (let d = 0; d < D; d++) acc[d] += f[d];
+        }
+        for (let d = 0; d < D; d++) acc[d] /= s * s;
+        out.push(acc);
+      }
+      return out;
+    }
+
+    // real softmax(QKᵀ/√d) of every patch to every word, at resolution R, temperature temp
+    function attend(field, R, temp) {
+      const P = R * R, A = new Float64Array(P * Stxt);
+      for (let p = 0; p < P; p++) {
+        const pf = field[p]; const logits = new Float64Array(Stxt); let mx = -Infinity;
+        for (let j = 0; j < Stxt; j++) {
+          let s = 0; for (let d = 0; d < D; d++) s += pf[d] * words[j].f[d];
+          s = s / dScale / temp; logits[j] = s; if (s > mx) mx = s;
+        }
+        let Z = 0; for (let j = 0; j < Stxt; j++) { logits[j] = Math.exp(logits[j] - mx); Z += logits[j]; }
+        for (let j = 0; j < Stxt; j++) A[p * Stxt + j] = logits[j] / Z;
+      }
+      return A;
+    }
+
+    // ---- word radio buttons ----
+    const wordHost = document.getElementById("d-xattn-word");
+    let selWord = 1;   // "red"
+    words.forEach((w, j) => {
+      const lab = document.createElement("label");
+      lab.innerHTML = `<input type="radio" name="xword" value="${j}" ${j === selWord ? "checked" : ""}> ${w.t}<sub>${j}</sub>`;
+      wordHost.appendChild(lab);
+    });
+
+    const layerC = makeCtrl(document.getElementById("d-xattn-ctrls"),
+      { label: "U-Net level ℓ (cross-attention resolution)", min: 0, max: 3, step: 1, value: 2,
+        fmt: v => { const R = RES[Math.round(v)]; return R + "² (" + (R * R) + " patches)"; } });
+    const tC = makeCtrl(document.getElementById("d-xattn-ctrls"),
+      { label: "timestep t (modeled as attention temperature)", min: 0, max: 1000, step: 10, value: 200, fmt: v => v.toFixed(0) });
+
+    // scene layout tile (left) — always the full native scene, layer-independent
+    const sceneCanvas = document.getElementById("d-xattn-scene");
+    function drawScene() {
+      const dpr = window.devicePixelRatio || 1, S = 210;
+      sceneCanvas.width = Math.round(S * dpr); sceneCanvas.height = Math.round(S * dpr); sceneCanvas.style.height = S + "px";
+      const g = sceneCanvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, S, S);
+      const cell = S / GN;
+      for (let gy = 0; gy < GN; gy++) for (let gx = 0; gx < GN; gx++) {
+        const u = (gx + 0.5) / GN, v = (gy + 0.5) / GN;
+        let col = cssVar("--bg-panel2", "#20293f");
+        if (inCube(u, v)) col = "#c14b3a"; else if (inSphere(u, v)) col = "#3f6fbf";
+        g.fillStyle = col; g.fillRect(gx * cell, gy * cell, cell + 0.6, cell + 0.6);
+      }
+      g.fillStyle = cssVar("--text-dim", "#8391ab"); g.font = "11px system-ui"; g.textAlign = "left";
+      g.fillText("toy scene: red cube · blue sphere · 64² latent", 4, S - 5);
+    }
+
+    // attention-map heatmap (right) — one reshaped column at the current layer resolution
+    const map = new Heatmap(document.getElementById("d-xattn-map"),
+      { data: [[0]], colormap: "sequential", cellText: false, colorbar: true, hover: true });
+
+    const out = document.getElementById("d-xattn-out");
+
+    function draw() {
+      const R = RES[Math.round(layerC.get())];
+      const t = tC.get();
+      const temp = 0.18 + (t / 1000) * 3.2;         // low t -> sharp, high t -> diffuse
+      const field = poolField(R);
+      const A = attend(field, R, temp);
+      // reshape column selWord into R×R
+      const grid = []; let colSum = 0;
+      for (let gy = 0; gy < R; gy++) { const row = []; for (let gx = 0; gx < R; gx++) { const v = A[(gy * R + gx) * Stxt + selWord]; row.push(v); colSum += v; } grid.push(row); }
+      map.setData(grid);
+      // one example patch inside the cube (argmax red+cube at this resolution): its row across the 7 words
+      let exIdx = 0, best = -Infinity;
+      for (let p = 0; p < R * R; p++) { const sc = field[p][AX.red] + field[p][AX.cube]; if (sc > best) { best = sc; exIdx = p; } }
+      let rowStr = "", rowSum = 0;
+      for (let j = 0; j < Stxt; j++) { const v = A[exIdx * Stxt + j]; rowSum += v; rowStr += `${words[j].t}<sub>${j}</sub>=${v.toFixed(2)} `; }
+      const note = R === 32 ? " — the [1024×77] matrix from the ribbon above" : "";
+      out.innerHTML = `layer <b>${R}²</b> (${R * R} patches${note}) · token <b>"${words[selWord].t}"</b> · ` +
+        `temperature <b>${temp.toFixed(2)}</b> (t=${Math.round(t)}) · ` +
+        `column sum over ${R * R} patches = <b>${colSum.toFixed(1)}</b> (a slice — <em>not</em> 1).<br>` +
+        `one cube patch, its row over the 7 words: ${rowStr}→ sums to <b>${rowSum.toFixed(2)}</b> (rows are probabilities).`;
+    }
+
+    document.querySelectorAll('input[name="xword"]').forEach(r =>
+      r.addEventListener("change", () => { selWord = parseInt(r.value, 10); draw(); }));
+    layerC.onInput(draw); tC.onInput(draw);
+    drawScene(); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => { drawScene(); draw(); }, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-58", [
+    {
+      q: "You sever every skip connection in a U-Net and retrain it from scratch, for as long as you like. The result is:",
+      opts: [
+        "Identical quality, it just took longer to train",
+        "Sharper output, since skips add noise",
+        "Permanently blurry — right shapes, no fine detail",
+        "It fails to train at all (loss never drops)"
+      ],
+      a: 2,
+      why: "The fine detail is destroyed at the bottleneck and is physically not in that tensor. The skip is the only wire that routes it around the squeeze; without it no amount of training can invent it back. This is an information problem, not an optimization one — the 'it just trains slower' answer is the ResNet-gradient story leaking in."
+    },
+    {
+      q: "How does a U-Net skip differ from a ResNet residual connection?",
+      opts: [
+        "No difference — both add the input back",
+        "The skip concatenates high-res spatial info around a bottleneck; the residual adds, to ease gradient flow",
+        "The residual concatenates; the skip adds",
+        "Skips are only used at training time, residuals only at inference"
+      ],
+      a: 1,
+      why: "U-Net skips <b>concatenate</b> a high-resolution down-path activation onto the up-path (why up-path convs take double channels) — carrying spatial information around the bottleneck. ResNet residuals <b>add</b> ($\\mathbf{h}+F(\\mathbf{h})$) to give gradients a short-circuit through depth. Different operation, different purpose."
+    },
+    {
+      q: "In cross-attention inside the U-Net, where do the keys $K$ and values $V$ come from?",
+      opts: [
+        "The text tokens (the prompt's CLIP embeddings)",
+        "The image feature map, like self-attention",
+        "The timestep embedding",
+        "The VAE's latent statistics"
+      ],
+      a: 0,
+      why: "Cross-attention has image patches as queries $Q$ but reads $K,V$ from the <b>text</b>. That single change — keys from somewhere else — is the whole difference from self-attention, and it is what injects the prompt into the picture."
+    },
+    {
+      q: "For an SD1.5 cross-attention layer with a standard CLIP prompt, the attention matrix has 1024 image-patch rows and how many columns?",
+      num: 77, tol: 0,
+      why: "SD1.5's CLIP text encoder emits 77 tokens ($S_\\text{txt}=77$), so the cross-attention matrix is $[1024\\times77]$ — one column per prompt token. Reshaping a column back to $32\\times32$ gives that word's spatial attention map."
+    },
+    {
+      q: "Why is the timestep $t$ injected as FiLM gain (a per-channel scale/shift on normalized features) rather than as an extra input channel?",
+      opts: [
+        "To save memory versus an extra channel",
+        "Because convolutions cannot accept scalars",
+        "Because $t$ is a global mode switch — 'coarse composition vs fine detail' — which belongs in the gain, applied identically everywhere",
+        "Because a channel would break the skip connections"
+      ],
+      a: 2,
+      why: "$t$ tells every block which regime it is in (high $t$ → coarse composition, low $t$ → fine texture). That is a global reconfiguration of how a layer behaves, so it belongs in the layer's gain — applied to every spatial position alike — not smuggled in as one more pixel-like signal the conv must disentangle."
+    },
+    {
+      q: "The denoiser's output tensor has what shape?",
+      opts: [
+        "The same shape as the input latent $(C, H_\\text{lat}, W_\\text{lat})$",
+        "$V$ class logits, one per vocabulary token",
+        "A single scalar (the predicted noise level)",
+        "$(S_\\text{txt}, d_c)$ — matching the text conditioning"
+      ],
+      a: 0,
+      why: "It is a dense predictor: it emits a noise value per latent element, so the output shape equals the input latent shape. Not a classifier ($V$ logits), not a regressor to one scalar — a full same-shape tensor."
+    }
+  ], "The U-Net — self-check");
+
+});
+</script>
+</body>
+</html>

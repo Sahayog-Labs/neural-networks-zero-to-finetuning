@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>48. SFT &amp; Preference Alignment — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions — the message editor, the rendered-template pane,
+     and the token-mask chips. Everything reads the shared CSS custom
+     properties so it stays theme-aware for free. */
+  .field-label { display: block; font-size: .82rem; color: var(--text-dim); margin: 12px 0 4px; }
+  .msg-editor {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: .85rem;
+    padding: 10px 12px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-code); color: var(--text); resize: vertical; min-height: 150px;
+    line-height: 1.5;
+  }
+  .msg-editor.bad { border-color: #ff5c7a; }
+  .toggle-row { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .toggle-row button {
+    padding: 7px 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .84rem;
+    font-family: var(--font);
+  }
+  .toggle-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .toggle-row.mask button.active { background: var(--track-llm); border-color: var(--track-llm); }
+  .tpl-render {
+    font-family: var(--mono); font-size: .82rem; background: var(--bg-code);
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;
+    margin: 8px 0; line-height: 1.7; white-space: pre-wrap; word-break: break-word;
+    max-height: 260px; overflow-y: auto;
+  }
+  .tpl-special { background: color-mix(in srgb, var(--track-llm) 26%, transparent); border-radius: 3px; padding: 0 2px; }
+  .tok-wrap {
+    display: flex; flex-wrap: wrap; gap: 3px; padding: 12px;
+    background: var(--bg-code); border: 1px solid var(--border);
+    border-radius: var(--radius); font-family: var(--mono); font-size: .82rem;
+    line-height: 1.5; margin: 8px 0; max-height: 320px; overflow-y: auto;
+  }
+  .tok-chip { position: relative; padding: 3px 6px 15px; border-radius: 4px; white-space: pre; }
+  .tok-chip .rtag { position: absolute; left: 4px; bottom: 1px; font-size: .58rem; opacity: .85; font-weight: 700; text-transform: uppercase; }
+  .tok-chip.on  { background: color-mix(in srgb, var(--accent2) 32%, transparent); }
+  .tok-chip.off { background: var(--bg-panel); opacity: .5; }
+  .pct-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 8px 0; font-size: .84rem; }
+  .pct-card {
+    flex: 1 1 150px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px;
+    background: var(--bg-panel); color: var(--text-dim);
+  }
+  .pct-card.active { border-color: var(--track-llm); color: var(--text); background: color-mix(in srgb, var(--track-llm) 12%, var(--bg-panel)); }
+  .pct-card b { display: block; font-size: 1.15rem; color: var(--text); }
+</style>
+</head>
+<body data-page="48-sft-preference-alignment.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Teaching Behaviour: SFT, Chat Templates &amp; Preference Alignment</h1>
+    <p class="subtitle">Page 47 decided <em>whether</em> to fine-tune. This page is what "fine-tune"
+      actually means once you've decided: the same cross-entropy loss you already own, aimed at a
+      chat-formatted conversation through a mask — and then, one rung up, taught to prefer one answer
+      over another instead of just imitating a single correct one.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>Three ideas live on this page, in the order a real pipeline hits them: <strong>SFT</strong> teaches
+      imitation of a masked target, a <strong>chat template</strong> is the silent contract that makes the
+      mask meaningful, and <strong>preference alignment</strong> (DPO, and its 2026 cousins) teaches
+      preference instead of imitation. The page ends at the doorstep of GRPO — the capstone's engine.</p>
+
+    <!-- on-page-resolution rule: answered in the "Loss masking" box-worked immediately below the box-warn. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Your SFT dataset has <strong>400-token prompts</strong> and <strong>50-token answers</strong>. If you
+      compute the loss on <em>every</em> token — prompt included — what fraction of your gradient is
+      spent teaching the model to write the <em>user's</em> questions rather than the assistant's answers?
+    </div>
+
+    <h2>1 · Post-training is behaviour, not knowledge</h2>
+    <p>Hold onto this frame; every box on this page is a special case of it:</p>
+    <blockquote>Post-training gives a pretrained model manners, a format, and the willingness to answer.
+      It changes almost nothing about what the model <em>knows</em> and almost everything about what it
+      <em>does</em>.</blockquote>
+    <p>The pipeline you're about to walk, one stage at a time:</p>
+    <div class="tpl-render" style="text-align:center">Base model  —SFT→  instruction-following  —Preference→  aligned  —RLVR→  reasoning</div>
+    <p>Each arrow is a training run over a different loss on the <em>same</em> pretrained weights. None of
+      them touches pretraining's next-token objective — they change what it's applied to and which
+      positions count.</p>
+
+    <h2>2 · SFT's loss — the same cross-entropy, plus a mask</h2>
+    <p><code>[THREAD:chain rule beat: SFT loss]</code> — trunk callback: this is not a new algorithm. It is
+      the exact per-position cross-entropy you derived on the trunk's logs/softmax/cross-entropy page and
+      met again as pretraining's objective on page 45, with one addition — a mask that zeroes out most of
+      the sequence:</p>
+    <p>$$\mathcal{L}_{\text{SFT}}(\theta) \;=\; -\sum_{i=1}^{S} m_i \,\log p_\theta\!\big(y_i \mid y_{&lt;i}\big), \qquad m_i \in \{0,1\}$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathcal{L}_{\text{SFT}}(\theta)$</td><td>the masked SFT loss for one training example</td><td>scalar, nats</td><td>same per-example CE, trunk-owned</td></tr>
+        <tr><td>$\theta$</td><td>all trainable parameters (or, with LoRA, just $A,B$)</td><td>$(P,)$</td><td>notation §4.1</td></tr>
+        <tr><td>$S$</td><td>sequence length of this rendered example</td><td>scalar</td><td>notation §3.2 — papers write $T,L,N$</td></tr>
+        <tr><td>$m_i$</td><td>the loss mask at position $i$ — this page's new object</td><td>$\{0,1\}$</td><td>implemented as <code>label = -100</code></td></tr>
+        <tr><td>$y_i$</td><td>the true next token at position $i$</td><td>integer in $[0,V)$</td><td>the rendered, tokenized example</td></tr>
+        <tr><td>$y_{&lt;i}$</td><td>every token before position $i$</td><td>prefix</td><td>the conditioning context</td></tr>
+        <tr><td>$p_\theta(\cdot \mid y_{&lt;i})$</td><td>the model's softmax over the vocabulary</td><td>$(V,)$</td><td>the exact object from page 45, $V=151{,}936$ classes</td></tr>
+      </tbody>
+    </table>
+    <p><em>Translation note.</em> Papers and library docs call $m_i$ the <em>loss mask</em>, the
+      <em>label mask</em>, or simply "<code>-100</code> labels" (Hugging Face's <code>ignore_index</code>
+      convention — any position whose label is <code>-100</code> contributes exactly zero to the sum).
+      This course writes $m_i$ so it sits next to the sequence-position index $i$ you already own.</p>
+    <p>TRL 1.8's three masking regimes for a message-list dataset <strong>[VP]</strong> — the demo below
+      lets you flip between all three live:</p>
+    <ul>
+      <li><code>completion_only_loss=True</code> — <strong>the default.</strong> Treats the conversation as
+        one prompt plus one completion: only the <em>final</em> turn counts.</li>
+      <li><code>assistant_only_loss=True</code> — needs <code>{% generation %}</code> /
+        <code>{% endgeneration %}</code> markers in the template; masks <em>every</em> assistant turn, not
+        just the last. TRL auto-patches Qwen3's template with these markers; check before assuming another
+        model's template has them.</li>
+      <li>neither flag — full-sequence loss. Correct only for continued pretraining, wrong for chat SFT.</li>
+    </ul>
+
+    <h2>3 · Chat templates — the #1 silent failure</h2>
+    <p>A mask only means something once the conversation has been turned into one flat token sequence with
+      unambiguous turn boundaries, and that rendering step is a real contract, not a formatting nicety.
+      Qwen uses <strong>ChatML</strong>: <code>&lt;|im_start|&gt;role\ncontent&lt;|im_end|&gt;\n</code>,
+      repeated per turn.</p>
+    <div class="box rule"><span class="box-title">📐 Two rules that are not optional</span>
+      <ul style="margin:6px 0 0">
+        <li><strong>Always call <code>tokenizer.apply_chat_template()</code>. Never hand-roll the string.</strong>
+          The template is versioned with the checkpoint; the library owns it so you don't have to guess it.</li>
+        <li><strong>Train-time and inference-time rendering must match exactly</strong> — including the
+          trailing <code>&lt;|im_start|&gt;assistant\n</code> that inference adds
+          (<code>add_generation_prompt=True</code>) and training does not. The EOS you train on must equal
+          the turn terminator: for Qwen, <code>SFTConfig(eos_token="&lt;|im_end|&gt;")</code>.</li>
+      </ul>
+    </div>
+    <p>The <code>" the"</code>-vs-<code>"the"</code> byte fact from page 44 is exactly why hand-rolling
+      breaks silently: a template built by string-concatenation that puts a space in the wrong place
+      produces a <em>different, valid</em> token sequence — no error, no exception, just a model quietly
+      trained on input it will never see again at inference time.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "Loss masking is a minor implementation detail"</span>
+      If you train on the user's own turns, you are teaching the model to <strong>generate plausible user
+      questions</strong> — it will start interviewing you. On a dataset of 400-token prompts and
+      50-token answers, computing loss on every position spends <strong>89% of your unmasked gradient on
+      text the model should never generate.</strong> That number ends the argument.
+    </div>
+    <div class="box worked"><span class="box-title">✍️ Worked example — resolving the predict</span>
+      Prompt $=400$ tokens, answer $=50$ tokens, full-sequence loss (no mask):
+      $$\frac{400}{400+50} = \frac{400}{450} = 0.8888\overline{8} \approx \mathbf{89\%}$$
+      Eighty-nine percent of the unmasked gradient pushes the model toward writing <em>your</em> questions,
+      not its answers. The demo below lets you watch this exact percentage move, live, on a real example.
+    </div>
+
+    <h2>4 · How many examples does SFT actually need?</h2>
+    <p><code>[THREAD:memory ledger beat: dataset size, not model size]</code> — trunk callback to D-11/D-14's
+      information-content rule, the same principle that sets LoRA rank on page 40: <strong>the right
+      dataset size scales with how much information you're asking the model to acquire, not with how big
+      the model is.</strong></p>
+    <table class="ledger">
+      <thead><tr><th>Goal</th><th>Examples <strong>[EST, folklore/practitioner consensus]</strong></th><th>Note</th></tr></thead>
+      <tbody>
+        <tr><td>Format / style only</td><td>50–200</td><td>the model already "knows how," it just needs the shape</td></tr>
+        <tr><td>Tone / persona</td><td>200–1,000</td><td>consistent voice across many prompts</td></tr>
+        <tr><td>Domain idiom / jargon</td><td>1,000–10,000</td><td>vocabulary and conventions, not new facts</td></tr>
+        <tr><td>New capability / skill</td><td>10,000–100,000</td><td>genuinely new behaviour, not a repackaging</td></tr>
+        <tr><td><strong>Change what it knows</strong></td><td>$\infty$ — this is RAG's job</td><td>trunk callback to page 47's misconception</td></tr>
+      </tbody>
+    </table>
+    <p>LIMA's own result is the sharpest data point here: <strong>1,000 curated examples</strong> matched or
+      beat much larger instruction-tuned baselines — and scaling the same recipe to 2,000 examples
+      <em>without</em> maintaining the same curation quality made the model <strong>worse</strong>. Low-quality
+      data has negative value, not zero value; this is why "just add more examples" is not automatically the
+      right move.</p>
+
+    <h2>5 · Preference alignment — teaching "better," not just "correct"</h2>
+    <p>SFT shows the network one right answer per prompt. <strong>Direct Preference Optimization (DPO)</strong>
+      shows it a preferred and a rejected answer to the <em>same</em> prompt, and its key insight is that you
+      don't need a separately trained reward model at all: the optimal KL-constrained policy has a closed
+      form, so you can optimize the policy directly against preference pairs.</p>
+    <p>$$\mathcal{L}_{\text{DPO}} = -\,\mathbb{E}_{(x,y_w,y_l)}\!\left[\log\sigma\!\left(\beta_{\text{DPO}}\log\frac{\pi_\theta(y_w\mid x)}{\pi_{\text{ref}}(y_w\mid x)} - \beta_{\text{DPO}}\log\frac{\pi_\theta(y_l\mid x)}{\pi_{\text{ref}}(y_l\mid x)}\right)\right]$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\pi_\theta$</td><td>the policy being trained — Qwen3-8B, or its LoRA</td><td>$p(\text{completion}\mid x)$</td><td>the SFT checkpoint, continuing to train</td></tr>
+        <tr><td>$\pi_{\text{ref}}$</td><td>the frozen reference policy — the SFT model before this stage</td><td>same</td><td>a fixed snapshot, never updated</td></tr>
+        <tr><td>$x$</td><td>the shared prompt</td><td>token sequence</td><td>the dataset</td></tr>
+        <tr><td>$y_w, y_l$</td><td>the preferred ("win") / rejected ("lose") completion</td><td>token sequences</td><td>notation §4.5, a human or program's preference judgement</td></tr>
+        <tr><td>$\beta_{\text{DPO}}$</td><td>KL strength — how far $\theta$ may drift from $\pi_{\text{ref}}$</td><td>scalar, $\approx 0.1$</td><td>a training hyperparameter</td></tr>
+        <tr><td>$\sigma(\cdot)$</td><td>logistic sigmoid, <strong>with an explicit argument</strong> — legal here (notation §5.2)</td><td>$(0,1)$</td><td>trunk-owned</td></tr>
+      </tbody>
+    </table>
+    <p><code>[THREAD:chain rule beat: DPO gradient]</code> — the gradient of $\mathcal{L}_{\text{DPO}}$ with
+      respect to $\theta$ is the same chain rule you've used since page 5, run through a log-ratio-of-policies
+      instead of a cross-entropy; $\sigma'(\cdot)$ is the same sigmoid derivative from the trunk's activation
+      pages.</p>
+    <div class="box key"><span class="box-title">🔑 The LoRA trick that makes DPO nearly free</span>
+      <code>[THREAD:memory ledger beat: a reference model for zero extra bytes]</code> — reopens page 18/49's
+      ledger. If $\pi_\theta$ is a LoRA adapter on top of $\pi_{\text{ref}}$'s frozen base, you get
+      $\pi_{\text{ref}}$ <strong>for free by disabling the adapter</strong> — one model in VRAM, not two. No
+      second 16.38 GB copy of Qwen3-8B's weights is needed just to hold a reference policy still.
+    </div>
+    <p>DPO is the 2026 default, but it's one point in a real menagerie:</p>
+    <table class="ledger">
+      <thead><tr><th>Method</th><th>What's different</th><th>When to reach for it</th></tr></thead>
+      <tbody>
+        <tr><td>DPO</td><td>closed-form reward, needs $\pi_{\text{ref}}$</td><td>the honest default in 2026</td></tr>
+        <tr><td>IPO</td><td>bounded loss — resists DPO's tendency to over-sharpen on easy pairs</td><td>preference data with very lopsided pairs</td></tr>
+        <tr><td>KTO</td><td>binary desirable/undesirable labels, no <em>paired</em> preferences needed</td><td>you only have 👍/👎, not $y_w$ vs $y_l$ pairs</td></tr>
+        <tr><td>ORPO</td><td>folds preference into the SFT stage itself — one run, no separate $\pi_{\text{ref}}$</td><td>memory-constrained, want fewer stages</td></tr>
+        <tr><td>SimPO</td><td>reference-free, length-normalized reward</td><td>SimPO/ORPO win on memory over DPO</td></tr>
+        <tr><td>GRPO / DAPO</td><td>needs multiple <em>sampled</em> completions per prompt and a reward, not a fixed pair</td><td><strong>when you have a verifiable reward</strong> — §6, below</td></tr>
+      </tbody>
+    </table>
+    <details class="deepdive"><summary>🔬 Deep dive: why DPO's reward has a closed form at all</summary><div>
+      <p>Start from the standard RLHF objective — maximize expected reward $r(x,y)$ subject to a KL penalty
+        that keeps $\pi_\theta$ close to $\pi_{\text{ref}}$:
+        $\max_\theta \mathbb{E}_{y\sim\pi_\theta}[r(x,y)] - \beta_{\text{DPO}}\,\mathrm{KL}(\pi_\theta \| \pi_{\text{ref}})$.
+        This has a known closed-form optimal policy, $\pi_\theta(y\mid x) \propto \pi_{\text{ref}}(y\mid x)\exp\!\big(r(x,y)/\beta_{\text{DPO}}\big)$.
+        Inverting that relation expresses the reward <em>in terms of the policy itself</em>:
+        $r(x,y) = \beta_{\text{DPO}}\log\frac{\pi_\theta(y\mid x)}{\pi_{\text{ref}}(y\mid x)} + \text{const}$.
+        Substitute that into a Bradley-Terry preference model (the probability that $y_w$ beats $y_l$ is
+        $\sigma(r(x,y_w)-r(x,y_l))$) and the intractable partition function cancels exactly, leaving the
+        loss printed above — a loss over $\pi_\theta$ alone, with no reward model ever trained.</p>
+    </div></details>
+
+    <div class="box warn"><span class="box-title">⚠️ "Alignment teaches the model new facts"</span>
+      It doesn't. DPO, like SFT, reweights behaviours the base model already had — it shifts probability
+      mass toward outputs a human or program preferred; it cannot install knowledge the base network never
+      possessed. Attempting to teach new facts via preference pairs produces the exact same failure mode as
+      page 47's SFT misconception: confident, fluent, wrong. Same mechanism, different loss.
+    </div>
+
+    <h2>6 · GRPO &amp; RLVR — the on-ramp to the capstone</h2>
+    <p>DPO needs a fixed pair per prompt, judged once. <strong>Group Relative Policy Optimization (GRPO)</strong>
+      instead samples a <em>group</em> of $G$ completions for the same prompt, scores each with a reward, and
+      turns the group's own statistics into an advantage — no learned value network required:</p>
+    <p>$$A_i = \frac{r_i - \mathrm{mean}(r_1,\dots,r_G)}{\mathrm{std}(r_1,\dots,r_G)}, \qquad G \approx 8\text{–}64$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$A_i$</td><td>the advantage assigned to sample $i$ — how much better than the group average</td><td>scalar</td><td>computed here, feeds the policy-gradient update</td></tr>
+        <tr><td>$r_i$</td><td>the reward for sample $i$'s completion</td><td>scalar</td><td>a program or a reward model — see RLVR, below</td></tr>
+        <tr><td>$G$</td><td>group size — completions sampled per prompt</td><td>$8$–$64$</td><td>a training hyperparameter</td></tr>
+        <tr><td>$\mathrm{mean}(\cdot), \mathrm{std}(\cdot)$</td><td>over the group's $G$ rewards</td><td>scalars</td><td>the group <em>is</em> the baseline</td></tr>
+      </tbody>
+    </table>
+    <div class="box key"><span class="box-title">🔑 The critic was replaceable by a sample mean</span>
+      PPO needs a learned value network just to know "better than average." GRPO asks the same question 16
+      times and takes the mean of the answers — the critic turns out to be a statistic you can compute for
+      free from the samples you were already generating.
+    </div>
+    <p><strong>RLVR</strong> (reinforcement learning from verifiable rewards) is what makes $r_i$ trustworthy
+      without a learned reward model at all: if a <em>program</em> can check the answer — a unit test passes,
+      a math grader confirms the number, a JSON payload validates against its schema — you have a ground-truth
+      reward and can run real RL, not an approximation of human taste. His own domain probably has a checker
+      of exactly this kind (does the config parse? does the generated SQL run? does the extracted field match
+      the schema?) — which is exactly the on-ramp page 52 walks through for real.</p>
+
+    <h2>Demo — the chat-template &amp; loss-mask visualizer</h2>
+    <p>Everything below is real computation on whatever conversation you type into the box: a real
+      byte-pair tokenizer (trained once, on load, from a small bundled corpus — the same mechanism page 44
+      derived, reused rather than re-taught) encodes every message's content, four real template-rendering
+      functions build the exact control-token strings each model family uses, and the mask is computed live
+      from the masking rule you select. Nothing here is a canned screenshot.</p>
+    <div class="box try"><span class="box-title">Try it</span>
+      Start on <strong>Assistant-only</strong>. Note the percentage. Now click <strong>Full-sequence</strong>
+      and watch it jump toward 100% — every user and system token just started "contributing." Then switch
+      the template family and watch every control token in pane 2 change completely, while the percentages
+      barely move — the <em>mask logic</em> doesn't care which family's tokens it's looking at.
+    </div>
+    <div class="demo track-llm">
+      <div class="demo-head">Chat template + loss mask <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <span class="field-label">1 · Conversation (edit the JSON — role must be system / user / assistant)</span>
+        <textarea id="msg-editor" class="msg-editor" spellcheck="false"></textarea>
+        <div class="readout" id="msg-err"></div>
+
+        <span class="field-label">Template family</span>
+        <div class="toggle-row" id="tpl-toggle">
+          <button data-fam="chatml" class="active" type="button">ChatML (Qwen)</button>
+          <button data-fam="llama3" type="button">Llama-3</button>
+          <button data-fam="gemma" type="button">Gemma</button>
+          <button data-fam="mistral" type="button">Mistral</button>
+        </div>
+
+        <span class="field-label">Masking regime</span>
+        <div class="toggle-row mask" id="mask-toggle">
+          <button data-mask="assistant" class="active" type="button">Assistant-only</button>
+          <button data-mask="completion" type="button">Completion-only</button>
+          <button data-mask="full" type="button">Full-sequence</button>
+        </div>
+
+        <span class="field-label">2 · Rendered template (special/control tokens highlighted)</span>
+        <div class="tpl-render" id="tpl-out"></div>
+
+        <span class="field-label">3 · Token-by-token loss mask — green = contributes, gray = masked (label = -100)</span>
+        <div class="tok-wrap" id="tok-out"></div>
+        <div class="readout" id="mask-readout"></div>
+
+        <div class="pct-row" id="pct-row"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/10_build_dataset.py</code>
+      The real pipeline: JSONL → <code>datasets</code> → chat-template → tokenized tensors, run on your own
+      ~500 examples. Contains the <code>13_chat_template_and_mask</code> beat — it prints the real
+      <code>apply_chat_template</code> output and the <code>-100</code> mask for one real example, and
+      <strong>asserts</strong> the assistant-only percentage matches what it just printed. (~1–3 min.)
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">from</span> trl <span class="tok-kw">import</span> SFTConfig</span>
+<span class="line"></span>
+<span class="line">config = <span class="tok-fn">SFTConfig</span>(</span>
+<span class="line">    ...,</span>
+<span class="line">    completion_only_loss=<span class="tok-kw">True</span>,   <span class="tok-com"># default: mask everything but the final turn</span></span>
+<span class="line">    eos_token=<span class="tok-str">"&lt;|im_end|&gt;"</span>,      <span class="tok-com"># must equal Qwen's real turn terminator</span></span>
+<span class="line">)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># under the hood, building the mask:</span></span>
+<span class="line">labels = input_ids.<span class="tok-fn">clone</span>()</span>
+<span class="line">labels[mask == <span class="tok-num">0</span>] = -<span class="tok-num">100</span>   <span class="tok-com"># HF's ignore_index — these positions cost zero loss</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(mask.<span class="tok-fn">float</span>().<span class="tok-fn">mean</span>() - assistant_fraction) < <span class="tok-num">1e-6</span></span></code></pre>
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-sft"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — real BPE tokenizer + four real chat-template renderers + a live
+     loss mask. Nothing here is precomputed: editing the JSON, switching the
+     template family, or switching the masking regime re-tokenizes and
+     re-masks from scratch every time.
+     ========================================================================== */
+  (function () {
+
+    /* ---------- a small, self-contained, REAL byte-level BPE trainer ------
+       Deliberately the same four-step loop page 44 derives in prose (count
+       pairs -> merge argmax -> record -> repeat); it is reused here, not
+       re-explained, per the expertise-reversal rule. Trained once on load
+       against a small bundled corpus themed on this page's own subject
+       matter, so the learned merges produce recognizable subword chunks for
+       the words this demo actually uses. --------------------------------- */
+    const CORPUS = `Supervised fine-tuning takes a pretrained language model and continues training it on a
+small set of curated conversations, so the network sees the same next-token prediction objective it
+saw during pretraining, but now applied only to carefully chosen examples of the behavior you want.
+The loss function does not change. What changes is which positions in each example are allowed to
+contribute to the gradient, and where the training examples themselves come from.
+
+A raw pretrained model has never seen a special token that marks the start of a turn, so every
+fine-tuning recipe first renders the conversation through a chat template before a single token is
+counted. The template inserts reserved control tokens around each turn, and different model families
+reserve completely different control tokens for exactly the same idea: a turn beginning, a speaker
+role, and a turn ending. Get the template wrong at inference time and the model receives a sequence
+of bytes it was never trained to continue, and the failure is silent rather than loud.
+
+Once the conversation is rendered into one long sequence of tokens, a mask decides which of those
+tokens are allowed to contribute to the loss. Positions belonging to the system instructions and the
+user's own turns are almost always masked out, because training on them would teach the network to
+generate plausible user questions instead of helpful assistant answers. Only the assistant's own
+words, the words the network is actually supposed to produce, should shape the gradient.
+
+Fine-tuning changes behavior far more readily than it changes knowledge. A model that has never once
+seen a fact during pretraining will not reliably acquire that fact from a few hundred fine-tuning
+examples; instead it tends to produce a fluent, confident answer that sounds correct and is not,
+because fluency is exactly the behavior fine-tuning reinforced. Preference alignment goes one step
+further than plain imitation: instead of showing the network a single correct answer, it shows the
+network two candidate answers and teaches it which one a human, or a verifiable program, preferred,
+nudging the whole distribution toward the preferred style without ever needing a separately trained
+reward model at all.`;
+
+    const PACK = 1000000;
+    function concatBytes(a, b) { const o = new Uint8Array(a.length + b.length); o.set(a, 0); o.set(b, a.length); return o; }
+
+    function pretokenizeWords(text) {
+      // whitespace runs fold into the FOLLOWING word (GPT-2/Qwen convention),
+      // matching the mechanism page 44 already established.
+      const parts = text.match(/\s+|\S+/g) || [];
+      const words = [];
+      let pending = "";
+      for (const p of parts) { if (/^\s/.test(p)) pending += p; else { words.push(pending + p); pending = ""; } }
+      if (pending) words.push(pending);
+      return words;
+    }
+    // Same as above, but also returns each word's start offset within `text`
+    // (relative), needed to map tokens back to character positions.
+    function pretokenizeWithOffsets(text) {
+      const words = [];
+      let i = 0;
+      const raw = pretokenizeWords(text);
+      let cursor = 0;
+      for (const w of raw) {
+        const idx = text.indexOf(w, cursor);
+        const start = idx >= 0 ? idx : cursor;
+        words.push({ text: w, start });
+        cursor = start + w.length;
+      }
+      return words;
+    }
+
+    function trainBPE(corpusText, maxMerges) {
+      const enc = new TextEncoder();
+      const words = pretokenizeWords(corpusText);
+      const freq = new Map();
+      for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
+      const seqs = [];
+      for (const [w, f] of freq) seqs.push({ ids: Array.from(enc.encode(w)), freq: f });
+      const idBytes = new Map();
+      for (let b = 0; b < 256; b++) idBytes.set(b, Uint8Array.of(b));
+      const merges = [];
+      let nextId = 256;
+      for (let step = 0; step < maxMerges; step++) {
+        const counts = new Map();
+        for (const s of seqs) { const ids = s.ids; for (let i = 0; i < ids.length - 1; i++) { const k = ids[i] * PACK + ids[i + 1]; counts.set(k, (counts.get(k) || 0) + s.freq); } }
+        if (counts.size === 0) break;
+        let bestKey = -1, bestCount = -1;
+        for (const [k, c] of counts) if (c > bestCount) { bestCount = c; bestKey = k; }
+        if (bestCount < 2) break;
+        const a = Math.floor(bestKey / PACK), b = bestKey % PACK;
+        const newId = nextId++;
+        merges.push([a, b, newId]);
+        idBytes.set(newId, concatBytes(idBytes.get(a), idBytes.get(b)));
+        for (const s of seqs) {
+          const ids = s.ids; let changed = false; const out = []; let i = 0;
+          while (i < ids.length) {
+            if (i < ids.length - 1 && ids[i] === a && ids[i + 1] === b) { out.push(newId); i += 2; changed = true; }
+            else { out.push(ids[i]); i++; }
+          }
+          if (changed) s.ids = out;
+        }
+      }
+      return { merges, idBytes };
+    }
+
+    function encodeWordWithMerges(word, merges, rank) {
+      const enc = new TextEncoder();
+      let ids = Array.from(enc.encode(word));
+      while (ids.length > 1) {
+        let bestRank = Infinity, bestPos = -1;
+        for (let i = 0; i < ids.length - 1; i++) { const k = ids[i] * PACK + ids[i + 1]; if (rank.has(k)) { const r = rank.get(k); if (r < bestRank) { bestRank = r; bestPos = i; } } }
+        if (bestPos === -1) break;
+        const key = ids[bestPos] * PACK + ids[bestPos + 1];
+        const nid = rank.newId.get(key);
+        ids = ids.slice(0, bestPos).concat([nid], ids.slice(bestPos + 2));
+      }
+      return ids;
+    }
+
+    const { merges: TRAINED_MERGES, idBytes: ID_BYTES } = trainBPE(CORPUS, 600);
+    const RANK = new Map(); RANK.newId = new Map();
+    TRAINED_MERGES.forEach((m, i) => { const k = m[0] * PACK + m[1]; RANK.set(k, i); RANK.newId.set(k, m[2]); });
+    const DEC = new TextDecoder("utf-8", { fatal: false });
+
+    /* ---------- four REAL chat-template renderers --------------------------
+       Each returns an ordered list of "segments": {text, role, kind, pos,
+       isAssistant, isLastAssistant}. kind='control' segments are the
+       reserved turn-boundary tokens (rendered as ONE atomic token each, the
+       way a real tokenizer's added-special-tokens work); kind='content'
+       segments are real message text, BPE-tokenized below. ------------- */
+    function lastAssistantIndex(messages) {
+      let idx = -1;
+      messages.forEach((m, i) => { if (m.role === "assistant") idx = i; });
+      return idx;
+    }
+
+    function buildChatML(messages) {
+      const lastA = lastAssistantIndex(messages);
+      const segs = [];
+      messages.forEach((m, idx) => {
+        const isA = m.role === "assistant", isLast = isA && idx === lastA;
+        segs.push({ text: `<|im_start|>${m.role}\n`, role: m.role, kind: "control", pos: "open", isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: m.content, role: m.role, kind: "content", pos: null, isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: `<|im_end|>\n`, role: m.role, kind: "control", pos: "close", isAssistant: isA, isLastAssistant: isLast });
+      });
+      return segs;
+    }
+
+    function buildLlama3(messages) {
+      const lastA = lastAssistantIndex(messages);
+      const segs = [{ text: `<|begin_of_text|>`, role: null, kind: "control", pos: "open", isAssistant: false, isLastAssistant: false }];
+      messages.forEach((m, idx) => {
+        const isA = m.role === "assistant", isLast = isA && idx === lastA;
+        segs.push({ text: `<|start_header_id|>${m.role}<|end_header_id|>\n\n`, role: m.role, kind: "control", pos: "open", isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: m.content, role: m.role, kind: "content", pos: null, isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: `<|eot_id|>`, role: m.role, kind: "control", pos: "close", isAssistant: isA, isLastAssistant: isLast });
+      });
+      return segs;
+    }
+
+    function buildGemma(messages) {
+      const lastA = lastAssistantIndex(messages);
+      const segs = [{ text: `<bos>`, role: null, kind: "control", pos: "open", isAssistant: false, isLastAssistant: false }];
+      let pendingSystem = "";
+      messages.forEach((m, idx) => {
+        if (m.role === "system") { pendingSystem = m.content; return; }
+        const isA = m.role === "assistant", isLast = isA && idx === lastA;
+        const roleDisp = isA ? "model" : "user";
+        const content = (!isA && pendingSystem) ? `${pendingSystem}\n\n${m.content}` : m.content;
+        if (!isA) pendingSystem = "";
+        segs.push({ text: `<start_of_turn>${roleDisp}\n`, role: m.role, kind: "control", pos: "open", isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: content, role: m.role, kind: "content", pos: null, isAssistant: isA, isLastAssistant: isLast });
+        segs.push({ text: `<end_of_turn>\n`, role: m.role, kind: "control", pos: "close", isAssistant: isA, isLastAssistant: isLast });
+      });
+      return segs;
+    }
+
+    function buildMistral(messages) {
+      const lastA = lastAssistantIndex(messages);
+      const segs = [{ text: `<s>`, role: null, kind: "control", pos: "open", isAssistant: false, isLastAssistant: false }];
+      let pendingSystem = "";
+      messages.forEach((m, idx) => {
+        if (m.role === "system") { pendingSystem = m.content; return; }
+        const isA = m.role === "assistant", isLast = isA && idx === lastA;
+        if (!isA) {
+          const sysWrap = pendingSystem ? `[SYSTEM_PROMPT] ${pendingSystem} [/SYSTEM_PROMPT]` : "";
+          segs.push({ text: `${sysWrap}[INST] `, role: m.role, kind: "control", pos: "open", isAssistant: false, isLastAssistant: false });
+          segs.push({ text: m.content, role: m.role, kind: "content", pos: null, isAssistant: false, isLastAssistant: false });
+          segs.push({ text: ` [/INST]`, role: m.role, kind: "control", pos: "close", isAssistant: false, isLastAssistant: false });
+          pendingSystem = "";
+        } else {
+          segs.push({ text: m.content, role: m.role, kind: "content", pos: null, isAssistant: true, isLastAssistant: isLast });
+          segs.push({ text: `</s>`, role: m.role, kind: "control", pos: "close", isAssistant: true, isLastAssistant: isLast });
+        }
+      });
+      return segs;
+    }
+
+    const FAMILIES = { chatml: buildChatML, llama3: buildLlama3, gemma: buildGemma, mistral: buildMistral };
+
+    /* ---------- REAL tokenization of the rendered segments ---------------- */
+    function tokenizeSegments(segs) {
+      const tokens = [];
+      let pos = 0;
+      for (const seg of segs) {
+        const start = pos;
+        if (seg.kind === "control") {
+          tokens.push({ text: seg.text, start, end: start + seg.text.length, role: seg.role, kind: "control", pos: seg.pos, isAssistant: seg.isAssistant, isLastAssistant: seg.isLastAssistant });
+        } else {
+          const words = pretokenizeWithOffsets(seg.text);
+          for (const w of words) {
+            const ids = encodeWordWithMerges(w.text, TRAINED_MERGES, RANK);
+            let local = w.start;
+            for (const id of ids) {
+              const bytes = ID_BYTES.get(id) || Uint8Array.of(id % 256);
+              const txt = DEC.decode(bytes);
+              tokens.push({ text: txt, start: start + local, end: start + local + txt.length, role: seg.role, kind: "content", pos: null, isAssistant: seg.isAssistant, isLastAssistant: seg.isLastAssistant });
+              local += txt.length;
+            }
+          }
+        }
+        pos += seg.text.length;
+      }
+      return tokens;
+    }
+
+    function maskOf(token, regime) {
+      if (regime === "full") return 1;
+      if (regime === "completion") return (token.isLastAssistant && (token.kind === "content" || token.pos === "close")) ? 1 : 0;
+      return (token.isAssistant && (token.kind === "content" || token.pos === "close")) ? 1 : 0; // assistant-only
+    }
+
+    function pct(tokens, regime) {
+      if (!tokens.length) return 0;
+      let c = 0; for (const t of tokens) c += maskOf(t, regime);
+      return c * 100 / tokens.length;
+    }
+
+    function escapeHtml(s) { return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+    function visualizeWS(s) { return escapeHtml(s).replace(/\n/g, "↵\n"); }
+
+    /* ---------- DOM wiring -------------------------------------------------- */
+    const editor = document.getElementById("msg-editor");
+    const errOut = document.getElementById("msg-err");
+    const tplOut = document.getElementById("tpl-out");
+    const tokOut = document.getElementById("tok-out");
+    const maskReadout = document.getElementById("mask-readout");
+    const pctRow = document.getElementById("pct-row");
+    const tplToggle = document.getElementById("tpl-toggle");
+    const maskToggle = document.getElementById("mask-toggle");
+
+    const DEFAULT_MESSAGES = [
+      { role: "system", content: "You are ChatQwen, a concise fine-tuning assistant. Answer precisely and never claim the model learned a fact it was never trained on." },
+      { role: "user", content: "Does supervised fine-tuning teach a language model brand new facts about the world, the same way pretraining does?" },
+      { role: "assistant", content: "No, it mostly reshapes behavior, not knowledge." },
+      { role: "user", content: "That is surprising. I trained a LoRA on my company's internal documentation and expected it to answer factual questions about our product correctly, but it started confidently inventing details that were never in the docs at all. Walk me through, mechanistically, why supervised fine-tuning on a small custom dataset produces that kind of fluent, confident hallucination instead of either learning the facts or admitting it does not know them." },
+      { role: "assistant", content: "SFT reweights which existing behaviors the pretrained model favors. It does not install new facts, so on unfamiliar questions it falls back on its most fluent pretrained completion. That is the hallucination, and it is confident because fluency was exactly what fine-tuning reinforced." }
+    ];
+    editor.value = JSON.stringify(DEFAULT_MESSAGES, null, 2);
+
+    let family = "chatml", regime = "assistant";
+
+    function parseMessages() {
+      let msgs;
+      try { msgs = JSON.parse(editor.value); }
+      catch (e) { return { error: "Not valid JSON: " + e.message }; }
+      if (!Array.isArray(msgs) || !msgs.length) return { error: "Expected a non-empty JSON array of {role, content}." };
+      for (const m of msgs) {
+        if (!m || typeof m.content !== "string" || !["system", "user", "assistant"].includes(m.role)) {
+          return { error: "Each item needs role in system/user/assistant and a string content." };
+        }
+      }
+      return { messages: msgs };
+    }
+
+    function redraw() {
+      const parsed = parseMessages();
+      if (parsed.error) {
+        editor.classList.add("bad");
+        errOut.innerHTML = `<span style="color:#ff5c7a">⚠ ${parsed.error} (showing the last valid render below)</span>`;
+        return;
+      }
+      editor.classList.remove("bad");
+      errOut.textContent = "";
+
+      const segs = FAMILIES[family](parsed.messages);
+      const tokens = tokenizeSegments(segs);
+
+      // pane 2: rendered template, control segments highlighted
+      tplOut.innerHTML = segs.map(s => s.kind === "control"
+        ? `<span class="tpl-special">${visualizeWS(s.text)}</span>`
+        : visualizeWS(s.text)
+      ).join("");
+
+      // pane 3: token chips
+      const on = maskOf, active = regime;
+      let html = "";
+      let contribute = 0;
+      for (const t of tokens) {
+        const m = on(t, active);
+        if (m) contribute++;
+        const rtag = t.role ? t.role[0].toUpperCase() : "·";
+        html += `<span class="tok-chip ${m ? "on" : "off"}"><span>${visualizeWS(t.text)}</span><span class="rtag">${rtag}</span></span>`;
+      }
+      tokOut.innerHTML = html;
+      const p = tokens.length ? (contribute * 100 / tokens.length) : 0;
+      maskReadout.innerHTML = `<b>${contribute}</b> of <b>${tokens.length}</b> tokens contribute (<b>${p.toFixed(1)}%</b>) — regime: <b>${active === "full" ? "full-sequence" : active === "completion" ? "completion-only" : "assistant-only"}</b>`;
+
+      // percentage comparison row, all three regimes, current one highlighted
+      const regimes = [["assistant", "Assistant-only"], ["completion", "Completion-only"], ["full", "Full-sequence"]];
+      pctRow.innerHTML = regimes.map(([key, label]) => {
+        const v = pct(tokens, key);
+        return `<div class="pct-card ${key === active ? "active" : ""}"><b>${v.toFixed(1)}%</b>${label}</div>`;
+      }).join("");
+    }
+
+    tplToggle.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        family = btn.dataset.fam;
+        tplToggle.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+        redraw();
+      });
+    });
+    maskToggle.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        regime = btn.dataset.mask;
+        maskToggle.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+        redraw();
+      });
+    });
+    editor.addEventListener("input", redraw);
+
+    redraw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redraw, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ
+     ========================================================================== */
+  renderQuiz("quiz-sft", [
+    {
+      q: "How does SFT's loss differ from pretraining's loss?",
+      opts: [
+        "It's a completely different algorithm, built specifically for chat data",
+        "Same per-position cross-entropy — the only change is the data (chat-formatted) and a loss mask over most positions",
+        "SFT uses mean-squared error instead of cross-entropy",
+        "SFT removes the softmax and predicts tokens directly"
+      ],
+      a: 1,
+      why: "SFT reuses pretraining's exact next-token cross-entropy. Nothing about the loss function changes — only which conversations you train on, and which positions in each one are allowed to contribute (the mask $m_i$)."
+    },
+    {
+      q: "Your SFT dataset has 400-token prompts and 50-token answers. If you compute loss on every token (no masking), what percent of your unmasked gradient is spent teaching the model to write the user's own questions?",
+      num: 89, tol: 3, unit: "%",
+      why: "$400/(400+50) = 400/450 = 0.8889 \\approx 89\\%$. Only the 50 answer tokens are text the model should ever generate; the other 89% of the gradient trains it to imitate the prompt."
+    },
+    {
+      q: "A chat template rendered at train time and a chat template rendered at inference time must:",
+      opts: [
+        "Both start with the same system prompt, nothing else matters",
+        "Match exactly, including the trailing generation-prompt tokens inference adds and training doesn't add itself",
+        "Just use the same tokenizer vocabulary — exact string layout doesn't matter",
+        "Match only if you're using LoRA, not full fine-tuning"
+      ],
+      a: 1,
+      why: "A byte-level tokenizer converts any mismatch into a different, silently-valid token sequence — no error is raised. The model was trained to continue one exact byte layout; anything else is out-of-distribution input it has never seen, including a missing or extra trailing '<|im_start|>assistant\\n'."
+    },
+    {
+      q: "What is DPO's key insight?",
+      opts: [
+        "You need to train a separate reward model first, exactly like classic RLHF",
+        "The optimal KL-constrained policy has a closed form, so the reward can be expressed in terms of the policy itself — no separate reward model is needed",
+        "Preference pairs are unnecessary if you have enough SFT data",
+        "DPO replaces cross-entropy with a squared-error loss on preference scores"
+      ],
+      a: 1,
+      why: "DPO inverts the closed-form optimal-policy relation to write the reward directly in terms of $\\pi_\\theta$ and $\\pi_{\\text{ref}}$; substituting into a Bradley-Terry preference model cancels the intractable partition function, leaving a loss over the policy alone. Training a reward model (option 1) is exactly what DPO was built to avoid."
+    },
+    {
+      q: "GRPO's advantage $A_i$ is computed as:",
+      opts: [
+        "The output of a separately trained value network, exactly as in PPO",
+        "The reward for sample $i$, normalized against the mean and std of the same $G$-sample group's own rewards",
+        "A fixed constant set before training begins",
+        "The KL divergence between $\\pi_\\theta$ and $\\pi_{\\text{ref}}$"
+      ],
+      a: 1,
+      why: "$A_i = (r_i - \\text{mean}(r_1..r_G))/\\text{std}(r_1..r_G)$. The group of sampled completions supplies its own baseline — no learned value network (PPO's approach, the first distractor) is needed."
+    },
+    {
+      q: "RLVR — reinforcement learning from verifiable rewards — requires:",
+      opts: [
+        "A human rater in the loop for every single example",
+        "A programmatic checker: something that can score an output as correct without a person or a learned reward model (a unit test, a math grader, a schema validator)",
+        "A reward model trained on millions of preference pairs",
+        "Access to the base model's pretraining data"
+      ],
+      a: 1,
+      why: "RLVR's entire value proposition is a ground-truth reward that costs nothing to evaluate at scale, because a program — not a human and not a learned reward model — can check correctness directly."
+    },
+    {
+      q: "What can alignment (SFT, DPO, or GRPO/RLVR) NOT do?",
+      opts: [
+        "Change the model's tone or format",
+        "Install facts the pretrained base model never learned",
+        "Make the model refuse certain requests",
+        "Change which of several already-known behaviors the model favors"
+      ],
+      a: 1,
+      why: "Every stage on this page reweights behaviors the pretrained network already has. None of them is a mechanism for teaching new facts — attempting that via SFT or preference pairs produces confident, fluent hallucination instead, the same failure page 47 names for RAG-vs-fine-tune."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

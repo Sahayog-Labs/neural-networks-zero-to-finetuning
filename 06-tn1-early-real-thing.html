@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>6. TN-1: Your First Real Network — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the forward-pass ledger carries KaTeX matrices wider than a
+   phone. Let each ledger scroll inside its own box on narrow screens so the
+   page body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+.tn1-consts { font-size: .82rem; color: var(--text-dim); margin-top: 10px; }
+.tn1-consts code { white-space: nowrap; }
+</style>
+</head>
+<body data-page="06-tn1-early-real-thing.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · ⭐ The Early Real Thing</span>
+    <h1>TN-1: Your First Real Network, by Pencil and by PyTorch</h1>
+    <p class="subtitle">Five pages of vocabulary — dot products, derivatives, the chain rule — now cash out. You
+      will hand-compute a real nine-parameter network's output, watch a live engine agree with you, and then run
+      fifteen lines of PyTorch on your own box that print the <em>same number to four decimals</em>. This is the
+      page where the machine stops being a diagram.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:TN-1 beat 1/9 — the object]</b> · <b>[THREAD:chain-rule beat 1.5 — the verb, set up]</b>. This is
+      the first full appearance of <b>TN-1</b>, the single network that runs like a spine through the whole course.
+      You will meet this exact object again as its <em>backward</em> pass (page&nbsp;14), inside a live autograd
+      engine (page&nbsp;15), taking its first learning step (page&nbsp;17), as one attention head, and as a LoRA
+      target. Same nine numbers every time. Today: forward only.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: answered two paragraphs below, in the worked box.
+         Do NOT reveal the float subtlety here — that beat detonates on page 15. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      TN-1's first hidden unit computes $z_{1,1} = 0.5(1) + (-0.3)(2) + 0.1$. Before you simplify — is that
+      <b>(a) exactly 0</b>, <b>(b) a small positive number</b>, or <b>(c) a small negative number</b>? Commit to one,
+      then read on.
+    </div>
+
+    <!-- ===================== MEET TN-1 ===================== -->
+    <h2>Meet TN-1</h2>
+    <p>TN-1 is deliberately tiny: two inputs, two hidden units with a $\tanh$ bend, one output unit with a sigmoid
+      bend, and a loss on the end. Count the knobs — a $2\times 2$ weight matrix and a 2-vector bias into the hidden
+      layer, a $1\times 2$ weight and a scalar bias into the output — and you get <b>nine parameters</b>. Small enough
+      to run with a pencil; real enough that nothing about it is a lie.</p>
+
+    <div class="box rule"><span class="box-title">📐 TN-1 — the frozen initial state</span>
+      A $2 \to 2\,(\tanh) \to 1\,(\text{sigmoid}) \to \text{BCE}$ network. <b>Nine parameters</b>, held fixed for
+      this page (<code>constants.md §8</code>):
+      $$W_1 = \begin{bmatrix} 0.5 & -0.3 \\ 0.8 & 0.2 \end{bmatrix},\quad
+        \mathbf b_1 = \begin{bmatrix} 0.1 \\ -0.1 \end{bmatrix},\quad
+        W_2 = \begin{bmatrix} 0.6 & -0.9 \end{bmatrix},\quad b_2 = 0.2,$$
+      $$\mathbf x = \begin{bmatrix} 1.0 \\ 2.0 \end{bmatrix},\qquad y = 1,\qquad \eta = 0.1.$$
+      The invariant from page&nbsp;2 holds: <b>$W$ is $(d_{\text{out}}, d_{\text{in}})$</b>. $W_1$ is $(2,2)$;
+      $W_2$ is $(1,2)$ — one output row, two input columns.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf x$</td><td>the input, one example</td><td>$(2,1)$</td><td>given data</td></tr>
+        <tr><td>$W_1,\ \mathbf b_1$</td><td>hidden layer's weights and bias</td><td>$(2,2),\ (2,1)$</td><td>frozen parameters</td></tr>
+        <tr><td>$W_2,\ b_2$</td><td>output unit's weight and bias</td><td>$(1,2),\ (1,1)$</td><td>frozen parameters</td></tr>
+        <tr><td>$y$</td><td>the true label (a positive example)</td><td>scalar</td><td>given data</td></tr>
+        <tr><td>$\eta$</td><td>learning rate — unused today, it belongs to Part&nbsp;II</td><td>scalar</td><td>frozen</td></tr>
+        <tr><td>$\hat y$</td><td>the network's output probability</td><td>scalar</td><td>computed below</td></tr>
+      </tbody>
+    </table>
+
+    <p><em>(Why $\tanh$ and sigmoid, when you may have heard they are outdated? Only because they are small, bounded,
+      and hand-computable — perfect for a pencil. The full activation menu, and why these two are poor choices for
+      hidden units in a big network, is page&nbsp;11. The <b>object</b> transfers; the activations are incidental.)</em></p>
+
+    <!-- ===================== FORWARD BY HAND ===================== -->
+    <h2>Forward, by hand</h2>
+    <p>The forward pass is a chain of simple functions, run left to right: a linear map, a $\tanh$, another linear
+      map, a sigmoid, a loss. Here is the shape ribbon for the whole trip — every intermediate, with its shape, in
+      the order the machine computes it:</p>
+
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">Shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x            (2,)                          # two inputs</span>
+<span class="line">W1           (2, 2)     b1  (2,)           # (out, in) — ALWAYS</span>
+<span class="line">z1 = W1 x + b1                (2,)         # two hidden pre-activations</span>
+<span class="line">a1 = tanh(z1)                 (2,)         # two hidden activations</span>
+<span class="line">W2           (1, 2)     b2  (1,)           # (out, in)</span>
+<span class="line">z2 = W2 a1 + b2               (1,)         # one output pre-activation</span>
+<span class="line">yhat = sigmoid(z2)            (1,)         # one probability</span>
+<span class="line">L = -ln(yhat)                 scalar       # BCE, since y = 1</span></code></pre>
+    </div>
+
+    <p>Now put the numbers through it. Each pre-activation is a dot product plus a bias — <b>[THREAD:dot-product]</b>,
+      the atom from page&nbsp;3, doing exactly the job it was named for:</p>
+
+    <div class="box worked"><span class="box-title">✍️ TN-1 forward — every number</span>
+      Hidden pre-activations (row of $W_1$ dotted with $\mathbf x$, plus bias):
+      $$z_{1,1} = 0.5(1) - 0.3(2) + 0.1 = \mathbf{0.0}, \qquad
+        z_{1,2} = 0.8(1) + 0.2(2) - 0.1 = \mathbf{1.1}.$$
+      Hidden activations (the $\tanh$ bend):
+      $$a_{1,1} = \tanh(0.0) = \mathbf{0.0}, \qquad a_{1,2} = \tanh(1.1) = \mathbf{0.8005}.$$
+      Output pre-activation (row of $W_2$ dotted with $\mathbf a_1$, plus bias):
+      $$z_2 = 0.6(0.0) - 0.9(0.8005) + 0.2 = \mathbf{-0.5204}.$$
+      Output probability (the sigmoid bend) and the loss (BCE for a positive label, $y=1$):
+      $$\hat y = \sigma(-0.5204) = \mathbf{0.3727}, \qquad
+        \mathcal L = -\ln(\hat y) = -\ln(0.3727) = \mathbf{0.9869}\ \text{nats}.$$
+    </div>
+
+    <p><b>Resolving the prediction:</b> $z_{1,1} = 0.5 - 0.6 + 0.1$, which on paper is <b>exactly 0</b> — answer
+      <b>(a)</b>. The first hidden unit is switched fully off for this input; $\tanh(0)=0$, so it passes nothing
+      forward. (Hold that thought. When you run this in floating point on page&nbsp;15, the machine's answer to
+      "is it exactly zero?" turns out to be quietly, instructively <em>no</em> — but that is page&nbsp;15's story,
+      not this page's.)</p>
+
+    <div class="box warn"><span class="box-title">⚠️ It's 0.9869, not 0.9870</span>
+      You will find <code>0.9870</code> in more than one write-up of this network. It is wrong by one in the last
+      place — it comes from rounding an intermediate to four digits and then taking its log. Carry full precision
+      and the loss is $-\ln(0.3727472\ldots) = 0.9869$ (<code>constants.md §8.1</code>). Likewise $z_2 = -0.5204$,
+      not $-0.5205$: same last-digit trap, caught on the real values. When a course promises "three representations,
+      one number," the number has to actually be one number.
+    </div>
+
+    <p>What is BCE doing on the end? For a positive example it is simply $-\ln$ of the probability the network
+      assigned to the true label: assign $\hat y = 1$ and the loss is $0$; assign $\hat y \to 0$ and it blows up.
+      TN-1 assigned $0.3727$ to a label that was true, so it pays $0.9869$ nats. That is all you need today; the
+      full derivation of cross-entropy from maximum likelihood is page&nbsp;12, and the softmax/cross-entropy family
+      it belongs to is page&nbsp;9.</p>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Forward, live</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Below is TN-1 drawn as its canonical graph — the same picture reused everywhere this network appears. The node
+      fills and edge labels are the <em>actual</em> forward values, computed live by the course's autograd engine
+      (not baked in). Press <b>Animate forward →</b> and watch the signal flow left to right to $\hat y$. Confirm the
+      readout prints <code>0.3727</code> and <code>0.9869</code> — the same two numbers you just wrote by hand.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">TN-1 · forward pass <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-net" height="300"></canvas>
+        <p style="margin:12px 0 0">
+          <button class="btn secondary" id="d-net-fwd">Animate forward →</button>
+        </p>
+        <div class="readout" id="d-net-out"></div>
+        <div class="tn1-consts" id="d-net-consts"></div>
+      </div>
+    </div>
+
+    <!-- ===================== PYTORCH ===================== -->
+    <h2>Forward, in PyTorch</h2>
+    <p>Here is the same network in about fifteen lines of PyTorch, runnable exactly as printed. It builds two linear
+      layers, loads TN-1's nine frozen numbers into them, runs the forward pass on $[1.0, 2.0]$, and asserts the
+      output matches your pencil to four decimals. There is deliberately <b>no</b> <code>loss.backward()</code> here —
+      the backward pass is page&nbsp;14's.</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn <span class="tok-kw">as</span> nn</span>
+<span class="line"></span>
+<span class="line">torch.<span class="tok-fn">set_grad_enabled</span>(<span class="tok-kw">False</span>)              <span class="tok-com"># forward only — no gradients on this page</span></span>
+<span class="line"></span>
+<span class="line">lin1 = nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">2</span>)                  <span class="tok-com"># weight shape (2, 2) = (out, in)</span></span>
+<span class="line">lin2 = nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">1</span>)                  <span class="tok-com"># weight shape (1, 2)</span></span>
+<span class="line"></span>
+<span class="line">lin1.weight[:] = torch.<span class="tok-fn">tensor</span>([[<span class="tok-num">0.5</span>, -<span class="tok-num">0.3</span>], [<span class="tok-num">0.8</span>, <span class="tok-num">0.2</span>]])</span>
+<span class="line">lin1.bias[:]   = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">0.1</span>, -<span class="tok-num">0.1</span>])</span>
+<span class="line">lin2.weight[:] = torch.<span class="tok-fn">tensor</span>([[<span class="tok-num">0.6</span>, -<span class="tok-num">0.9</span>]])</span>
+<span class="line">lin2.bias[:]   = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">0.2</span>])</span>
+<span class="line"></span>
+<span class="line">x    = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])</span>
+<span class="line">a1   = torch.<span class="tok-fn">tanh</span>(<span class="tok-fn">lin1</span>(x))               <span class="tok-com"># two hidden units</span></span>
+<span class="line">yhat = torch.<span class="tok-fn">sigmoid</span>(<span class="tok-fn">lin2</span>(a1))         <span class="tok-com"># one output probability</span></span>
+<span class="line">loss = -torch.<span class="tok-fn">log</span>(yhat)                <span class="tok-com"># BCE for the positive label y = 1</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"yhat = {yhat.item():.4f}"</span>)      <span class="tok-com"># 0.3727</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"loss = {loss.item():.4f}"</span>)      <span class="tok-com"># 0.9869</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(yhat.<span class="tok-fn">item</span>() - <span class="tok-num">0.3727</span>) &lt; <span class="tok-num">1e-4</span></span></code></pre>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Your box: use the right Python</span>
+      On your DGX Spark, <code>torch</code> lives inside ComfyUI's virtual environment
+      (<code>~/ComfyUI/.venv</code>). Run this with <em>that</em> Python, or make a fresh separate venv for the
+      course — but <b>never</b> <code>pip install</code> the course's later training stack into ComfyUI's venv, or
+      you risk breaking the setup you already depend on (<code>hardware-ground-truth.md §3</code>). For this page,
+      plain <code>torch</code> alone is enough, and it runs in under 0.1&nbsp;s on the CPU — you do not even need the
+      GPU for TN-1.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/tn1.py</code> — the script above, complete and runnable-forward. Run it with your ComfyUI venv's
+      Python; it prints <code>yhat = 0.3727</code>. This file <em>accretes</em> across the course: page&nbsp;14 adds
+      <code>.backward()</code> and the nine-gradient check, page&nbsp;15 adds the autograd assertion and the
+      <code>1.4e-08</code> float surprise, page&nbsp;17 adds the first optimizer step. Keep it; you will grow it.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Three representations, one number</span>
+      The pencil said $0.3727$. The live demo says $0.3727$. PyTorch says $0.3727$. The framework is not magic and
+      it is not doing something you could not — it is doing exactly the arithmetic you just did, faster. Everything
+      Part&nbsp;II adds on top of this is one more thing: the <em>backward</em> pass that tells each of the nine
+      knobs which way to move.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Two traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "The framework does something I couldn't."</span>
+      It does not. Line for line, PyTorch's forward pass is the dot-products-and-bends you executed by hand. The only
+      things it genuinely adds are speed and — starting page&nbsp;14 — the backward pass, which is itself just the
+      chain rule from page&nbsp;5 run in reverse. Nothing on this page is beyond a pencil.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "tanh and sigmoid are outdated, so this is a toy."</span>
+      They are chosen here <em>because</em> they are small, bounded, and hand-computable — not because they are what
+      a real hidden layer uses (page&nbsp;11 explains why they are poor there). What transfers is the <b>object</b>:
+      a stack of dot products and bends ending in a loss. TN-1's nine parameters are the same <em>shape</em> of
+      thing as the 8.19-billion-parameter model you will fine-tune later — only the count $P$ changes.
+      <b>[THREAD:memory beat 4]</b>
+    </div>
+
+    <!-- ===================== MILESTONE ===================== -->
+    <div class="milestone" data-progress="9">
+      <span class="milestone-flag">Milestone</span>
+      You built and ran a real neural network — by pencil, in a live engine, and in PyTorch on your own box, all
+      three agreeing to the digit. "PyTorch is my arithmetic, faster."
+      <span class="milestone-pct">9%</span> of the course.
+    </div>
+
+    <!-- ===================== HOOK ===================== -->
+    <div class="box key"><span class="box-title">🔑 What's left — and it's the whole point</span>
+      You now have a machine that maps two numbers to one, and pencil, canvas, and PyTorch all agree on what it
+      outputs. Two questions remain. <b>First:</b> what other shapes does this same machine take? That is the rest of
+      Part&nbsp;I — the two shape conventions (page&nbsp;7), the probability it runs on (page&nbsp;8), the softmax it
+      decides with (page&nbsp;9), and why the bend is non-negotiable (pages&nbsp;10–11). <b>Second, and bigger:</b>
+      TN-1 assigned $0.3727$ to a label that was true, and paid $0.9869$ nats for the error. <em>How does it get
+      better?</em> How do those nine numbers <em>learn</em>? That question — how the knobs turn, fast enough to
+      matter — is the whole of Part&nbsp;II. We leave it open on purpose.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz06"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: TN-1 forward, live (NetGraph fed by NN.worked221) ----
+     CRITICAL: worked221()'s defaults reproduce the RETIRED §5.4 network.
+     Always pass TN-1's explicit frozen config (constants.md §8). Forward
+     fields only on this page — no gradient display. */
+  (function () {
+    const { worked221 } = NN;
+    const canvas = document.getElementById("d-net");
+    const out = document.getElementById("d-net-out");
+    const constsEl = document.getElementById("d-net-consts");
+
+    const CFG = { W1: [[0.5, -0.3], [0.8, 0.2]], b1: [0.1, -0.1], W2: [0.6, -0.9], b2: 0.2, x: [1.0, 2.0], y: 1 };
+    const w = worked221(CFG);
+
+    // weights[l] shape (layers[l+1] x layers[l]): (2x2) then (1x2)
+    const weights = [
+      [[w.P.W1_11.data, w.P.W1_12.data], [w.P.W1_21.data, w.P.W1_22.data]],
+      [[w.P.W2_1.data, w.P.W2_2.data]]
+    ];
+    // Activations per layer: input x, hidden a1, output yhat.
+    const acts = [w.x.slice(), w.forward.a1.slice(), [w.forward.yhat]];
+
+    const ng = new NetGraph(canvas, {
+      layers: [2, 2, 1], weights, activations: acts,
+      labels: [["x₁", "x₂"], ["h₁", "h₂"], ["ŷ"]]
+    });
+
+    // Live readout — must reproduce the pencil's two numbers to the digit.
+    // Displayed at the frozen precision so no last-digit contradiction is possible.
+    out.innerHTML =
+      `forward: &nbsp;z₂ = <b>${w.forward.z2.toFixed(4)}</b> &nbsp;→&nbsp; ŷ = σ(z₂) = <b>${w.forward.yhat.toFixed(4)}</b>` +
+      ` &nbsp;·&nbsp; loss ℒ = −ln(ŷ) = <b>${w.loss.toFixed(4)}</b> nats`;
+    constsEl.innerHTML =
+      `hidden: a₁ = [tanh(${w.forward.z1[0].toFixed(1)}), tanh(${w.forward.z1[1].toFixed(1)})] = ` +
+      `[<b>${w.forward.a1[0].toFixed(4)}</b>, <b>${w.forward.a1[1].toFixed(4)}</b>] ` +
+      `— the first hidden unit is off for this input.`;
+
+    document.getElementById("d-net-fwd").addEventListener("click", () => {
+      ng.setActivations(acts);                       // restore fills, then flow
+      ng.animateForward(acts, { duration: 1100 });
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => ng.draw(), 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz06", [
+    {
+      q: "TN-1's forward pass on $\\mathbf x = [1.0, 2.0]$ gives $\\hat y$ equal to (to 3 d.p.):",
+      num: 0.3727, tol: 0.001,
+      why: "$z_2 = -0.5204$, and $\\hat y = \\sigma(-0.5204) = 0.3727$ (constants.md §8.1)."
+    },
+    {
+      q: "The loss for that forward pass, $\\mathcal L = -\\ln(0.3727)$, is:",
+      num: 0.9869, tol: 0.002,
+      why: "BCE for a positive example ($y=1$) is $-\\ln \\hat y = 0.9869$ nats. Note it is 0.9869, not the widely-quoted 0.9870 — that rounds an intermediate before taking the log."
+    },
+    {
+      q: "You run the PyTorch forward and it prints $\\hat y = 0.41$ instead of $0.3727$. The most likely cause is:",
+      opts: [
+        "A wrong random seed",
+        "You loaded <code>weight</code> transposed — as (in, out) instead of (out, in)",
+        "Ordinary floating-point error",
+        "The GPU is required and you ran on CPU"
+      ],
+      a: 1,
+      why: "TN-1's weights are exact and deterministic — no seed, and float error is ~1e-7, not 0.04. Loading W transposed is the classic (in,out)-vs-(out,in) bug that page 7 addresses head-on."
+    },
+    {
+      q: "<code>nn.Linear(2, 2).weight.shape</code> is:",
+      opts: [
+        "(2, 2) — and this proves you understand the (out, in) convention",
+        "(2, 2) — but a 2→2 layer is ambiguous and cannot reveal the convention",
+        "(4,)",
+        "(2, 2, 1)"
+      ],
+      a: 1,
+      why: "It is (2,2), but because out = in here it cannot show which axis is which — exactly why page 7 demonstrates the convention with nn.Linear(2, 3) so (out, in) = (3, 2) is unmistakable."
+    },
+    {
+      q: "The claim “the framework is not magic” means, most precisely, that PyTorch:",
+      opts: [
+        "Guesses the output using a learned heuristic",
+        "Mechanically redoes the same arithmetic you did by hand, only faster",
+        "Is slower than a pencil but more accurate",
+        "Stores the answer and looks it up"
+      ],
+      a: 1,
+      why: "Line for line, the forward pass is the dot-products-and-bends you computed by hand. Its only genuine additions are speed and — from page 14 — the backward pass."
+    },
+    {
+      q: "On your DGX Spark, the course's <em>later</em> fine-tuning stack should be installed:",
+      opts: [
+        "Inside ComfyUI's existing venv, to reuse torch",
+        "In a fresh, separate virtual environment",
+        "System-wide as root",
+        "It cannot be installed on this box"
+      ],
+      a: 1,
+      why: "torch already lives in ~/ComfyUI/.venv; use it for this page, but keep the course's later stack in a separate venv so you never break your working ComfyUI install (hardware-ground-truth.md §3)."
+    },
+    {
+      q: "Why does the first hidden unit contribute nothing to $z_2$ for this input?",
+      opts: [
+        "Its weight $W_{2,1}$ is zero",
+        "$a_{1,1} = \\tanh(0) = 0$, so whatever it multiplies is multiplied by zero",
+        "The network is broken",
+        "The bias $b_2$ cancels it out"
+      ],
+      a: 1,
+      why: "$z_{1,1}=0.5-0.6+0.1=0$, so $a_{1,1}=\\tanh(0)=0$. The unit is simply switched off for this particular input — a local fact, not a defect. Flip the input and it wakes up."
+    }
+  ], "TN-1 self-check");
+
+});
+</script>
+</body>
+</html>

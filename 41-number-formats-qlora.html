@@ -1,0 +1,527 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>41. Number Formats &amp; QLoRA — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+</head>
+<body data-page="41-number-formats-qlora.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV — Adaptation</span>
+    <h1>Number Formats &amp; QLoRA</h1>
+    <p class="subtitle">A pretrained weight matrix is sixteen million numbers clustered near zero.
+      You do not need sixteen bits to store one of them — you need about four, provided you place
+      the levels where the mass is and re-anchor the scale often enough that one outlier can't ruin
+      the neighbourhood. That re-anchoring, not the bit-width, is what modern quantization is.</p>
+
+    <!-- on-page-resolution: this PREDICT is answered twice — once in prose right after the
+         quantizer demo, and again by the block-size slider landing on it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you read on</span>
+      You quantize a weight matrix to 4 bits. What cuts the error most:
+      <strong>(a)</strong> using a cleverer 4-bit number <em>format</em>,
+      <strong>(b)</strong> re-anchoring the scale every 16 weights instead of every 4096, or
+      <strong>(c)</strong> they're about equal? Commit — then watch the quantizer demo settle it.
+    </div>
+
+    <h2>The one-sentence frame</h2>
+    <p>Everything on this page unpacks a single claim: <strong>4-bit names a <em>budget</em>, not a
+      <em>scheme</em>, and almost all of the quality lives in the scheme — specifically in how finely
+      you re-scale.</strong> QLoRA is the payoff. It is the trick that took the LoRA you derived on
+      <strong>page&nbsp;40</strong> and shrank the frozen base underneath it from 16.38&nbsp;GB to
+      about 4&nbsp;GB, which is the difference between a 70B living on your desk and a 70B living in
+      someone else's data centre.</p>
+
+    <!-- ============================ FLOATS ============================ -->
+    <h2>A float is sign, range, and precision</h2>
+    <p>A floating-point number is three fields: a <em>sign</em> bit, an <em>exponent</em> that sets
+      the <em>range</em> (how big and how small it can be), and a <em>mantissa</em> that sets the
+      <em>precision</em> (how many significant bits inside that range). Trade bits between the last
+      two and you get every format in the table below.</p>
+
+    <div class="box rule"><span class="box-title">📐 Range vs precision — the formats you will actually meet</span>
+      <table class="ledger">
+        <thead><tr><th>Format</th><th>Exp / mant bits</th><th>Max finite</th><th>Rel. precision</th><th>Use</th></tr></thead>
+        <tbody>
+          <tr><td>fp32</td><td>8 / 23</td><td>~3.4e38</td><td>~1.19e-7 (ε)</td><td>master weights, accumulation</td></tr>
+          <tr><td><strong>bf16</strong></td><td><strong>8 / 7</strong></td><td>~3.4e38</td><td>~1e-2</td><td><strong>the training default on Blackwell</strong></td></tr>
+          <tr><td>fp16</td><td>5 / 10</td><td><strong>65,504</strong></td><td>~1e-3</td><td>needs a GradScaler; avoid here</td></tr>
+          <tr><td>fp8 E4M3</td><td>4 / 3</td><td>~448</td><td>~6e-2</td><td>inference, some training</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">The one thing to remember: <strong>bf16 has fp32's exponent range and
+        far fewer mantissa bits; fp16 has a much smaller range</strong> and its gradients underflow to
+        zero below ~6e-8, which is why fp16 training needs a loss-scaling <code>GradScaler</code>.
+        bf16 keeps the range, so it needs none. <strong>Use bf16 on the Spark, always.</strong>
+        fp16's max of <strong>65,504</strong> and fp32's machine epsilon of <strong>1.19e-7</strong>
+        are both <strong>[VP, constants §9.3]</strong>.</p>
+    </div>
+
+    <p>Why did the <code>GradScaler</code> era end? Because bf16 gave you fp32's range in half the
+      bytes; the scaler existed only to drag fp16 gradients up out of the underflow floor before they
+      rounded to zero. On Blackwell you keep the range for free, so the scaler is a museum piece —
+      mention it once, in the past tense, and move on.</p>
+
+    <!-- ============================ THE GENERAL FORM ============================ -->
+    <h2>Quantization is a scale times a code</h2>
+    <p>Every low-bit weight format — INT4, NF4, FP4 — is the same two-part object. You store a small
+      integer <em>code</em> per weight, and one <em>scale</em> shared across a block of weights. The
+      reconstructed weight is their product:</p>
+
+    <div class="box rule"><span class="box-title">📐 The general form of a quantized weight</span>
+      $$w \;\approx\; s \cdot q, \qquad q \in \{\text{one of } 2^{\,b_q}\text{ code levels}\},\quad
+        s = \text{one scale per block};$$
+      $$\text{effective bits/param} \;=\; b_q \;+\; \frac{b_s}{\text{block size}}.$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$w$</td><td>the real weight you are compressing</td><td>scalar (bf16 originally)</td><td>the pretrained checkpoint</td></tr>
+          <tr><td>$q$</td><td>the code — which of the $2^{b_q}$ levels this weight snapped to</td><td>a $b_q$-bit integer</td><td>stored per weight</td></tr>
+          <tr><td>$s$</td><td>the block scale — the stretch that maps codes back to weight units</td><td>scalar</td><td>stored once per block, $=\max|w|/\max|q|$</td></tr>
+          <tr><td>$b_q$</td><td>bits per code (4 for NF4/FP4, 8 for INT8/FP8)</td><td>integer</td><td>the format</td></tr>
+          <tr><td>$b_s$</td><td>bits per stored scale (32 for fp32, 8 for fp8 or a power-of-two exponent)</td><td>integer</td><td>the format</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">Read the second line: the code costs $b_q$ bits <em>per weight</em>,
+        but the scale's $b_s$ bits are <em>amortized over the whole block</em>. Shrink the block and
+        you buy accuracy — at the cost of storing more scales. That trade is the entire game.</p>
+    </div>
+
+    <!-- ============================ NF4 BUDGET ============================ -->
+    <h2>QLoRA's NF4 budget, to the bit</h2>
+    <p>QLoRA freezes the base model and stores it in a 4-bit format called <strong>NF4</strong>
+      (NormalFloat-4), then trains an ordinary LoRA adapter (page&nbsp;40) on top in bf16. The frozen
+      base is read-only, so it can be as compressed as you can bear. Here is exactly how many bits per
+      parameter NF4-with-double-quant costs — the derivation matters because the number that half the
+      internet copies is an arithmetic mistake.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Effective bits per parameter, NF4 + double-quant</span>
+      <p>Three costs, added:</p>
+      <ul>
+        <li><strong>The code:</strong> NF4 weight $= 4$ bits.</li>
+        <li><strong>First-level scale:</strong> one fp8 absmax scale per <strong>64</strong>-weight block
+          $\Rightarrow 8/64 = 0.125$ bits/param.</li>
+        <li><strong>Second-level scale (the "double" in double-quant):</strong> those fp8 scales are
+          themselves grouped and re-scaled — one fp32 constant per <strong>256</strong> scales, and each
+          scale covers 64 params, so the fp32 constant amortizes over $64\times256 = 16{,}384$ params
+          $\Rightarrow 32/16{,}384 = 0.00195$ bits/param.</li>
+      </ul>
+      <p>Overhead $= \dfrac{8}{64} + \dfrac{32}{64\cdot 256} = \dfrac{65}{512} = \mathbf{0.127}$ bits.
+        Total $= 4 + \dfrac{65}{512} = \dfrac{2113}{512} = \mathbf{4.127}\ \text{bits} = \mathbf{0.516}\ \text{B/param}$
+        <strong>[VP, constants §3 · arXiv 2305.14314 §3]</strong>.</p>
+      <p style="margin:.6em 0 0"><strong>Cross-check against the paper's own figures:</strong> the saving
+        from double-quant is $0.5 - 0.127 = 0.373$ bits/param; on a 65B model that is
+        $65\text{e}9 \times 0.373 / 8 = \mathbf{3.03\ GB}$, matching the paper's abstract ("approximately
+        3&nbsp;GB"). Two routes, one number.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The 4.25-bit / 0.53-B trap</span>
+      You will see <em>"$4 + 8/64 + 32/256 = 4.25$ bits $\Rightarrow 0.53$ B/param"</em> quoted
+      everywhere. It is an <strong>arithmetic error</strong>, not a rival convention. It divides the
+      second-level fp32 constant by 256 — the number of <em>scales</em> it covers — instead of by
+      $64\times256 = 16{,}384$, the number of <em>parameters</em> those scales cover. That single dropped
+      factor of the 64-block inflates $0.00195$ into $0.125$. There is no range and no second convention:
+      the paper's own arithmetic gives <strong>4.127 bits</strong>, and so does the bitsandbytes source.
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ QLoRA on Qwen3-8B — the footprint</span>
+      <p>With double-quant on, the frozen NF4 base is</p>
+      $$8{,}190{,}735{,}360 \times 0.515869\ \text{B/param} = \mathbf{4.225\ GB\ (3.935\ GiB)}\quad\text{[DER]}.$$
+      <p>Add the $r=16$ all-linear LoRA state (~0.61&nbsp;GB, from page&nbsp;40) and you land at about
+        <strong>4.93&nbsp;GB / 4.59&nbsp;GiB of state</strong> — with activations named as a separate,
+        identical line, exactly as on the LoRA page. Against the full fine-tune's
+        <strong>131.05&nbsp;GB</strong> of state, that is a reduction of <strong>19–26×</strong>
+        <strong>[DER, constants §2.3]</strong>.</p>
+      <p style="margin:.6em 0 0"><b>[THREAD:the memory budget — beat 5/6]</b> — same ledger object as
+        pages 18 and 40, one rung further down. The escape ladder now reads
+        <strong>full 131.05&nbsp;GB → LoRA 17.08&nbsp;GB → QLoRA ~4.93&nbsp;GB</strong>. Reopen the
+        page-40 line: LoRA already deleted the optimizer state; QLoRA now compresses the one thing LoRA
+        left at full size — the frozen base.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Say the range, and set the flag</span>
+      Two honesty beats. First: <strong>say "19–26×", never "~20×"</strong> — the spread is real (it
+      depends on activations and adapter size), and rounding it to a single number is the kind of tidy
+      lie this course refuses. Second: <code>bnb_4bit_use_double_quant</code> (a.k.a.
+      <code>compress_statistics</code>) <strong>defaults to <code>False</code></strong> in both
+      bitsandbytes and <code>BitsAndBytesConfig</code>. Un-opted-in NF4 is <strong>4.5 bits =
+      0.5625&nbsp;B/param → 4.607&nbsp;GB</strong> for Qwen3-8B, not 4.225&nbsp;GB. Every QLoRA figure on
+      this page assumes you explicitly set <code>bnb_4bit_use_double_quant=True</code> <strong>[VP,
+      constants §3]</strong>.
+    </div>
+
+    <!-- ============================ WHY NF4 ============================ -->
+    <h2>Why NF4 and not plain INT4</h2>
+    <p>A pretrained weight tensor is approximately $\mathcal{N}(0,\sigma^2)$ — a bell curve centred on
+      zero. Plain INT4 spreads its 16 levels <em>evenly</em> across the range, so most of them land out
+      in the near-empty tails while the dense middle gets only a few. NF4 instead places its 16 levels at
+      the <strong>quantiles of a standard normal</strong>: every code is equally likely to be used, so
+      the levels crowd together near zero where the weights actually are. Same 4 bits, the codes just
+      moved to where the mass is. <b>[THREAD:the dot product — beat: the shape of the data]</b> — the
+      weights' distribution, not the bit-count, is what decides the format.</p>
+
+    <!-- ============================ THE QUANTIZER DEMO ============================ -->
+    <div class="box try"><span class="box-title">Try it</span>
+      The demo below quantizes a real-statistics slice of a <code>q_proj</code> matrix live. Flip
+      INT4 → NF4 and watch the levels slide toward the peak. Then drag the <strong>block size</strong>
+      from 4096 down to 16 and watch the error collapse — that is your PREDICT, resolved by hand.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">The quantizer · round-trip on a real weight slice <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-quant-hist" height="230"></canvas>
+        <canvas id="d-quant-scatter" height="250" style="margin-top:14px"></canvas>
+        <div class="controls" id="d-quant-ctrls"></div>
+        <div class="readout" id="d-quant-out"></div>
+        <p style="font-size:.78rem;color:var(--text-dim);margin:.7em 0 0">
+          The slice is a seeded 4,096-weight sample with a <code>q_proj</code>'s statistics
+          (near-Gaussian bulk, rare heavy-tail outliers). Every quantize→dequantize round-trip,
+          RMS error, and effective-bit count is computed live, per block, per format.</p>
+      </div>
+    </div>
+
+    <p>Resolving the PREDICT, one paragraph in: <strong>it's (b), by a wide margin.</strong> Swapping the
+      4-bit <em>format</em> (INT4 → NF4) trims the error a little; dragging the <strong>block size</strong>
+      from 4096 down to 16 collapses it, because a single heavy-tail outlier no longer inflates the scale
+      for thousands of its neighbours. Then drag the bit-width (INT4 → INT8) and watch it matter <em>less</em>
+      than the block size did. <strong>Granularity beats precision.</strong> That is the one quantization
+      lesson worth keeping, and it is why the whole field re-scales blockwise.</p>
+
+    <!-- ============================ 2026 FORMATS ============================ -->
+    <h2>The 2026 format zoo</h2>
+    <div class="box rule"><span class="box-title">📐 The formats worth knowing, with their tags</span>
+      <table class="ledger">
+        <thead><tr><th>Format</th><th>Bits</th><th>Block / scale</th><th>Note</th></tr></thead>
+        <tbody>
+          <tr><td><strong>bf16</strong></td><td>16</td><td>—</td><td>training default [VP]</td></tr>
+          <tr><td>fp16</td><td>16</td><td>—</td><td>never on Blackwell (needs GradScaler) [VP]</td></tr>
+          <tr><td>FP8 E4M3</td><td>8</td><td>per-tensor / per-block</td><td>0.5–2% degradation [EST]</td></tr>
+          <tr><td><strong>MXFP4</strong></td><td>4 (E2M1)</td><td>block 32 / <strong>power-of-two (E8M0)</strong> scale</td><td>~4.25 eff bits [VP]</td></tr>
+          <tr><td><strong>NVFP4</strong></td><td>4 (E2M1)</td><td>block <strong>16</strong> / FP8 micro-scale + fp32 global</td><td>~4.5 eff bits; <strong>88% lower error than MXFP4</strong> [EST — vendor]</td></tr>
+          <tr><td>NF4</td><td>4</td><td>block 64 / fp8+fp32</td><td>≈4.13 bits w/ double-quant; a <em>training</em> format, not a serving one [VP]</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The retention numbers you keep seeing are SEO-grade</span>
+      "AWQ retains 95%, GGUF 92%, GPTQ 90%" — these figures are mutually inconsistent across the sources
+      that quote them and <strong>should not be printed as facts</strong>. The <em>ordering</em> is
+      probably right; the exact percentages are folklore. This course will not repeat them —
+      <code>08_quantization_lab.py</code> lets you measure them on your own box instead
+      <strong>[constants §9.7]</strong>.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The NVFP4 story — granularity, not mantissa</span>
+      MXFP4 forces every block's scale to a <strong>power of two</strong> (the E8M0 exponent field). A
+      block that wants a scale of 3 rounds to 2 or 4 and eats up to 33% error <em>before a single weight
+      is quantized</em>. NVFP4 allows an arbitrary FP8 scale and halves the block to 16. That is the whole
+      difference between them — and it is worth about 88% of the error. The general lesson, one more time:
+      <strong>quantization error is dominated by scale granularity, not by mantissa bits.</strong> The
+      Spark has NVFP4 in hardware, and <strong>bitsandbytes ships a native <code>sm_121</code></strong>
+      wheel for its aarch64 + CUDA-13 stack <strong>[VP, constants §6.9]</strong> — so the 70B QLoRA path
+      below actually runs. Here the Spark is <em>better</em> served than an x86 box.
+    </div>
+
+    <!-- ============================ MISCONCEPTIONS ============================ -->
+    <h2>Three things "4-bit" does not mean</h2>
+    <div class="box warn"><span class="box-title">⚠️ "4-bit means 16 evenly-spaced values"</span>
+      No modern format does this. NF4 uses normal quantiles, E2M1 is a tiny float with unevenly spaced
+      representable values, GGUF mixes bit-widths across a tensor. Even spacing is exactly the INT4 the
+      demo showed you losing to NF4.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Quantization is faster because there's less math"</span>
+      For <em>decode</em> it is the <em>same</em> math — you dequantize <em>and then</em> multiply. The win
+      is reading 4× fewer <em>bytes</em>, and single-token decode is memory-bound, so bytes are what bind.
+      Quantization is a <strong>bandwidth optimization wearing a compute costume</strong>. (Caveat: NVFP4
+      tensor cores execute FP4 matmuls natively, so <em>prefill</em> and <em>training</em> — which are
+      compute-bound — do get a real compute win.) <b>[THREAD:the dot product — beat: memory-bound]</b> —
+      decode reads every weight once and does ~2 FLOP per weight, which is precisely the roofline story
+      page&nbsp;43 measures.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Train in the format you'll serve in"</span>
+      No. Train NF4/bf16, then <strong>merge the adapter into the original bf16 weights and re-quantize</strong>
+      for serving (GGUF/AWQ/NVFP4). Merging a bf16 adapter into an <em>already-NF4</em> base is lossy — the
+      base has already thrown away the precision the merge needs.
+    </div>
+
+    <!-- ============================ COMPUTE FOR MEMORY ============================ -->
+    <h2>QLoRA buys memory with compute</h2>
+    <p>QLoRA is roughly <strong>20–40% slower</strong> than plain LoRA, because you pay a dequantization on
+      every forward pass. You use it when LoRA does not fit, <em>not</em> for speed. On the Spark, an 8B
+      LoRA already fits comfortably at 17.08&nbsp;GB, so <strong>8B QLoRA is the wrong choice</strong> — it
+      would trade speed for memory you do not need. QLoRA earns its keep at 70B:</p>
+
+    <div class="box worked"><span class="box-title">✍️ A 70B on your desk</span>
+      <p>Llama-3.3-70B, NF4 base with double-quant $\approx 36.4$&nbsp;GB, plus an $r=16$ all-linear adapter
+        of <strong>207,093,760 params (0.294% of the model)</strong> $\approx 3.31$&nbsp;GB of state:</p>
+      $$36.4\ \text{GB} + 3.31\ \text{GB} \approx \mathbf{39.7\ GB\ total}\quad\text{[DER, constants \S3]}.$$
+      <p style="margin:.6em 0 0">Convert to compare against the box: $39.7\ \text{GB} \times 0.9313 \approx
+        37.0$&nbsp;GiB, comfortably inside the <strong>measured 121.6875&nbsp;GiB</strong>
+        <strong>[MEA-DEV, constants §6.8]</strong>. <strong>128&nbsp;GB of unified memory plus QLoRA is the
+        specific combination that puts a 70B on your desk.</strong> <b>[THREAD:Qwen3-8B — the anchor]</b>:
+        the 0.294% and 207,093,760 come from the same $r(d_{in}+d_{out})$ arithmetic you ran for the 8B on
+        page&nbsp;40, just with the 70B's dimensions.</p>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Paged optimizers, and why the Spark is the exception</summary><div>
+      <p>bitsandbytes offers <em>paged optimizers</em>: on a memory spike, optimizer state is paged out to
+        CPU RAM to avoid an out-of-memory crash, the way an OS pages to disk. Every tutorial you read will
+        recommend them for QLoRA on a discrete GPU, because there the GPU's VRAM and the host's RAM are two
+        separate pools connected by a slow PCIe bus.</p>
+      <p><strong>On the Spark there is no separate host pool to page to.</strong> Its 128&nbsp;GB is
+        <em>unified</em> — the CPU and GPU address the same physical memory coherently over NVLink-C2C. A
+        "page to CPU" is a no-op move within one pool. This is one of many places a discrete-GPU tutorial
+        will quietly mislead you about your own hardware; the fix is to know the machine, which is the whole
+        posture of this course. (Nothing later depends on this box.)</p>
+    </div></details>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/08_quantization_lab.py</code> — quantize a real Qwen3 layer to NF4 (double-quant on and
+      off), FP8, and NVFP4; measure RMS error and a small perplexity delta on your box; confirm
+      <strong>0.516 vs 0.5625 B/param</strong> and reproduce the block-size effect from the demo. This is
+      where you measure the retention numbers the course refused to print.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-41"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ================= THE QUANTIZER ================= */
+  (function () {
+    const { RNG } = NN;
+
+    /* ---- code sets (real, published levels) ---- */
+    // NF4: the 16 NormalFloat-4 quantile levels (QLoRA paper / bitsandbytes).
+    const NF4 = [-1.0, -0.6961928, -0.5250731, -0.3949175, -0.2844416, -0.1848922,
+                 -0.09103756, 0.0, 0.07958029, 0.16093020, 0.24611230, 0.33791524,
+                 0.44070983, 0.56261700, 0.72295684, 1.0];
+    // E2M1 (FP4): the 8 representable magnitudes, signed → 16 codes.
+    const E2M1_MAG = [0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+    const E2M1 = []; E2M1_MAG.forEach(m => { E2M1.push(m); if (m > 0) E2M1.push(-m); });
+    // Uniform INT-n: 2^n evenly spaced levels on [-1, 1].
+    function intCodes(bits) {
+      const n = (1 << bits), out = []; for (let i = 0; i < n; i++) out.push(-1 + 2 * i / (n - 1)); return out;
+    }
+    // FP8 E4M3: enumerate normals+subnormals up to max 448, then normalize to [-1,1].
+    function e4m3Codes() {
+      const s = new Set([0]);
+      for (let e = 0; e <= 15; e++) for (let m = 0; m < 8; m++) {
+        let v;
+        if (e === 0) v = (m / 8) * Math.pow(2, -6);            // subnormal
+        else v = (1 + m / 8) * Math.pow(2, e - 7);             // normal
+        if (v <= 448) { s.add(v); s.add(-v); }
+      }
+      const arr = [...s].sort((a, b) => a - b), mx = arr[arr.length - 1];
+      return arr.map(v => v / mx); // scale so max code = 1 (matches the /max|q| convention)
+    }
+    const FP8 = e4m3Codes();
+
+    const FORMATS = {
+      "int4":  { label: "INT4 (uniform)",       codes: intCodes(4), bq: 4 },
+      "nf4":   { label: "NF4 (normal quantile)", codes: NF4,        bq: 4 },
+      "mxfp4": { label: "MXFP4 (E2M1)",          codes: E2M1,       bq: 4 },
+      "nvfp4": { label: "NVFP4 (E2M1)",          codes: E2M1,       bq: 4 },
+      "int8":  { label: "INT8 (uniform)",        codes: intCodes(8), bq: 8 },
+      "fp8":   { label: "FP8 E4M3",              codes: FP8,        bq: 8 },
+    };
+    const SCALE_BITS = { fp32: 32, fp8: 8, pow2: 8 };
+
+    /* ---- the weight slice: q_proj statistics, seeded so it reproduces ---- */
+    const rng = new RNG(20260716);
+    const N = 4096, W = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let x = rng.normal(0, 0.021);           // near-Gaussian bulk, realistic std
+      if (rng.random() < 0.012) x *= 4.6;     // rare heavy-tail outliers (why blocks matter)
+      W[i] = x;
+    }
+    const WMAX = W.reduce((a, w) => Math.max(a, Math.abs(w)), 0);
+
+    /* ---- quantize a scale value to the chosen scale format ---- */
+    function encodeScale(s, mode) {
+      if (mode === "pow2") return Math.pow(2, Math.ceil(Math.log2(s)));   // E8M0
+      if (mode === "fp8") {                                               // nearest E4M3 (positive)
+        if (s <= 0) return s;
+        const exp = Math.floor(Math.log2(s)), frac = s / Math.pow(2, exp); // frac in [1,2)
+        const q = Math.round((frac - 1) * 8) / 8;                          // 3 mantissa bits
+        return (1 + q) * Math.pow(2, exp);
+      }
+      return s; // fp32: exact
+    }
+
+    /* ---- one full round-trip. Returns dequantized array + stats. ---- */
+    function roundtrip(fmtKey, blockSize, scaleMode) {
+      const { codes } = FORMATS[fmtKey];
+      const cmax = codes.reduce((a, c) => Math.max(a, Math.abs(c)), 0);
+      const wq = new Float32Array(N);
+      const scales = [];
+      for (let b = 0; b < N; b += blockSize) {
+        const end = Math.min(b + blockSize, N);
+        let amax = 0; for (let i = b; i < end; i++) amax = Math.max(amax, Math.abs(W[i]));
+        if (amax === 0) { for (let i = b; i < end; i++) wq[i] = 0; scales.push(0); continue; }
+        let s = encodeScale(amax / cmax, scaleMode);
+        scales.push(s);
+        for (let i = b; i < end; i++) {
+          const t = W[i] / s;
+          let best = codes[0], bd = Math.abs(t - codes[0]);
+          for (let k = 1; k < codes.length; k++) { const d = Math.abs(t - codes[k]); if (d < bd) { bd = d; best = codes[k]; } }
+          wq[i] = best * s;
+        }
+      }
+      let se = 0, sw = 0; for (let i = 0; i < N; i++) { const e = W[i] - wq[i]; se += e * e; sw += W[i] * W[i]; }
+      const rms = Math.sqrt(se / N), relrms = rms / Math.sqrt(sw / N);
+      const effBits = FORMATS[fmtKey].bq + SCALE_BITS[scaleMode] / blockSize;
+      const medScale = scales.slice().sort((a, b) => a - b)[Math.floor(scales.length / 2)] || (WMAX / cmax);
+      return { wq, rms, relrms, effBits, codes, cmax, medScale };
+    }
+
+    /* ---- controls ---- */
+    const ctrls = document.getElementById("d-quant-ctrls");
+    function makeSelect(label, opts, val) {
+      const wrap = document.createElement("div"); wrap.className = "ctrl";
+      wrap.innerHTML = `<label>${label}</label><select>` +
+        opts.map(o => `<option value="${o.v}"${o.v === val ? " selected" : ""}>${o.t}</option>`).join("") + `</select>`;
+      ctrls.appendChild(wrap);
+      const sel = wrap.querySelector("select");
+      return { get: () => sel.value, set: v => { sel.value = v; }, onChange: fn => sel.addEventListener("change", () => fn(sel.value)) };
+    }
+    const fmt = makeSelect("weight format",
+      Object.keys(FORMATS).map(k => ({ v: k, t: FORMATS[k].label })), "nf4");
+    const blk = makeCtrl(ctrls, { label: "block size", min: 1, max: 12, step: 1, value: 6, fmt: v => Math.pow(2, v) }); // 2^6 = 64
+    const scl = makeSelect("scale format",
+      [{ v: "fp8", t: "fp8 (NVFP4/NF4)" }, { v: "pow2", t: "power-of-two (MXFP4)" }, { v: "fp32", t: "fp32 (exact)" }], "fp8");
+
+    const histC = document.getElementById("d-quant-hist");
+    const scatC = document.getElementById("d-quant-scatter");
+    const out = document.getElementById("d-quant-out");
+    const accent = () => cssVar("--accent", "#b48cff");
+    const accent2 = () => cssVar("--accent2", "#4fc3f7");
+    const dim = () => cssVar("--plot-tick", "#8391ab");
+
+    /* ---- histogram of W with the code levels overlaid ---- */
+    const NBINS = 61;
+    function drawHist(res) {
+      const xr = WMAX * 1.05;
+      const counts = new Array(NBINS).fill(0), centers = [];
+      for (let i = 0; i < NBINS; i++) centers.push(-xr + (2 * xr) * (i + 0.5) / NBINS);
+      for (let i = 0; i < N; i++) {
+        let bi = Math.floor((W[i] + xr) / (2 * xr) * NBINS);
+        if (bi < 0) bi = 0; if (bi >= NBINS) bi = NBINS - 1; counts[bi]++;
+      }
+      const cmax = Math.max(...counts);
+      const p = new Plot(histC, { xmin: -xr, xmax: xr, ymin: 0, ymax: cmax * 1.08, xlabel: "weight value", ylabel: "count" });
+      p.clear(); p.grid();
+      // histogram as a step outline
+      const xs = [], ys = [];
+      for (let i = 0; i < NBINS; i++) { xs.push(centers[i]); ys.push(counts[i]); }
+      p.trace(xs, ys, accent2(), 2);
+      // the code levels, scaled by the representative (median) block scale
+      for (const c of res.codes) {
+        const x = c * res.medScale;
+        if (x > -xr && x < xr) p.vline(x, accent(), [2, 3]);
+      }
+      p._p = p;
+    }
+
+    /* ---- scatter of w vs dequantized ŵ against the identity ---- */
+    function drawScatter(res) {
+      const xr = WMAX * 1.05;
+      const p = new Plot(scatC, { xmin: -xr, xmax: xr, ymin: -xr, ymax: xr, xlabel: "original weight  w", ylabel: "dequantized  ŵ = s·q" });
+      p.clear(); p.grid();
+      p.trace([-xr, xr], [-xr, xr], dim(), 1.2);           // identity
+      const g = p.g; g.save();
+      const pad = p.o.pad;
+      g.beginPath(); g.rect(pad.l, pad.t, p.W - pad.l - pad.r, p.H - pad.t - pad.b); g.clip();
+      g.fillStyle = accent();
+      const STEP = Math.max(1, Math.floor(N / 700));
+      for (let i = 0; i < N; i += STEP) {
+        g.globalAlpha = 0.5;
+        g.beginPath(); g.arc(p._tx(W[i]), p._ty(res.wq[i]), 1.6, 0, 2 * Math.PI); g.fill();
+      }
+      g.restore();
+    }
+
+    function draw() {
+      const blockSize = Math.pow(2, blk.get());
+      const scaleMode = scl.get();
+      const res = roundtrip(fmt.get(), blockSize, scaleMode);
+      drawHist(res); drawScatter(res);
+      // sig-fig policy: eff bits to 2 dp (frozen NF4 value is 4.127 → 4.13; never contradict by a digit)
+      out.innerHTML =
+        `format <b>${FORMATS[fmt.get()].label}</b> · block <b>${blockSize}</b> · scale <b>${scaleMode}</b><br>` +
+        `RMS error <b>${res.rms.toExponential(2)}</b> (<b>${(res.relrms * 100).toFixed(1)}%</b> of the weights' RMS) · ` +
+        `effective <b>${res.effBits.toFixed(2)}</b> bits/param = <b>${(res.effBits / 8).toFixed(3)}</b> B/param`;
+    }
+
+    fmt.onChange(() => {
+      // convenience: picking MXFP4 implies power-of-two scale + block 32; NVFP4 implies fp8 + block 16
+      if (fmt.get() === "mxfp4") { scl.set("pow2"); blk.input.value = 5; blk.input.dispatchEvent(new Event("input")); }
+      else if (fmt.get() === "nvfp4") { scl.set("fp8"); blk.input.value = 4; blk.input.dispatchEvent(new Event("input")); }
+      draw();
+    });
+    blk.onInput(draw);
+    scl.onChange(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ================= QUIZ ================= */
+  renderQuiz("quiz-41", [
+    {
+      q: "NF4 with double-quant costs how many effective bits per parameter?",
+      num: 4.127, tol: 0.01, unit: "bits",
+      why: "$4 + 65/512 = 4.127$ bits $= 0.516$ B/param. The widely-copied 4.25 / 0.53 figure is an arithmetic error — it divides the second-level fp32 constant by 256 scales instead of by $64\\times256 = 16{,}384$ params."
+    },
+    {
+      q: "The frozen NF4 base of Qwen3-8B (double-quant ON) occupies how many GB?",
+      num: 4.225, tol: 0.1, unit: "GB",
+      why: "$8{,}190{,}735{,}360 \\times 0.515869\\text{ B} = 4.225$ GB (3.935 GiB). Without double-quant it is 4.5 bits $= 0.5625$ B/param $= 4.607$ GB."
+    },
+    {
+      q: "You quantize to 4 bits. Which change cuts the error the most?",
+      opts: ["A cleverer 4-bit number format", "A smaller block size (finer scale granularity)", "More mantissa bits in the scale", "Nothing — 4 bits is 4 bits"],
+      a: 1,
+      why: "Granularity beats precision. Re-anchoring the scale every 16 weights instead of every 4096 stops one outlier from ruining a whole block — a far bigger effect than swapping the code layout. 'More mantissa bits' is the named misconception the demo refutes."
+    },
+    {
+      q: "Why is bf16 preferred over fp16 for training on Blackwell?",
+      opts: ["bf16 has more mantissa bits, so it's more precise", "bf16 has the same exponent range as fp32, so gradients don't underflow and no GradScaler is needed", "fp16 isn't supported by the hardware", "bf16 is twice as fast"],
+      a: 1,
+      why: "bf16 keeps fp32's 8-bit exponent range with only 7 mantissa bits; fp16's 5-bit exponent underflows gradients below ~6e-8, which is exactly what a GradScaler existed to fix. bf16 needs none. (bf16 has FEWER mantissa bits than fp16 — the precision claim is the distractor.)"
+    },
+    {
+      q: "You QLoRA'd an 8B on the Spark hoping for a speed-up, and it ran slower than plain LoRA. Why?",
+      opts: ["QLoRA has a bug at 8B", "QLoRA trades compute for memory — you pay a dequantization every forward pass, and the 8B already fit as plain LoRA (17.08 GB)", "The NF4 base was corrupted", "You needed more mantissa bits"],
+      a: 1,
+      why: "QLoRA is ~20–40% slower than LoRA by design (dequant per forward). It buys memory you don't need at 8B — plain LoRA already fits. QLoRA is the 70B path, not the 8B one."
+    },
+    {
+      q: "Full fine-tune of Qwen3-8B is 131.05 GB of state. Which reduction figure for QLoRA is the honest one?",
+      opts: ["~20×", "19–26×", "417×", "187×"],
+      a: 1,
+      why: "Say the range: 131.05 GB → ~4.93–7 GB = 19–26× (state-to-state, activations named separately). '~20×' hides a real spread; 187× is LoRA's trainable-state ratio (page 40); 417× is a retired Llama-2 number."
+    },
+    {
+      q: "Your QLoRA NF4 base — is that the artifact you deploy?",
+      opts: ["Yes, ship the NF4 base plus the adapter", "No — merge the adapter into the original bf16 weights, then re-quantize (GGUF/AWQ/NVFP4) for serving", "Yes, but only after re-training", "No — deploy the bf16 adapter alone"],
+      a: 1,
+      why: "Train NF4/bf16; then merge into the ORIGINAL bf16 weights and re-quantize for serving. Merging a bf16 adapter into an already-NF4 base is lossy — the base has already discarded the precision the merge needs."
+    }
+  ], "Number formats & QLoRA — self-check");
+
+});
+</script>
+</body>
+</html>

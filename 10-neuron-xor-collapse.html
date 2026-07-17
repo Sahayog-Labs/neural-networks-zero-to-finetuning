@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>10. The Neuron, XOR &amp; Linear Collapse — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: let wide ledger tables scroll inside their own box on small
+   screens so the page body never scrolls horizontally; collapse the demo's
+   control column below 720px. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; }
+}
+@media (max-width: 720px) {
+  .collapse-grid { grid-template-columns: 1fr !important; }
+}
+.xor-table { border-collapse: collapse; margin: 10px 0; font-variant-numeric: tabular-nums; }
+.xor-table th, .xor-table td { border: 1px solid var(--plot-border, #3b4a6b); padding: 5px 12px; text-align: center; }
+.xor-table th { color: var(--text-dim, #8391ab); font-weight: 600; }
+</style>
+</head>
+<body data-page="10-neuron-xor-collapse.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · 🧱 The Neuron</span>
+    <h1>The Neuron, XOR, and Why a Linear Stack Collapses</h1>
+    <p class="subtitle">You have dragged a neuron (page&nbsp;1) and named the ruler inside it (page&nbsp;3). Now we
+      write it down, stack a hundred of them, and prove the stack does nothing a single one couldn't — until you drop
+      in one bend. That bend, not the depth, is the whole ballgame.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product beat 3]</b> · <b>[THREAD:activation beat 0]</b>. The <em>ruler</em> from page&nbsp;1 and
+      the <em>dot product</em> from page&nbsp;3 are the same object; here it becomes a neuron in symbols,
+      $z=\mathbf w\cdot\mathbf x+b$. Then we prove a stack of these <em>with no bend between them</em> collapses to
+      one — and leave you <em>needing</em> a nonlinearity. Page&nbsp;11 supplies it and says which one won.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in the "Predict resolved" note directly under the demo, and again in the
+         linear-collapse proof. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Stack five hidden layers, 16 units wide each, <b>with no activation function between them</b> — over a
+      <b>thousand</b> adjustable numbers. The most intricate decision boundary this network can draw is:
+      <b>(a)</b> an arbitrary wiggly curve, <b>(b)</b> always a single straight line, or <b>(c)</b> a circle?
+      Commit to one, then try to break it in the playground below.
+    </div>
+
+    <!-- ===================== THE NEURON ===================== -->
+    <h2>A neuron, precisely</h2>
+    <p>Page&nbsp;1 let you drag a neuron and watch it cut a plane in half; page&nbsp;3 named the measurement it
+      makes. Here is the same object with its symbols filled in — nothing new, just written down:</p>
+
+    <p>$$a=\phi(z),\qquad z=\mathbf w\cdot\mathbf x+b=\sum_{i=1}^{n} w_i x_i + b.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf x$</td><td>the input — one example</td><td>$(n,1)$</td><td>the data</td></tr>
+        <tr><td>$\mathbf w$</td><td>the weight vector — a <b>template</b> the neuron matches against</td><td>$(n,1)$</td><td>a learned parameter</td></tr>
+        <tr><td>$b$</td><td>bias — the threshold, negated: $z>0 \iff \mathbf w\cdot\mathbf x > -b$</td><td>scalar</td><td>a learned parameter</td></tr>
+        <tr><td>$z$</td><td>pre-activation — the match score, a dot product</td><td>scalar</td><td>computed above</td></tr>
+        <tr><td>$\phi$</td><td>the activation (the "bend") — any nonlinearity</td><td>—</td><td>fixed function</td></tr>
+        <tr><td>$a$</td><td>the neuron's output, $\phi(z)$</td><td>scalar</td><td>computed above</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>Read it geometrically</b> — this is the reframing everything else rests on. The set
+      $\mathbf w\cdot\mathbf x+b=0$ is a <b>hyperplane</b>: a line in 2-D, a plane in 3-D, a flat $(n{-}1)$-dimensional
+      sheet in $n$-D. The vector $\mathbf w$ is its <b>normal</b> (it points straight across the sheet), and the
+      sheet's distance from the origin is $|b|/\lVert\mathbf w\rVert$. So a neuron <em>cuts space in half</em>, and
+      $\phi$ decides how sharply the output flips from "no" to "yes" across the cut. The weight vector is a template;
+      $z$ is how strongly the input resembles it. <b>[THREAD:dot-product beat 3]</b> — $z$ is largest exactly when
+      $\mathbf x$ points along $\mathbf w$ (callback to page&nbsp;3's "how much of this is in that").</p>
+
+    <!-- ===================== A LAYER ===================== -->
+    <h2>A layer is $m$ neurons at once</h2>
+    <p>Give the layer $m$ neurons and stack their template rows into a matrix $W$. One matmul computes all $m$ match
+      scores in a single shot — which is the only reason GPUs are worth pointing at this problem:</p>
+
+    <p>$$\mathbf h=\phi(W\mathbf x+\mathbf b),\qquad W\in\mathbb R^{m\times n},\ \ \mathbf b\in\mathbb R^{m},\ \ \mathbf h\in\mathbb R^{m}.$$</p>
+
+    <table class="ledger">
+      <tbody>
+        <tr><td>$W$</td><td>one template <b>row per output neuron</b> — the course invariant, $(d_{\text{out}},d_{\text{in}})$</td><td>$(m,n)$</td><td>learned; pages&nbsp;2, 7</td></tr>
+        <tr><td>$\mathbf b$</td><td>one bias per output neuron</td><td>$(m,1)$</td><td>learned</td></tr>
+        <tr><td>$\mathbf h$</td><td>the layer's output — $m$ activations</td><td>$(m,1)$</td><td>computed</td></tr>
+        <tr><td>$\phi$</td><td>applied elementwise to all $m$ pre-activations</td><td>—</td><td>fixed</td></tr>
+      </tbody>
+    </table>
+
+    <p>The shape bookkeeping is rigid, and it is the same ribbon you have been carrying since page&nbsp;2:</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x        (n, 1)              # one input example</span>
+<span class="line">W        (m, n)              # (out, in) — ALWAYS</span>
+<span class="line">z = W x  (m, 1)              # m match scores, one per neuron</span>
+<span class="line">h = φ(z) (m, 1)              # same shape — φ is elementwise</span></code></pre>
+    </div>
+
+    <!-- ===================== LINEAR COLLAPSE ===================== -->
+    <h2>Stack two of them with no bend — and watch it collapse</h2>
+    <p>Here is the proof the predict is really about. Take two layers, but leave $\phi$ out — pure affine maps,
+      $\mathbf h=W\mathbf x+\mathbf b$. Compose them:</p>
+
+    <p>$$\mathbf h_2=W_2(W_1\mathbf x+\mathbf b_1)+\mathbf b_2
+      =\underbrace{W_2 W_1}_{W'}\,\mathbf x+\underbrace{(W_2\mathbf b_1+\mathbf b_2)}_{\mathbf b'}
+      = W'\mathbf x+\mathbf b'.$$</p>
+
+    <table class="ledger">
+      <tbody>
+        <tr><td>$W_1,\ \mathbf b_1$</td><td>first layer's weights and biases</td><td>$(m_1,n)$, $(m_1,1)$</td><td>learned</td></tr>
+        <tr><td>$W_2,\ \mathbf b_2$</td><td>second layer's weights and biases</td><td>$(m_2,m_1)$, $(m_2,1)$</td><td>learned</td></tr>
+        <tr><td>$W'=W_2W_1$</td><td>the <b>single</b> equivalent weight matrix</td><td>$(m_2,n)$</td><td>collapses out</td></tr>
+        <tr><td>$\mathbf b'=W_2\mathbf b_1+\mathbf b_2$</td><td>the single equivalent bias</td><td>$(m_2,1)$</td><td>collapses out</td></tr>
+      </tbody>
+    </table>
+
+    <p>Two layers became one, exactly. Iterate the argument and <b>a 100-layer linear network is a 1-layer linear
+      network</b> — same function, drawn with a straight boundary, no matter how deep or wide. The extra depth bought
+      nothing except wasted parameters. Count them exactly (not "roughly"):</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked — the wasted parameters, to the integer</span>
+      A two-layer <em>linear</em> net $784\to512\to10$ (the MNIST shape) holds
+      $$\underbrace{784\times512}_{401{,}408}+\underbrace{512}_{\mathbf b_1}+\underbrace{512\times10}_{5{,}120}+\underbrace{10}_{\mathbf b_2}=\mathbf{407{,}050}\ \text{parameters.}$$
+      But it computes some $W'\mathbf x+\mathbf b'$ with $W'$ of shape $(10,784)$ — a single layer $784\to10$ worth
+      $784\times10+10=\mathbf{7{,}850}$ parameters. So
+      $1-\dfrac{7{,}850}{407{,}050}=0.9807=\mathbf{98\%}$ of the parameters are <em>provably</em> redundant. Insert
+      one nonlinearity between the two layers and no such collapsing $W'$ exists — the composition is no longer
+      affine. <span style="color:var(--text-dim)">(Source: <code>brief-foundations §10</code>; arithmetic
+      recomputed here.)</span>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      The nonlinearity contributes <b>zero parameters</b> and does <b>all the work</b>. Depth and width only matter
+      <em>because</em> there is a bend between the layers; without it, they are elaborate ways of writing one line.
+    </div>
+
+    <!-- ===================== XOR BY HAND ===================== -->
+    <h2>XOR by hand: build what a line provably cannot</h2>
+    <p>The cleanest proof that the bend earns its keep is XOR. Four points — the corners of a square — with the
+      diagonal pairs sharing a label:</p>
+
+    <table class="xor-table">
+      <tr><th>$x_1$</th><th>$x_2$</th><th>XOR target</th></tr>
+      <tr><td>0</td><td>0</td><td>0</td></tr>
+      <tr><td>0</td><td>1</td><td>1</td></tr>
+      <tr><td>1</td><td>0</td><td>1</td></tr>
+      <tr><td>1</td><td>1</td><td>0</td></tr>
+    </table>
+
+    <p>No single straight line separates the 1s from the 0s — try it, there is no such line. But <b>two</b> ReLU
+      neurons and one output do it. Take the explicit weights below and verify all four inputs by hand:</p>
+
+    <p>$$h_1=\mathrm{ReLU}(x_1+x_2),\qquad h_2=\mathrm{ReLU}(x_1+x_2-1),\qquad y=h_1-2h_2.$$</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked — all four corners, carried to a number</span>
+      <table class="xor-table" style="margin-top:4px">
+        <tr><th>$(x_1,x_2)$</th><th>$x_1{+}x_2$</th><th>$h_1=\mathrm{ReLU}(\cdot)$</th><th>$h_2=\mathrm{ReLU}(\cdot-1)$</th><th>$y=h_1-2h_2$</th><th>target</th></tr>
+        <tr><td>$(0,0)$</td><td>0</td><td>0</td><td>0</td><td><b>0</b></td><td>0 ✓</td></tr>
+        <tr><td>$(0,1)$</td><td>1</td><td>1</td><td>0</td><td><b>1</b></td><td>1 ✓</td></tr>
+        <tr><td>$(1,0)$</td><td>1</td><td>1</td><td>0</td><td><b>1</b></td><td>1 ✓</td></tr>
+        <tr><td>$(1,1)$</td><td>2</td><td>2</td><td>1</td><td><b>0</b></td><td>0 ✓</td></tr>
+      </table>
+      Output $[0,1,1,0]$ — exact. Notice $h_1$ and $h_2$ measure the <em>same</em> direction ($x_1+x_2$); they are
+      the same line, shifted by 1. The only thing that tells them apart is the <b>kink</b> where ReLU clamps to zero.
+      Four lines of arithmetic, and you built a function a linear model cannot represent at any depth. The ReLU did
+      all of it.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Where this leaves you</span>
+      You now <em>need</em> a bend, and you have proof — the collapse theorem on one side, XOR on the other. The
+      next question is <b>which</b> bend, and why one of them (ReLU) quietly won the 2010s. That is page&nbsp;11; the
+      need is what carries you there.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four traps</h2>
+
+    <div class="box warn"><span class="box-title">⚠️ "A deeper linear network is more expressive than a shallow one"</span>
+      The four-line proof above says no: $W_2W_1$ is just another matrix. Depth with no nonlinearity buys exactly
+      one thing — a slower, larger way to compute the same affine map. Expressivity comes from the bend, not the
+      layer count.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "More neurons is the same as more layers"</span>
+      Width (neurons per layer) and depth (number of layers) are <b>different axes</b>. Width adds templates within
+      one cut of space; depth composes cuts. The playground below lets you trade one against the other at roughly
+      fixed parameter count and see they are not interchangeable.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "The bias is a minor detail"</span>
+      Drop $b$ and every hyperplane $\mathbf w\cdot\mathbf x=0$ is forced through the origin — you lose the ability
+      to slide a boundary off-center. Bias is essential <em>in principle</em>. (Modern LLMs like Qwen3 nonetheless
+      set <code>attention_bias: false</code> and drop most biases, because RMSNorm makes them redundant in that
+      specific architecture — that is a page-11/architecture point, not a contradiction of this one.)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Neurons are little brain cells"</span>
+      A 1943 marketing metaphor. An artificial neuron is a dot product and a squash — a template match with a bend.
+      Say it once, then let the biology go; nothing in this course depends on it.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: depth vs width, counted per parameter</summary><div>
+      <p>Given roughly equal parameter budgets, a <em>deep-narrow</em> ReLU net and a <em>shallow-wide</em> one do
+        not carve the plane equally. Each ReLU layer folds the input space along its unit boundaries; composing
+        layers multiplies the number of distinct linear pieces, so a deeper net can produce many more linear regions
+        per parameter than a wide-shallow one. That is why "just add width" is not a substitute for depth in
+        practice — and it is exactly what the region counter in the playground below shows when you hold parameters
+        fixed and move them from width into depth. This is an empirical tendency, not a theorem about which
+        <em>function</em> is reachable; the universal-approximation caveats are page&nbsp;11's.</p>
+    </div></details>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>The Linear Collapse Playground</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Set the activation to <b>identity</b>, crank depth to 5 and width to 16, and pick <b>moons</b>. Press Train and
+      try to make the boundary bend. You can't — it is a straight line and stays one, all thousand-plus knobs
+      notwithstanding. Then switch to <b>ReLU</b> and watch the same network fold the plane. That contrast is the
+      whole page.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Decision boundary · trained live in your browser <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div class="collapse-grid" style="display:grid;grid-template-columns:1.35fr 1fr;gap:16px;align-items:start">
+          <div><canvas id="d-field" height="340"></canvas></div>
+          <div>
+            <div class="controls" id="d-field-ctrls"></div>
+            <p style="margin:6px 0 0">
+              <label style="display:block;margin-bottom:8px;font-size:.85rem;color:var(--text-dim)">activation
+                <select id="d-field-act" style="margin-left:6px">
+                  <option value="identity">identity (no bend)</option>
+                  <option value="relu" selected>ReLU</option>
+                </select>
+              </label>
+              <label style="display:block;font-size:.85rem;color:var(--text-dim)">dataset
+                <select id="d-field-data" style="margin-left:6px">
+                  <option value="moons">moons</option>
+                  <option value="circles">circles</option>
+                  <option value="xor">xor</option>
+                  <option value="spiral">spiral</option>
+                </select>
+              </label>
+            </p>
+            <p style="margin:12px 0 0">
+              <button class="btn" id="d-field-go">Train</button>
+              <button class="btn secondary" id="d-field-reset">Reset</button>
+            </p>
+          </div>
+        </div>
+        <div class="readout" id="d-field-out">Ready.</div>
+      </div>
+    </div>
+    <p><b>Predict resolved:</b> the answer is <b>(b) — always a single straight line</b>. With the activation set to
+      identity, no depth and no width lets the boundary bend, because $\text{affine}\circ\text{affine}$ is affine
+      (the collapse proof, felt in your hands). Flip to ReLU and the very same architecture becomes piecewise-linear
+      and separates the moons.</p>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <div class="box try"><span class="box-title">Run this — <code>code/xor_by_hand.py</code></span>
+      Hard-codes the ReLU XOR weights above, runs all four inputs through PyTorch, and prints <code>[0, 1, 1, 0]</code>.
+      Then it "collapses" the net: two <code>nn.Linear</code> layers with no activation, trained on XOR — the loss
+      floors and it never learns. Same lesson, in the framework, on CPU in under a second.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/xor_by_hand.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch, torch.nn <span class="tok-kw">as</span> nn</span>
+<span class="line"></span>
+<span class="line">X = torch.<span class="tok-fn">tensor</span>([[<span class="tok-num">0.</span>,<span class="tok-num">0.</span>],[<span class="tok-num">0.</span>,<span class="tok-num">1.</span>],[<span class="tok-num">1.</span>,<span class="tok-num">0.</span>],[<span class="tok-num">1.</span>,<span class="tok-num">1.</span>]])</span>
+<span class="line">y = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">0.</span>,<span class="tok-num">1.</span>,<span class="tok-num">1.</span>,<span class="tok-num">0.</span>])</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># --- XOR by hand: two ReLU neurons on the shared feature x1+x2 ---</span></span>
+<span class="line">h1 = torch.<span class="tok-fn">relu</span>(X[:,<span class="tok-num">0</span>] + X[:,<span class="tok-num">1</span>])          <span class="tok-com"># ReLU(x1 + x2)</span></span>
+<span class="line">h2 = torch.<span class="tok-fn">relu</span>(X[:,<span class="tok-num">0</span>] + X[:,<span class="tok-num">1</span>] - <span class="tok-num">1</span>)      <span class="tok-com"># ReLU(x1 + x2 - 1)</span></span>
+<span class="line">out = h1 - <span class="tok-num">2</span>*h2</span>
+<span class="line"><span class="tok-fn">print</span>(out.tolist())                          <span class="tok-com"># -> [0.0, 1.0, 1.0, 0.0]</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># --- now collapse it: two Linear layers, NO activation ---</span></span>
+<span class="line">net = nn.<span class="tok-fn">Sequential</span>(nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>,<span class="tok-num">8</span>), nn.<span class="tok-fn">Linear</span>(<span class="tok-num">8</span>,<span class="tok-num">1</span>))   <span class="tok-com"># affine ∘ affine = affine</span></span>
+<span class="line">opt = torch.optim.<span class="tok-fn">Adam</span>(net.<span class="tok-fn">parameters</span>(), lr=<span class="tok-num">0.1</span>)</span>
+<span class="line"><span class="tok-kw">for</span> _ <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">2000</span>):</span>
+<span class="line">    loss = nn.<span class="tok-fn">functional</span>.<span class="tok-fn">binary_cross_entropy_with_logits</span>(net(X).<span class="tok-fn">squeeze</span>(), y)</span>
+<span class="line">    opt.<span class="tok-fn">zero_grad</span>(); loss.<span class="tok-fn">backward</span>(); opt.<span class="tok-fn">step</span>()</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"linear-net loss floors at {loss.item():.3f}"</span>)  <span class="tok-com"># ~0.69 = random. It can't learn XOR.</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-10"></div>
+
+    <div class="box key"><span class="box-title">Where this goes next</span>
+      You have the forward machine and a proof that it needs a bend. Page&nbsp;11 taxonomizes the bends and explains
+      why ReLU beat sigmoid on <em>gradient flow</em> — closing Part I. The same neuron returns as TN-1's own
+      tanh/sigmoid layers (page&nbsp;6), and $z=\mathbf w\cdot\mathbf x$ returns as attention scores (pages&nbsp;29–30).
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const cvar = (n, f) => (window.vizUtils ? vizUtils.cssVar(n, f) : (window.cssVar ? cssVar(n, f) : f));
+
+  /* ---- FLAGSHIP: Linear Collapse Playground ------------------------------
+     A real MLP trains live (NN.MLP + NN.Trainer + Adam, stepped from rAF over
+     NN.makeDataset). The decision field and the region count are computed with
+     a fast NUMERIC forward pass that reads the model's CURRENT weights every
+     frame — same math as the autograd graph the trainer updates, just evaluated
+     with plain numbers so a 2000-cell field stays smooth. Nothing precomputed. */
+  (function () {
+    const { MLP, Adam, Trainer, makeDataset, RNG } = NN;
+    const canvas = document.getElementById("d-field");
+    const out = document.getElementById("d-field-out");
+    const actSel = document.getElementById("d-field-act");
+    const dataSel = document.getElementById("d-field-data");
+    const goBtn = document.getElementById("d-field-go");
+    const resetBtn = document.getElementById("d-field-reset");
+
+    const depthC = makeCtrl(document.getElementById("d-field-ctrls"),
+      { label: "depth (hidden layers)", min: 1, max: 5, step: 1, value: 2, fmt: v => v.toFixed(0) });
+    const widthC = makeCtrl(document.getElementById("d-field-ctrls"),
+      { label: "width (units / layer)", min: 1, max: 16, step: 1, value: 8, fmt: v => v.toFixed(0) });
+
+    const DOM = 2.4;                 // both axes span [-DOM, DOM]
+    const TARGET_STEPS = 1200;
+    let seed = 42, model, opt, trainer, ds, raf = null;
+
+    function sigmoid(z) { return z >= 0 ? 1 / (1 + Math.exp(-z)) : (function (e) { return e / (1 + e); })(Math.exp(z)); }
+
+    /* Numeric forward using the live weights. Returns the output logit and, for
+       ReLU, the sign pattern of every hidden pre-activation (which region of the
+       piecewise-linear map this point falls in). */
+    function numForward(x1, x2) {
+      let h = [x1, x2];
+      const signs = [];
+      const act = model._actName;
+      for (let li = 0; li < model.layers.length; li++) {
+        const L = model.layers[li];
+        const isLast = li === model.layers.length - 1;
+        const nextH = [];
+        for (const nr of L.neurons) {
+          let z = nr.b.data;
+          for (let i = 0; i < nr.w.length; i++) z += nr.w[i].data * h[i];
+          if (isLast) { nextH.push(z); }
+          else if (act === "relu") { signs.push(z > 0 ? 1 : 0); nextH.push(z > 0 ? z : 0); }
+          else { nextH.push(z); }        // identity
+        }
+        h = nextH;
+      }
+      return { logit: h[0], signs: signs };
+    }
+
+    function build() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      const rng = new RNG(seed);
+      ds = makeDataset(dataSel.value, 120, { rng, noise: 0.16 });
+      const act = actSel.value;
+      const hidden = [];
+      for (let i = 0; i < depthC.get(); i++) hidden.push(widthC.get());
+      model = new MLP([2].concat(hidden).concat([1]), { act: act, rng: rng });
+      model._actName = act;            // stash so numForward knows the bend
+      opt = new Adam(model.parameters(), { lr: 0.03 });
+      trainer = new Trainer({ model: model, X: ds.X, y: ds.y, loss: "bce", opt: opt });
+      goBtn.disabled = false;
+      goBtn.textContent = "Train";
+      render(true);
+    }
+
+    function render(idle) {
+      const { g, W, H } = vizUtils.fitCanvas(canvas, 340);
+      g.clearRect(0, 0, W, H);
+      const cmap = vizUtils.sequentialCmap(cvar("--track-llm", "#62c3ff"), cvar("--bad", "#ff6b6b"));
+      const toPx = x1 => (x1 + DOM) / (2 * DOM) * W;
+      const toPy = x2 => H - (x2 + DOM) / (2 * DOM) * H;
+
+      // shaded field: real sigmoid(logit) at every cell
+      const cell = 7;
+      for (let px = 0; px < W; px += cell) {
+        const x1 = (px / W) * 2 * DOM - DOM;
+        for (let py = 0; py < H; py += cell) {
+          const x2 = DOM - (py / H) * 2 * DOM;
+          g.fillStyle = cmap(sigmoid(numForward(x1, x2).logit));
+          g.fillRect(px, py, cell, cell);
+        }
+      }
+
+      // the data cloud
+      const blue = cvar("--track-llm", "#62c3ff"), red = cvar("--bad", "#ff6b6b"), ring = cvar("--bg-canvas", "#0a0810");
+      for (let i = 0; i < ds.X.length; i++) {
+        const [x1, x2] = ds.X[i];
+        g.beginPath();
+        g.fillStyle = ds.y[i] === 1 ? red : blue;
+        g.strokeStyle = ring; g.lineWidth = 1.4;
+        g.arc(toPx(x1), toPy(x2), 4.5, 0, 2 * Math.PI);
+        g.fill(); g.stroke();
+      }
+
+      // region count (ReLU only) on a coarse grid — count distinct sign patterns
+      let regions = 1;
+      if (model._actName === "relu") {
+        const seen = new Set();
+        for (let a = 0; a < 44; a++) {
+          const x1 = -DOM + (2 * DOM) * (a + 0.5) / 44;
+          for (let b = 0; b < 26; b++) {
+            const x2 = -DOM + (2 * DOM) * (b + 0.5) / 26;
+            seen.add(numForward(x1, x2).signs.join(""));
+          }
+        }
+        regions = seen.size;
+      }
+
+      const nP = model.numParameters();
+      const acc = Math.round(100 * trainer.accuracy());
+      if (model._actName === "identity") {
+        out.innerHTML = `<b style="color:var(--bad)">Effective function class: LINEAR</b> — a single straight ` +
+          `boundary. Depth ${depthC.get()}, width ${widthC.get()}: <b>${nP}</b> knobs, and not one of them can bend ` +
+          `the line. Accuracy <b>${acc}%</b>${idle ? "" : " · training…"}`;
+      } else {
+        out.innerHTML = `<b style="color:var(--accent2, #45e0b8)">Function class: PIECEWISE-LINEAR</b> · ` +
+          `~<b>${regions}</b> distinct linear regions · <b>${nP}</b> parameters · accuracy <b>${acc}%</b>` +
+          `${idle ? "" : " · training…"}`;
+      }
+    }
+
+    function run() {
+      goBtn.disabled = true;
+      const loop = () => {
+        trainer.steps(8);
+        if (trainer.step_ % 24 === 0 || trainer.step_ >= TARGET_STEPS) render(false);
+        if (trainer.step_ < TARGET_STEPS) raf = requestAnimationFrame(loop);
+        else {
+          raf = null; goBtn.disabled = false; goBtn.textContent = "Train more";
+          render(true);
+          const acc = Math.round(100 * trainer.accuracy());
+          const extra = model._actName === "identity"
+            ? " — a line is the best it can do; it cannot separate this set."
+            : " — the bend folded the plane into pieces.";
+          out.innerHTML += ` <b>done</b> at ${acc}%${extra}`;
+        }
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    goBtn.addEventListener("click", run);
+    resetBtn.addEventListener("click", () => { seed = (seed + 101) % 100000; build(); });
+    depthC.onInput(build);
+    widthC.onInput(build);
+    actSel.addEventListener("change", build);
+    dataSel.addEventListener("change", build);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => render(raf == null), 0));
+
+    build();
+  })();
+
+  /* ---- QUIZ: 7 questions, ≥1 numeric, distractors keyed to named misconceptions ---- */
+  renderQuiz("quiz-10", [
+    {
+      q: "A two-layer <b>linear</b> net $784\\to512\\to10$ has how many parameters? (Enter the integer.)",
+      num: 407050, tol: 0,
+      why: "$784{\\times}512 + 512 + 512{\\times}10 + 10 = 407{,}050$. It collapses to a single $784{\\to}10$ map worth only $7{,}850$ — so 98% of those parameters are provably redundant."
+    },
+    {
+      q: "The hand-built ReLU XOR net $y = \\mathrm{ReLU}(x_1{+}x_2) - 2\\,\\mathrm{ReLU}(x_1{+}x_2{-}1)$ on input $(1,1)$ outputs what? (Enter the number.)",
+      num: 0, tol: 0,
+      why: "$x_1{+}x_2 = 2$, so $h_1 = 2$, $h_2 = \\mathrm{ReLU}(1) = 1$, and $y = 2 - 2(1) = 0$. Matches the XOR target for $(1,1)$."
+    },
+    {
+      q: "Your 5-layer network with the <b>identity</b> activation cannot separate two interleaved moons, no matter how wide you make it. The cause is:",
+      opts: [
+        "Too few training epochs — let it run longer",
+        "$\\text{affine}\\circ\\text{affine}$ is affine, so with no nonlinearity the boundary is always a single straight line",
+        "The learning rate is too high"
+      ],
+      a: 1,
+      why: "This is the collapse theorem. The 'more epochs / capacity fixes it' answer is the exact misconception the demo kills — the function class is linear, so no amount of training or width can bend the boundary."
+    },
+    {
+      q: "A 100-layer <b>linear</b> network has the same function class as:",
+      opts: ["A 100-layer ReLU network", "A 1-layer linear network", "A randomly initialized network"],
+      a: 1,
+      why: "Every pair of affine layers collapses to one, so a stack of 100 collapses to a single affine map $W'\\mathbf{x} + \\mathbf{b}'$ — identical expressivity to one linear layer. Depth without a bend buys nothing."
+    },
+    {
+      q: "$\\mathbf{w}\\cdot\\mathbf{x} + b = 0$ is geometrically a ______, and $b$ sets its ______.",
+      opts: [
+        "a single point; slope",
+        "a hyperplane with normal $\\mathbf{w}$; distance from the origin, $|b|/\\lVert\\mathbf{w}\\rVert$",
+        "a curve; sharpness"
+      ],
+      a: 1,
+      why: "The set where the score is zero is a hyperplane; $\\mathbf{w}$ is its normal direction and $|b|/\\lVert\\mathbf{w}\\rVert$ is its offset from the origin. 'Sharpness' is what $\\phi$ controls, not $b$."
+    },
+    {
+      q: "A neuron's score $z = \\mathbf{w}\\cdot\\mathbf{x}$ (bias aside) is largest when $\\mathbf{x}$:",
+      opts: ["is longest", "points along the template $\\mathbf{w}$", "is orthogonal to $\\mathbf{w}$"],
+      a: 1,
+      why: "Callback to page 3: a dot product is 'how much of this is in that.' For fixed lengths it peaks when $\\mathbf{x}$ aligns with $\\mathbf{w}$, and is zero when orthogonal. The weight vector is a template the neuron matches against."
+    },
+    {
+      q: "You insert a single ReLU between two linear layers. A collapsed $W'$ reproducing the whole network:",
+      opts: ["still exists — the ReLU is just a rescaling", "no longer exists — the composition is not affine"],
+      a: 1,
+      why: "ReLU is nonlinear, so $\\mathrm{ReLU}(W_1\\mathbf{x}+\\mathbf{b}_1)$ cannot be folded into a single matrix. One bend breaks the collapse — which is exactly why it 'does all the work.'"
+    }
+  ], "Neuron, XOR & linear collapse — self-check");
+
+});
+</script>
+</body>
+</html>

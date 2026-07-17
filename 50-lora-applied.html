@@ -1,0 +1,644 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>50. LoRA on an LLM — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions only — the config-to-consequences translator's form
+     grid, the little consequence panel, and the stacked memory bar. Everything
+     uses the shared CSS custom properties so it stays theme-aware for free. */
+  .cfg-grid {
+    display: grid; grid-template-columns: 1.05fr 1fr; gap: 18px; align-items: start;
+  }
+  @media (max-width: 720px) { .cfg-grid { grid-template-columns: 1fr; } }
+  .cfg-form { display: flex; flex-direction: column; gap: 9px; }
+  .cfg-row { display: flex; flex-direction: column; gap: 3px; }
+  .cfg-row > label { font-size: .8rem; color: var(--text-dim); }
+  .cfg-row select, .cfg-row input[type="number"] {
+    font-family: var(--mono); font-size: .9rem; padding: 7px 9px; border-radius: 7px;
+    border: 1px solid var(--border); background: var(--bg-code); color: var(--text);
+  }
+  .seg { display: flex; gap: 6px; flex-wrap: wrap; }
+  .seg button {
+    padding: 6px 12px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .82rem;
+    font-family: var(--font);
+  }
+  .seg button.active { background: var(--track-llm); color: var(--btn-text); border-color: var(--track-llm); font-weight: 700; }
+  .panel {
+    background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 14px 16px; font-size: .9rem;
+  }
+  .panel table { width: 100%; border-collapse: collapse; }
+  .panel td { padding: 4px 0; border-bottom: 1px solid var(--border); }
+  .panel td.k { color: var(--text-dim); }
+  .panel td.v { text-align: right; font-family: var(--mono); font-weight: 600; }
+  .panel td.v b { color: var(--accent2); }
+  .cfg-warn {
+    margin-top: 10px; padding: 8px 11px; border-radius: 7px; font-size: .84rem;
+    background: color-mix(in srgb, var(--bad) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--bad) 45%, transparent); color: var(--text);
+    display: none;
+  }
+  .cfg-warn.show { display: block; }
+  .bar-legend { display: flex; gap: 16px; flex-wrap: wrap; margin: 8px 0 2px; font-size: .82rem; color: var(--text-dim); }
+  .bar-dot { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .eq-live { font-family: var(--mono); font-size: .82rem; color: var(--text-dim); margin-top: 6px; }
+  .eq-live b { color: var(--track-llm); }
+  /* wide multi-column tables scroll inside their own box on narrow screens,
+     so the page body never scrolls horizontally (QA rule). */
+  .tbl-scroll { overflow-x: auto; margin: 1em 0; }
+  .tbl-scroll > table.ledger { margin: 0; }
+</style>
+</head>
+<body data-page="50-lora-applied.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>LoRA on an LLM — you already use these</h1>
+    <p class="subtitle">The nine adapter files sitting in your ComfyUI folder are the same
+      object you're about to train on Qwen3-8B. The equation doesn't change when the base
+      model does — only which matrices you attach it to, and how big you make it.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>This is the page the whole track was building toward: p.49 measured the wall your 8B
+      hit at full fine-tuning; here is the escape. But you are not being handed a new trick —
+      you already own it.</p>
+
+    <!-- on-page-resolution: this PREDICT is answered in the first prose section below and
+         landed again by the live demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You have 9 LoRA files in <code>~/ComfyUI/models/loras/</code> — about 12 GB you trained
+      yourself, for a diffusion UNet. The math inside an <em>LLM</em> LoRA is <em>identical</em>.
+      So when the base model is Qwen3-8B instead of a UNet, what actually changes —
+      <strong>the equation, or just which matrices you attach the adapter to?</strong>
+    </div>
+
+    <h2>You already use these</h2>
+    <p>Point your file browser at <code>~/ComfyUI/models/loras/</code>. Nine files, roughly
+      12 GB [MEA-DEV, hardware-ground-truth §5] — every one of them a low-rank adapter you
+      trained or downloaded and have been merging into a UNet at inference time for months.
+      You have hands-on intuition for the <em>artifact</em> before we write down the
+      <em>math</em>, which is exactly backwards from how most courses do it, and exactly
+      right.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">Trunk callback — nothing new here</span></div>
+    <p>The trunk already derived everything structural. The adapter replaces the weight update
+      with a rank-$r$ factorization:</p>
+    <p>$$h = W_0\,x \;+\; \frac{\alpha}{r}\,B\,A\,x, \qquad
+        A \in \mathbb{R}^{r \times d_{in}},\quad B \in \mathbb{R}^{d_{out}\times r},\quad r \ll d_{in},d_{out}$$</p>
+    <div class="tbl-scroll"><table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$W_0$</td><td>the frozen pretrained weight — never touched, still fully resident</td><td>$(d_{out}, d_{in})$</td><td>the base checkpoint</td></tr>
+        <tr><td>$A$</td><td>LoRA "down" projection, init $\mathcal{N}(0,\varsigma^2)$</td><td>$(r, d_{in})$</td><td>trained</td></tr>
+        <tr><td>$B$</td><td>LoRA "up" projection, <strong>init zeros</strong> — so $BA = 0$ at step 0</td><td>$(d_{out}, r)$</td><td>trained</td></tr>
+        <tr><td>$r$</td><td>rank — a capacity knob, a count not an index</td><td>scalar</td><td>you choose it</td></tr>
+        <tr><td>$\alpha$</td><td>LoRA scaling (<code>lora_alpha</code>); $\alpha/r$ is the effective scale</td><td>scalar</td><td>you choose it</td></tr>
+      </tbody>
+    </table></div>
+    <p>Because $B$ starts at zeros, the adapter begins as an <strong>exact no-op</strong> —
+      $h = W_0 x$, bit-identical to the base model — and only earns its influence through
+      training. The $\alpha/r$ scale, the $B{=}0$ init, and the claim that the <em>update</em>
+      $\Delta W$ (not $W_0$) is what's low-rank were all established on the trunk's LoRA-math
+      and SVD/rank pages. <code>[THREAD:TN-1 beat: LoRA target]</code> — this is the same
+      $\frac{\alpha}{r}BA$ update you attached to TN-1's $W^{(2)}$ by hand, now attached to
+      Qwen3's linear matrices instead of a 9-parameter toy.</p>
+
+    <div class="box key"><span class="box-title">🔑 The predict, resolved</span>
+      <strong>Just the matrices.</strong> The equation is character-for-character the same one
+      that drives your ComfyUI LoRAs. What differs for an LLM is entirely <em>which</em>
+      matrices you attach $A$ and $B$ to, <em>which rank</em> you pick, and a short list of
+      LLM-specific gotchas. That is the whole content of this page — everything else you
+      already have.
+    </div>
+
+    <h2>All-linear, and the number that forces it</h2>
+    <p>A Qwen3-8B transformer block has seven linear matrices worth adapting: four in
+      attention (<code>q_proj</code>, <code>k_proj</code>, <code>v_proj</code>,
+      <code>o_proj</code>) and three in the feed-forward network (<code>gate_proj</code>,
+      <code>up_proj</code>, <code>down_proj</code>). Count their parameters:</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">per block</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">attention (q,k,v,o)        41,943,040   # constants §1.2 [DER]</span>
+<span class="line">MLP (gate,up,down)        150,994,944   # constants §1.2 [DER]  ← 78.26% of the block</span>
+<span class="line">targetable per block      192,937,984   # the 7 linears (norms are not LoRA targets)</span></code></pre>
+    </div>
+    <p>The three MLP matrices are <strong>150,994,944 params = 78.26% of the block</strong>
+      [DER, constants §1.3]. (State the denominator: that's 78.26% <em>of a block</em>; measured
+      against the <em>whole model</em> the FFN is 66.4% — both are true, and quoting the wrong
+      one starts arguments.) Either way, if you target attention only, <strong>you have frozen
+      roughly three-quarters of every block and then wondered why the fine-tune didn't take.</strong></p>
+
+    <div class="box rule"><span class="box-title">📐 Default: <code>target_modules="all-linear"</code></span>
+      Attach the adapter to all seven linear projections in every block [VP]. It is the peft
+      default for a reason: the MLP is where most of the trainable surface lives, and the
+      78.26% number is why "just do q/v" is stale advice.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Attention is where the knowledge is — target q_proj/v_proj only"</span>
+      The single most persistent piece of stale LoRA advice, inherited from the original 2021
+      paper's ablations on far smaller models. You just counted it: the MLP is
+      <strong>78.26% of the block</strong>. Targeting attention-only freezes that 78% and
+      leaves the highest-capacity matrices untrained. Default to <code>all-linear</code>; the
+      demo below lets you watch the trainable count collapse when you switch back to attn-only.
+    </div>
+
+    <h2>The count, to the byte</h2>
+    <p>The per-matrix LoRA cost is $r\,(d_{in}+d_{out})$ new parameters, versus $d_{in}\cdot d_{out}$
+      for the full matrix. At $r=16$:</p>
+    <div class="tbl-scroll"><table class="ledger">
+      <thead><tr><th>Matrix</th><th>Shape (out × in)</th><th>Base params</th><th>LoRA @ r=16</th></tr></thead>
+      <tbody>
+        <tr><td><code>q_proj</code></td><td>4096 × 4096</td><td>16,777,216</td><td>131,072</td></tr>
+        <tr><td><code>k_proj</code></td><td>1024 × 4096</td><td>4,194,304</td><td>81,920</td></tr>
+        <tr><td><code>v_proj</code></td><td>1024 × 4096</td><td>4,194,304</td><td>81,920</td></tr>
+        <tr><td><code>o_proj</code></td><td>4096 × 4096</td><td>16,777,216</td><td>131,072</td></tr>
+        <tr><td><code>gate_proj</code></td><td>12288 × 4096</td><td>50,331,648</td><td>262,144</td></tr>
+        <tr><td><code>up_proj</code></td><td>12288 × 4096</td><td>50,331,648</td><td>262,144</td></tr>
+        <tr><td><code>down_proj</code></td><td>4096 × 12288</td><td>50,331,648</td><td>262,144</td></tr>
+        <tr><td><strong>per layer</strong></td><td></td><td><strong>192,937,984</strong></td><td><strong>1,212,416</strong></td></tr>
+        <tr><td><strong>× 36 layers</strong></td><td></td><td></td><td><strong>43,646,976</strong></td></tr>
+      </tbody>
+    </table></div>
+    <p>So LoRA $r=16$ all-linear trains <strong>43,646,976 params = 0.533% of P</strong>
+      [DER, constants §3]. The adapter file, at bf16, is $43{,}646{,}976 \times 2 =
+      \textbf{87.3 MB}$ — smaller than a single one of your ComfyUI LoRAs, for a model 10× the size.</p>
+
+    <div class="box worked"><span class="box-title">✍️ The base count closes to the byte (constants §3, D-07)</span>
+      The 6,945,767,424 in the LoRA table above <em>omits the norms</em> (they aren't adapter
+      targets, correctly), so it is not the model's non-embedding count. Add the pieces back and
+      it reconciles exactly — no rounding:
+      $$6{,}945{,}767{,}424 \;+\; \underbrace{36\times8{,}448}_{304{,}128\ \text{norms}} \;+\; \underbrace{4{,}096}_{\text{final norm}} \;+\; 2\times622{,}329{,}856 \;=\; \mathbf{8{,}190{,}735{,}360}$$
+      No page in this course says "closes to three significant figures." It closes to the byte,
+      and that it does is the point — this is the arithmetic you can trust your hardware against.
+    </div>
+
+    <h2>The 187× — an optimizer-state trick, not a model-compression trick</h2>
+    <p>Here is the sentence to memorize, verbatim:</p>
+    <blockquote>LoRA is not a model-compression technique, it's an optimizer-state-compression
+      technique. The base model didn't shrink — all 16.38 GB is still resident. The trainable
+      state shrank by 187×, which is exactly $8{,}190{,}735{,}360 \div 43{,}646{,}976$, because
+      optimizer state is linear in trainable parameters. That's the whole trick.</blockquote>
+    <p>Trainable state alone goes <strong>114.67 GB → 0.61 GB = 187×</strong>
+      [DER, constants §2.3], and 187 <em>is</em> the parameter ratio
+      ($8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$). Counting the frozen base weights that
+      still sit in memory, the full-footprint comparison is
+      <strong>131.05 GB → 17.08 GB = 7.67×</strong> (state-to-state, both excluding activations).
+      <code>[THREAD:memory ledger]</code> — the wall you hit at 122.05 GiB on p.49 becomes
+      15.91 GiB, comfortably inside your measured 121.6875 GiB box.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "LoRA cuts my activation memory too"</span>
+      It does not. LoRA freezes weights; it does <strong>not shorten the graph</strong>. You
+      still run a full forward and backprop through the entire network, so activation memory at
+      a given batch and sequence length is essentially unchanged between full FT and LoRA
+      (constants §2.4). Every LoRA-vs-full comparison in this course is <em>state-to-state</em>,
+      with activations named as a separate, identical line on both sides. When you measure your
+      real footprint it will sit above 17.08 GB by exactly the activation term — and now you
+      knew that first.
+    </div>
+
+    <h2>Rank follows the dataset, not the model</h2>
+    <div class="box key"><span class="box-title">🔑 The rule</span>
+      Rank should scale with the <strong>information content of your dataset</strong> — not the
+      size of your model. A bigger base model does not want a bigger $r$.
+    </div>
+    <p>For LLM SFT that lands at $r = 64$–$256$. Push it to the extreme: $r=256$ all-linear is
+      <strong>698,351,616 params = 8.53% of P → about 27.6 GB total</strong> [DER, constants §3] —
+      which <em>still trivially fits</em> your box. What goes wrong at high rank on an LLM?
+      Essentially nothing; rank is nearly free. What goes wrong at low rank? It underperforms a
+      full fine-tune because it hasn't the capacity. So stop being stingy with rank.</p>
+    <p>(The diffusion track sits at the opposite end of the <em>same</em> rule: 15–20 training
+      images, $r=8$–$32$, and high rank <em>memorizes</em>. Same principle — rank tracks dataset
+      information — opposite regime. Your ComfyUI intuition is the low-data end of this line.)</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "α is a strength dial I tune separately"</span>
+      $r$ is capacity; $\alpha$ is scale, and the effective scale is only ever the ratio
+      $\alpha/r$ — it is <strong>not a second capacity knob</strong>. $\alpha$ and the learning
+      rate are nearly redundant: raising $\alpha$ and raising LR do almost the same thing. Hold
+      $\alpha = 2r$ (or a fixed $\alpha=16$) and tune the learning rate instead. Speaking of
+      which: LLM LoRA wants <strong>LR ≈ 1e-4 – 3e-4</strong> [EST, constants §9.4], roughly
+      10× a full fine-tune's — tolerable precisely because $B{=}0$ at init and the update is
+      scaled down by $\alpha/r$.
+    </div>
+
+    <h2>QLoRA — the 70B on your desk</h2>
+    <p>Quantize the frozen base to 4-bit NF4 and you shrink the one thing LoRA left at full
+      size: the resident base weights. NF4 with double-quant costs
+      <strong>0.515869 B/param = 4.127 bits/param</strong> [VP, constants §3]. For Qwen3-8B the
+      NF4 base is $8{,}190{,}735{,}360 \times 0.515869 = \textbf{4.225 GB (3.935 GiB)}$ [DER],
+      and QLoRA total lands around 4.9–7 GB → <strong>19–26× vs a full fine-tune</strong>.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Double-quant is OFF by default</span>
+      <code>bnb_4bit_use_double_quant</code> defaults to <strong>False</strong> in both
+      <code>bitsandbytes</code> and <code>BitsAndBytesConfig</code> [VP, constants §3].
+      Un-opted-in NF4 is 4.5 bits = 0.5625 B/param → <strong>4.607 GB</strong> for Qwen3-8B, not
+      4.225 GB. Every QLoRA memory figure here assumes you explicitly set it
+      <code>=True</code>. Set it.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The payoff of the whole track</span>
+      Llama-3.3-70B QLoRA, $r=16$ all-linear = <strong>207,093,760 params = 0.294% → 3.31 GB
+      state → ≈ 39.7 GB total</strong> with an NF4 base [DER, constants §3]. A 70-billion-parameter
+      model, fine-tuning, on a 240 W box on your desk. That specific combination —
+      128 GB unified memory plus QLoRA — is what puts a 70B in a hobbyist's hands. On the Spark,
+      though, an 8B should use plain <strong>LoRA (~17 GB)</strong>; QLoRA trades compute for
+      memory (it dequantizes every forward pass and is slower), so reserve it for the 70B.
+    </div>
+
+    <h2>The 2026 PEFT menagerie</h2>
+    <p>All shipping in peft 0.19.1 [VP]. Names to recognize, not lore to master:</p>
+    <ul>
+      <li><strong>DoRA</strong> (<code>use_dora=True</code>) — splits the update into magnitude
+        + direction; helps most at <em>low</em> rank, so it buys little once you're at $r=256$.</li>
+      <li><strong>rsLoRA</strong> (<code>use_rslora=True</code>) — rescales by $\alpha/\sqrt r$
+        instead of $\alpha/r$; starts to matter at $r \ge 64$.</li>
+      <li><strong>PiSSA / EVA / CorDA / LoftQ</strong> (<code>init_lora_weights=...</code>) —
+        smarter initializations of $A,B$ than "random + zeros"; a warm start, not a new algorithm.</li>
+      <li><strong><code>target_parameters</code></strong> for MoE — Hugging Face experts are
+        raw <code>nn.Parameter</code>s, so <code>all-linear</code> silently skips them; name them
+        explicitly (D-06 caveat).</li>
+    </ul>
+
+    <h2>The run</h2>
+    <p>Measured 8B LoRA throughput on the Spark is <strong>6,969.59 tok/s</strong>
+      [VP, constants §6.7]. Your actual project — 2,000 examples × 800 tokens × 3 epochs =
+      4.8M tokens — is then $4{,}800{,}000 / 6{,}969.59 = \textbf{11.5 minutes}$, using about
+      17 GB of your box. (A 70B QLoRA runs at 759.79 tok/s → the same tokens take ~1.75 hours.)</p>
+    <div class="box key"><span class="box-title">🔑 The bottleneck was never compute</span>
+      Eleven and a half minutes. The constraint on this fine-tune was never your GPU — it was
+      the dataset you built on p.48, and the prior question of whether you should be fine-tuning
+      at all (p.47). The machine was ready the whole time.
+    </div>
+
+    <h2>Demo — the config-to-consequences translator</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      This is your real <code>LoraConfig</code>/<code>SFTConfig</code>, wired to its
+      consequences. Every number on the right is computed live from the shape math and the
+      measured Spark throughput — nothing is canned. Slide <em>rank</em> from 16 to 256 and
+      watch memory move ~10 GB while wall-clock barely twitches ("rank is cheap"). Then raise
+      <em>max&nbsp;length</em> and watch memory jump ("sequence length is expensive"). Set
+      per-device batch to 32 and read the warning.
+    </div>
+    <div class="demo track-llm">
+      <div class="demo-head">Qwen3-8B · config → consequences <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="cfg-grid">
+          <div class="cfg-form">
+            <div class="cfg-row"><label>method</label>
+              <div class="seg" id="cfg-method">
+                <button data-v="lora" class="active" type="button">LoRA</button>
+                <button data-v="qlora" type="button">QLoRA (NF4)</button>
+                <button data-v="full" type="button">Full FT</button>
+              </div>
+            </div>
+            <div class="cfg-row"><label>target_modules</label>
+              <div class="seg" id="cfg-target">
+                <button data-v="all" class="active" type="button">all-linear</button>
+                <button data-v="attn" type="button">attn-only (q,k,v,o)</button>
+              </div>
+            </div>
+            <div class="cfg-row"><label>r (LoRA rank)</label>
+              <select id="cfg-rank">
+                <option>8</option><option selected>16</option><option>32</option>
+                <option>64</option><option>128</option><option>256</option>
+              </select>
+            </div>
+            <div class="cfg-row"><label>max_length (tokens)</label>
+              <select id="cfg-maxlen">
+                <option>512</option><option selected>1024</option><option>2048</option><option>4096</option>
+              </select>
+            </div>
+            <div class="cfg-row"><label>per_device_train_batch_size</label>
+              <select id="cfg-pdbatch"><option>1</option><option>2</option><option selected>4</option><option>8</option><option>16</option><option>32</option></select>
+            </div>
+            <div class="cfg-row"><label>gradient_accumulation_steps</label>
+              <select id="cfg-accum"><option>1</option><option>2</option><option selected>4</option><option>8</option></select>
+            </div>
+            <div class="cfg-row"><label>num examples · epochs · avg tokens/example</label>
+              <div style="display:flex;gap:6px">
+                <input type="number" id="cfg-nex" value="2000" min="1" step="100" style="width:33%">
+                <input type="number" id="cfg-epochs" value="3" min="1" step="1" style="width:28%">
+                <input type="number" id="cfg-avgtok" value="800" min="1" step="50" style="width:33%">
+              </div>
+            </div>
+          </div>
+
+          <div>
+            <div class="panel">
+              <table>
+                <tr><td class="k">trainable params ($N_t$)</td><td class="v" id="o-nt">—</td></tr>
+                <tr><td class="k">% of P (8,190,735,360)</td><td class="v" id="o-pct">—</td></tr>
+                <tr><td class="k">total memory (state, excl. activations)</td><td class="v" id="o-mem">—</td></tr>
+                <tr><td class="k">effective batch</td><td class="v" id="o-eff">—</td></tr>
+                <tr><td class="k">optimizer steps</td><td class="v" id="o-steps">—</td></tr>
+                <tr><td class="k">wall-clock on the Spark</td><td class="v" id="o-time">—</td></tr>
+              </table>
+              <div class="eq-live" id="o-eq"></div>
+            </div>
+            <div class="cfg-warn" id="o-batchwarn"></div>
+            <canvas id="cfg-bar" height="120" style="margin-top:12px"></canvas>
+            <div class="bar-legend">
+              <span><span class="bar-dot" style="background:var(--track-llm)"></span>frozen base weights</span>
+              <span><span class="bar-dot" style="background:var(--accent2)"></span>trainable state</span>
+              <span><span class="bar-dot" style="background:var(--warn)"></span>activations (est.)</span>
+              <span><span class="bar-dot" style="background:var(--bad)"></span>your box: 121.69 GiB</span>
+            </div>
+            <div class="readout" id="cfg-out"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p style="color:var(--text-dim);font-size:.85rem">The activations segment is a labelled
+      <strong>estimate</strong> — anchored at 4 GB for B=1, S=2048 with gradient checkpointing
+      (the midpoint of the 2–6 GB range constants §2.2 gives), then <em>scaled linearly with
+      per-device&nbsp;batch × max&nbsp;length</em>, because activation memory grows with both.
+      Raise <em>max&nbsp;length</em> and the yellow band — and the total — climb: sequence length
+      is expensive. It is the one number here the course tells you to <em>measure</em>, not trust;
+      everything else is exact shape arithmetic (grad-accum, note, does <em>not</em> grow it — only
+      the per-device microbatch sits in the forward graph). Wall-clock uses the measured
+      6,969.59 tok/s LoRA throughput; QLoRA is slower (dequant each forward) and the panel flags
+      it rather than inventing a number.</p>
+
+    <p><code>[THREAD:Qwen3-8B]</code> the anchor, everywhere on this page ·
+      <code>[THREAD:memory ledger]</code> 17.08 GB / 15.91 GiB, the escape from p.49's wall ·
+      <code>[THREAD:TN-1 beat: LoRA target]</code> the same $\frac{\alpha}{r}BA$ update, now on
+      252 real matrices. The trunk's SVD "rank-slider / scree-plot" demo is <em>not</em> rebuilt
+      here — this page instantiates LoRA for the LLM; the singular-value geometry lives on the
+      trunk's rank page (D-12).</p>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/11_finetune_qlora.py</code>
+      The p.49 setup script parameterized on your data, with Trackio logging — <strong>~12
+      minutes for an 8B LoRA, landing the exact prediction you computed back in
+      <code>01_tokenizer_lab.ipynb</code> + <code>05_memory_ledger.py</code>.</strong> The
+      prediction landing is the payoff of the whole track. Then
+      <code>code/13_ablate.py</code>: sweep $r \in \{8,32,128,256\}$ × {attn-only, all-linear},
+      6 runs × ~12 min ≈ 1.2 hr — and reproduce "all-linear beats attention-only at matched
+      params" on your own data, not on a slide.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-lora"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — config-to-consequences translator.
+     Every consequence is computed LIVE from Qwen3-8B's real matrix shapes
+     (constants §1.2/§3) and the measured Spark throughput (constants §6.7).
+     Nothing is precomputed: change any control and the shape math, the memory
+     ledger, and the wall-clock recompute from first principles.
+     ========================================================================== */
+  (function () {
+    // Qwen3-8B, frozen (constants §1.1/§1.2):
+    const P = 8190735360;              // total params
+    const L = 36;                      // layers
+    // Per-layer targetable linear matrices as [d_out, d_in] (constants §1.2):
+    const MATS = {
+      q_proj:   [4096, 4096],
+      k_proj:   [1024, 4096],
+      v_proj:   [1024, 4096],
+      o_proj:   [4096, 4096],
+      gate_proj:[12288, 4096],
+      up_proj:  [12288, 4096],
+      down_proj:[4096, 12288],
+    };
+    const ATTN = ["q_proj", "k_proj", "v_proj", "o_proj"];
+    const ALL  = Object.keys(MATS);
+    const TOK_PER_S = 6969.59;         // measured 8B LoRA, constants §6.7 [VP]
+    const GIB = 1024 ** 3, GB = 1e9;
+    const BOX_GIB = 121.6875;          // measured MemTotal, hardware-ground-truth §2 [MEA-DEV]
+    // Activation memory — labelled [EST], constants §2.2. Anchored at the midpoint of that
+    // section's 2–6 GB range (4 GB) for B=1, S=2048 with gradient checkpointing, then scaled
+    // linearly with per-device batch × sequence length: activation memory grows with BOTH,
+    // even under gradient checkpointing (grad-accum does NOT add activation memory — the
+    // per-device microbatch is what sits in the forward graph). This is what makes "sequence
+    // length is expensive" observable when max_length moves (constants §2.4).
+    const ACT_ANCHOR_GB = 4, ACT_ANCHOR_B = 1, ACT_ANCHOR_S = 2048;
+    function activationBytes(pdbatch, maxlen) {
+      return ACT_ANCHOR_GB * GB * (pdbatch * maxlen) / (ACT_ANCHOR_B * ACT_ANCHOR_S);
+    }
+
+    // LoRA params for a target set at rank r:  sum_targeted  r*(d_in+d_out) * L
+    function loraParams(targets, r) {
+      let per = 0;
+      for (const m of targets) { const [dout, din] = MATS[m]; per += r * (din + dout); }
+      return per * L;
+    }
+
+    // state = {method, target, r, maxlen, pdbatch, accum, nex, epochs, avgtok}
+    const state = { method: "lora", target: "all", r: 16, maxlen: 1024, pdbatch: 4, accum: 4, nex: 2000, epochs: 3, avgtok: 800 };
+
+    function compute() {
+      const targets = state.target === "all" ? ALL : ATTN;
+      const isFull = state.method === "full";
+      const Nt = isFull ? P : loraParams(targets, state.r);
+
+      // Base-weight bytes per param: bf16=2 for LoRA/Full, NF4 double-quant for QLoRA.
+      const baseBpp = state.method === "qlora" ? 0.515869 : 2;   // constants §3 [VP]
+      // Full FT: every param trainable at 16 B/param (weights2+grad2+master4+m4+v4).
+      // LoRA/QLoRA: frozen base at baseBpp + trainable adapter at 16 B/trainable-param
+      //             (adapter weight2 + grad2 + master4 + m4 + v4).
+      let baseBytes, stateBytes;
+      if (isFull) { baseBytes = 0; stateBytes = P * 16; }
+      else { baseBytes = P * baseBpp; stateBytes = Nt * 16; }
+      const totalBytes = baseBytes + stateBytes;     // excludes activations
+      const totalGB = totalBytes / GB, totalGiB = totalBytes / GIB;
+
+      const eff = state.pdbatch * state.accum;
+      const steps = Math.ceil(state.nex * state.epochs / eff);
+      const totalTokens = state.nex * state.epochs * state.avgtok;
+      const secs = totalTokens / TOK_PER_S;         // LoRA throughput
+      const actBytes = activationBytes(state.pdbatch, state.maxlen);   // scales with B × S
+
+      return { Nt, isFull, baseBytes, stateBytes, totalGB, totalGiB, eff, steps, secs, targets, totalTokens, actBytes };
+    }
+
+    function fmtInt(n) { return n.toLocaleString("en-US"); }
+    function fmtTime(secs) {
+      const m = secs / 60;
+      if (m < 60) return m.toFixed(1) + " min";
+      return (m / 60).toFixed(2) + " hr";
+    }
+
+    const el = id => document.getElementById(id);
+    const canvas = el("cfg-bar");
+
+    function drawBar(c) {
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 420, h = +canvas.getAttribute("height");
+      if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+        canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); canvas.style.height = h + "px";
+      }
+      const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      const padL = 4, padR = 4, barY = 30, barH = 40;
+      const usableW = w - padL - padR;
+      // Scale so the box line sits at ~85% width, but let overflow (full-FT, or a large
+      // activation term at long sequence / big batch) run past it.
+      const totalWithActGiB = c.totalGiB + c.actBytes / GIB;
+      const scaleMax = Math.max(BOX_GIB / 0.82, totalWithActGiB * 1.05);
+      const x = gib => padL + (gib / scaleMax) * usableW;
+
+      const segs = [
+        { v: c.baseBytes / GIB, col: cssVar("--track-llm", "#62c3ff") },
+        { v: c.stateBytes / GIB, col: cssVar("--accent2", "#45e0b8") },
+        { v: c.actBytes / GIB, col: cssVar("--warn", "#ffd166") },
+      ];
+      let cx = padL;
+      for (const s of segs) {
+        const wpx = (s.v / scaleMax) * usableW;
+        g.fillStyle = s.col; g.fillRect(cx, barY, Math.max(0, wpx), barH); cx += wpx;
+      }
+      // box line
+      const lx = x(BOX_GIB);
+      g.strokeStyle = cssVar("--bad", "#ff6b6b"); g.lineWidth = 2; g.setLineDash([5, 4]);
+      g.beginPath(); g.moveTo(lx, 8); g.lineTo(lx, barY + barH + 14); g.stroke(); g.setLineDash([]);
+      g.fillStyle = cssVar("--bad", "#ff6b6b"); g.font = "11px Consolas, monospace"; g.textAlign = "center";
+      g.fillText("121.69 GiB", lx, h - 2);
+      // total label
+      g.fillStyle = cssVar("--text", "#e4e0f2"); g.font = "12px system-ui"; g.textAlign = "left";
+      const totalGiBIncl = c.totalGiB + c.actBytes / GIB;
+      g.fillText(c.totalGB.toFixed(2) + " GB state  ·  " + totalGiBIncl.toFixed(1) + " GiB incl. act.", padL, 20);
+    }
+
+    function render() {
+      const c = compute();
+      el("o-nt").textContent = fmtInt(c.Nt);
+      el("o-pct").innerHTML = "<b>" + (c.Nt / P * 100).toFixed(c.isFull ? 0 : 3) + "%</b>";
+      el("o-mem").innerHTML = "<b>" + c.totalGB.toFixed(2) + " GB</b> / " + c.totalGiB.toFixed(2) + " GiB";
+      el("o-eff").textContent = c.eff + "  (" + state.pdbatch + " × " + state.accum + ")";
+      el("o-steps").textContent = fmtInt(c.steps);
+      if (state.method === "qlora") {
+        el("o-time").innerHTML = "<b>slower — measure</b>";
+      } else {
+        el("o-time").innerHTML = "<b>" + fmtTime(c.secs) + "</b>";
+      }
+
+      // live equation with substituted values
+      const bpp = state.method === "qlora" ? "0.516" : "2";
+      const baseStr = (c.baseBytes / GB).toFixed(state.method === "qlora" ? 3 : 2);
+      el("o-eq").innerHTML = c.isFull
+        ? "P × 16 B/param = <b>" + c.totalGB.toFixed(2) + " GB</b>"
+        : "base P×" + bpp + " + N<sub>t</sub>×16 = " + baseStr + " + " +
+          (c.stateBytes / GB).toFixed(2) + " = <b>" + c.totalGB.toFixed(2) + " GB</b>";
+
+      // batch warning (the aha)
+      const bw = el("o-batchwarn");
+      if (c.eff >= 32) {
+        bw.classList.add("show");
+        bw.innerHTML = "⚠️ effective batch = <b>" + c.eff + " ≥ 32</b> — LoRA is less tolerant of large batches than full FT; the low-rank update averages away the per-example signal. Prefer effective batch 8–16 and raise the learning rate instead.";
+      } else bw.classList.remove("show");
+
+      drawBar(c);
+
+      // narrative readout
+      const out = el("cfg-out");
+      const fitGiB = c.totalGiB + c.actBytes / GIB;
+      const fits = fitGiB <= BOX_GIB;
+      if (c.isFull) {
+        out.innerHTML = "Full FT trains all " + fmtInt(P) + " params → <b>122.05 GiB</b> of state, over your 121.69 GiB box by 0.36 GiB before activations. This is the wall p.49 measured.";
+      } else {
+        out.innerHTML = "Trainable state shrank by <b>" + Math.floor(P / c.Nt) + "×</b> vs full FT (= the parameter ratio P / N<sub>t</sub>). Footprint ≈ <b>" + fitGiB.toFixed(1) + " GiB</b> incl. the activation estimate — " +
+          (fits ? "fits your box with room to spare." : "check against your measured memory.") +
+          " " + fmtInt(c.totalTokens) + " training tokens" + (state.method === "qlora" ? "." : " → " + fmtTime(c.secs) + " at 6,969.59 tok/s.");
+      }
+    }
+
+    // ---- wire controls ----
+    function seg(id, key) {
+      const box = el(id);
+      box.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+        box.querySelectorAll("button").forEach(x => x.classList.toggle("active", x === b));
+        state[key] = b.dataset.v; render();
+      }));
+    }
+    seg("cfg-method", "method");
+    seg("cfg-target", "target");
+    el("cfg-rank").addEventListener("change", e => { state.r = +e.target.value; render(); });
+    el("cfg-maxlen").addEventListener("change", e => { state.maxlen = +e.target.value; render(); });
+    el("cfg-pdbatch").addEventListener("change", e => { state.pdbatch = +e.target.value; render(); });
+    el("cfg-accum").addEventListener("change", e => { state.accum = +e.target.value; render(); });
+    el("cfg-nex").addEventListener("input", e => { state.nex = Math.max(1, +e.target.value || 1); render(); });
+    el("cfg-epochs").addEventListener("input", e => { state.epochs = Math.max(1, +e.target.value || 1); render(); });
+    el("cfg-avgtok").addEventListener("input", e => { state.avgtok = Math.max(1, +e.target.value || 1); render(); });
+
+    render();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(render, 0));
+    window.addEventListener("resize", () => setTimeout(render, 60));
+  })();
+
+  /* ==========================================================================
+     QUIZ — key verified against constants §1.2/§2.3/§3/§6.7
+     ========================================================================== */
+  renderQuiz("quiz-lora", [
+    {
+      q: "You have LoRA files for a diffusion UNet and you're about to train one on Qwen3-8B. What is actually different between them?",
+      opts: [
+        "The low-rank equation itself — LLMs use a different update rule",
+        "Only which matrices you attach the adapter to (and the rank and a few gotchas); the math $h = W_0x + \\frac{\\alpha}{r}BAx$ is identical",
+        "LLM LoRA doesn't freeze the base model",
+        "LLM LoRA compresses the base model to fit"
+      ],
+      a: 1,
+      why: "The adapter equation is character-for-character the same. What changes for an LLM is which linear matrices you target (default $\\texttt{all-linear}$), what rank you pick, and LLM-specific gotchas — not the math."
+    },
+    {
+      q: "LoRA at $r=16$ targeting all-linear on Qwen3-8B trains how many parameters, exactly?",
+      num: 43646976, tol: 0, unit: "parameters",
+      why: "Per layer the 7 linears sum to $1{,}212{,}416$ LoRA params; $\\times 36$ layers $= 43{,}646{,}976 = 0.533\\%$ of $P$ [DER, constants §3]. Each matrix costs $r(d_{in}+d_{out})$, not $d_{in}d_{out}$."
+    },
+    {
+      q: "LoRA shrinks the trainable optimizer state relative to a full fine-tune by roughly what factor?",
+      num: 187, tol: 2, unit: "×",
+      why: "$114.67\\,\\text{GB} \\to 0.61\\,\\text{GB} = 187\\times$, and $187$ is exactly the parameter ratio $8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$ — because optimizer state is linear in trainable params. LoRA is optimizer-state compression, not model compression (constants §2.3)."
+    },
+    {
+      q: "What should <code>target_modules</code> be set to by default, and why?",
+      opts: [
+        "q_proj and v_proj only — attention is where the knowledge lives",
+        "all-linear — the three MLP matrices are 78.26% of every block, so attn-only freezes most of the trainable surface",
+        "gate_proj only — it's the largest single matrix",
+        "the embedding table — that's where tokens map to vectors"
+      ],
+      a: 1,
+      why: "The MLP is $150{,}994{,}944 = 78.26\\%$ of the block [DER, constants §1.3]. \"Target q/v only\" is stale advice from small-model ablations; it freezes ~three-quarters of the block. Default to $\\texttt{all-linear}$."
+    },
+    {
+      q: "You should set the LoRA rank $r$ based on:",
+      opts: [
+        "the size of the base model — bigger models need bigger rank",
+        "the information content of your dataset — not the model size",
+        "the GPU's memory — as high as fits",
+        "always 16; rank is not a real knob"
+      ],
+      a: 1,
+      why: "Rank tracks dataset information content (constants/D-11). On an LLM, $r=64$–$256$; high rank is nearly free ($r=256$ all-linear is still only 27.55 GB). Diffusion sits at the low-data end of the same rule ($r=8$–$32$)."
+    },
+    {
+      q: "Qwen3-8B quantized to NF4 with double-quant (the frozen QLoRA base) occupies about how much, in GB?",
+      num: 4.225, tol: 0.1, unit: "GB",
+      why: "NF4 double-quant is $0.515869$ B/param $= 4.127$ bits [VP, constants §3], so $8{,}190{,}735{,}360 \\times 0.515869 = 4.225$ GB (3.935 GiB). Note: double-quant defaults to False — without it NF4 is 4.5 bits = 4.607 GB."
+    },
+    {
+      q: "Your project is 2,000 examples × 800 tokens × 3 epochs = 4.8M tokens. At the measured 6,969.59 tok/s for 8B LoRA on the Spark, how long does the run take?",
+      num: 11.5, tol: 1, unit: "minutes",
+      why: "$4{,}800{,}000 / 6{,}969.59 = 688.6\\,\\text{s} = 11.5$ minutes [VP throughput, constants §6.7]. The bottleneck was never compute — it was building the dataset (p.48) and deciding whether to fine-tune at all (p.47)."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

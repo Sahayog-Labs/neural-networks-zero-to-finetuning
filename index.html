@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Start Here — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+</head>
+<body data-page="index.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">⚡ Interactive Course</span>
+    <h1>Artificial Neural Networks — From High-School Algebra to Fine-Tuning on Your Own Box</h1>
+    <p class="subtitle">Sixty-five interactive pages from a single neuron to a Qwen3-8B LoRA and a FLUX.2
+      fine-tune — every number measured on the hardware you own.</p>
+
+    <p>A neural network is a machine that maps vectors to vectors and learns by gradient descent — nothing more
+      exotic than that. Point the same machine at "predict the next token" and it is a large language model.
+      Point it at "predict the noise that was added to this image" and it is a diffusion model. The architecture
+      diverges by page 44; the underlying object never does. That is the thesis this course spends 65 pages
+      proving to you, not asserting.</p>
+
+    <p>The destination is concrete: <strong>you train toward fine-tuning LLMs and diffusion models on your own
+      NVIDIA&nbsp;DGX&nbsp;Spark</strong> — the box already running your ComfyUI graphs. Every memory ledger,
+      every roofline, every "does this fit" question in this course is answered against <em>that</em> machine,
+      not a rented A100.</p>
+
+    <p>The structure follows the machine, not a syllabus. A shared <strong>trunk</strong> (Parts I–IV:
+      foundations → how training works → architectures → adaptation) is where every learner starts and every
+      idea gets its one honest treatment. The trunk then <strong>forks</strong> into two tracks — LLM
+      fine-tuning first, then diffusion (deliberately in that order: formalizing the LLM track first gives your
+      already-strong diffusion intuition, built from thousands of ComfyUI renders, a fresh and rigorous frame
+      instead of re-deriving what you already feel). A shared <strong>capstone</strong> (Part VII) then rejoins
+      the two tracks — literally: your FLUX.2 model's prompt reader turns out to be a 40-layer transformer
+      language model, the exact object the LLM track spent nine pages teaching you to read.</p>
+
+    <p>One paragraph on stakes, because it explains every number this course prints: every hardware figure here
+      is <strong>measured on your box</strong>, not copied off a spec sheet. The clearest example is the one
+      that recurs most — the DGX Spark is marketed at 128&nbsp;GB, but the usable <code>MemTotal</code> the
+      driver actually hands you is <strong>121.6875&nbsp;GiB</strong> [MEA-DEV] — a 6.3125&nbsp;GiB (4.9%)
+      firmware carveout gone before a single byte is allocated. <strong>Published capacity is never usable
+      capacity.</strong> Where a number genuinely can't be measured yet — the DGX Spark's dense BF16 compute
+      ceiling is a live, unresolved example — the course ships you the measuring script instead of a guessed
+      fact. That is the whole method, not a caveat on it.</p>
+
+    <div class="box key"><span class="box-title">🔑 How to use this course</span>
+      The pages are meant to be read in order — each one leans on the last. Every content page runs the same
+      rhythm: <strong>predict → intuition → math → worked number → demo → quiz.</strong> You commit to a guess
+      before you're shown the answer, then the page derives it, works a real number through it, and hands you a
+      live demo that computes the same math in your browser — drag every slider, nothing on this course is
+      precomputed. Deep-dive derivations are optional, closed-by-default collapsibles; skipping one never costs
+      you a later page. A handful of pages ship a Python script meant to run on <em>your</em> Spark — measure it,
+      don't take the course's word for it. Watch for four recurring objects as you go: <strong>the dot
+      product</strong> (the atom every layer is built from), <strong>TN-1</strong> (a nine-parameter network you
+      hand-compute on page&nbsp;6 and meet again, scaled up, on the last three pages), <strong>the chain
+      rule</strong> (the one verb that runs under every training step), and <strong>the memory ledger</strong>
+      (the reality check — does it actually fit on your box).
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 What you'll be able to do</span>
+      Derive backprop by hand on a nine-parameter network, then watch autograd agree with you to the last float.
+      Read a model's parameter count off its <code>config.json</code> and match it to a checkpoint <em>to the
+      byte</em> (8,190,735,360 for Qwen3-8B). Build the memory ledger yourself and predict what fits on your box
+      before you run anything. Train a real Qwen3-8B LoRA (17.08&nbsp;GB, ~12&nbsp;min) and a diffusion LoRA on
+      your own hardware. Explain attention, GQA, RoPE, and cross-attention well enough to read any model's
+      <code>config.json</code> cold. Predict your hardware's throughput from a roofline model and be right when
+      you measure it. And recognize your FLUX.2 model's text encoder for what it actually is: a Mistral.
+    </div>
+
+    <p>The grid below is generated directly from the course's page registry — the same list
+      that drives the sidebar you'll see on every page. Cards are grouped by part; the two fork tracks are
+      tinted (sky blue for LLM, coral for diffusion) so you always know which path you're on. 🚩 marks a
+      milestone page.</p>
+
+    <div id="course-grid"></div>
+
+    <h2>Reference</h2>
+    <div class="card-grid" id="ref-grid"></div>
+
+  </div></main>
+</div>
+
+<!-- index.html needs only the registry + nav engine — no demos, no NN/viz math on this page. -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const map = window.COURSE_MAP || [];
+  const gridHost = document.getElementById("course-grid");
+  const refHost = document.getElementById("ref-grid");
+
+  function cardHTML(p) {
+    const cls = ["card"];
+    if (p.track) cls.push("track-" + p.track);
+    const chip = p.track ? `<span class="badge ${p.track}">◆ ${p.track === "llm" ? "LLM" : "Diffusion"}</span>` : "";
+    const flag = p.milestone ? `<span class="card-milestone" title="Milestone">🚩</span>` : "";
+    return `<a class="${cls.join(" ")}" href="${p.file}">${chip}${flag}
+        <div class="card-num">${p.num ? "Page " + p.num : ""}</div>
+        <div class="card-title">${p.title}</div>
+        <div class="card-desc">${p.desc || ""}</div>
+      </a>`;
+  }
+
+  // Group consecutive non-Welcome entries by `part`, preserving registry order —
+  // the exact same grouping rule buildNav() uses for the sidebar (course.js),
+  // so this grid and the sidebar can never drift out of sync.
+  let html = "";
+  let currentPart = null, openGrid = false;
+  for (const p of map) {
+    if (p.part === "Welcome") continue;   // nav-only entries, not content cards
+    if (p.part !== currentPart) {
+      if (openGrid) html += `</div>`;
+      currentPart = p.part;
+      html += `<h2>${currentPart}</h2><div class="card-grid">`;
+      openGrid = true;
+    }
+    html += cardHTML(p);
+  }
+  if (openGrid) html += `</div>`;
+  gridHost.innerHTML = html;
+
+  // Reference footer: the Welcome-part entries (Start Here is this page; the
+  // template gallery is a dev reference, not a content page).
+  const tpl = map.find(p => p.file === "TEMPLATE-example.html");
+  if (tpl) refHost.innerHTML = cardHTML(tpl);
+});
+</script>
+</body>
+</html>

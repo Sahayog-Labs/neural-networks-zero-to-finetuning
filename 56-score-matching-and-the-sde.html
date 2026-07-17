@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>56. Score Matching & the SDE — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: the thread tag, a shape ribbon, radio rows, and status flags.
+     The PREDICT prompt and the Symbol Ledger come from the shared .box.predict /
+     table.ledger components in course.css. Everything else here is page-specific. */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 8px 0; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .assert { font-family: var(--mono); font-size: .86rem; line-height: 1.7; }
+</style>
+</head>
+<body data-page="56-score-matching-and-the-sde.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · The Score</span>
+    <h1>Score Matching &amp; the SDE View</h1>
+    <p class="subtitle">You did not train an $\epsilon$-predictor and a score model. You
+      trained <em>one</em> network, and three lines of calculus show it is the intractable
+      $\nabla_{\mathbf x}\log p$ from page 53 — divided by a lookup number. Once you see
+      that, "Karras sigmas" and the reverse-time SDE stop being folklore.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution rule: answered in "The three-line reveal" below,
+         where the derivation lands on the negative sign, and again in the quiz. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      The <b>score</b> $\mathbf s = \nabla_{\mathbf x}\log p_t(\mathbf x)$ points from where
+      you are <em>toward</em> the data. The noise $\boldsymbol\epsilon$ is what was
+      <em>added</em> to the data to get you here — it points <em>away</em>. So before you
+      see the three-line derivation, commit to the sign that relates them:
+      is $\mathbf s_\theta \propto +\epsilon_\theta$ or $\mathbf s_\theta \propto -\epsilon_\theta$?
+    </div>
+
+    <!-- ============================ INTUITION ============================ -->
+    <h2>What the score is, and what it is not</h2>
+
+    <p>Page 53 hit a wall: sampling from $p(\mathbf x)$ needs the normalizer $Z_\theta$, an
+      integral over every possible image, and it is intractable. The escape — foreshadowed
+      there — is to never form $p$ at all, but to work with its <em>gradient in image
+      space</em>. That gradient is the <b>score</b>.</p>
+
+    <div class="box key"><span class="box-title">🔑 The score is a gradient with respect to the image, not the parameters</span>
+      $$\mathbf s(\mathbf x) \equiv \nabla_{\mathbf x}\log p(\mathbf x)\qquad
+        \text{same shape as } \mathbf x.$$
+      Backprop taught you $\nabla_\theta\mathcal L$ — the gradient with respect to the
+      <em>weights</em>, used to <em>train</em>. The score is the <em>same differentiation
+      operator</em> pointed at a different variable: the pixels. Nothing here updates a
+      weight. It answers "which way do I nudge <em>this image</em> to make it more like real
+      data?"
+    </div>
+
+    <div class="thread"><b>[THREAD: the chain rule — beat 7]</b> Same object as backprop
+      (page 14) and autograd (page 15): the derivative, the course's <em>verb</em>. What is
+      new: we differentiate $\log p$ with respect to $\mathbf x$ instead of $\mathcal L$ with
+      respect to $\theta$. Reopen the beat where the chain rule first "differentiated the
+      thing you feed in" (page 4's $\theta$-vs-$x$ flip) — the score is that flip, at scale.</p>
+    </div>
+
+    <p>The picture to hold: $\log p$ is a <em>landscape</em> — high on the data manifold,
+      low in the voids between. The score is the <em>force</em> that landscape exerts,
+      pointing uphill toward probability mass. Sampling is then rolling downhill-in-energy
+      with a jitter that keeps you from collapsing to a single peak — this is
+      <b>Langevin dynamics</b>:</p>
+
+    <p>$$\mathbf x \;\leftarrow\; \mathbf x + \tfrac{\delta}{2}\,\mathbf s_\theta(\mathbf x)
+        + \sqrt{\delta}\,\mathbf z,\qquad \mathbf z\sim\mathcal N(0,I).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf x$</td><td>the running sample, updated in place</td><td>same as data</td><td>initialized from noise</td></tr>
+        <tr><td>$\mathbf s_\theta(\mathbf x)$</td><td>the score — the uphill force at $\mathbf x$</td><td>same as $\mathbf x$</td><td>the network (below)</td></tr>
+        <tr><td>$\delta$</td><td>step size (a scalar)</td><td>scalar</td><td>chosen; $\sqrt\delta$ noise keeps it a distribution, not a peak</td></tr>
+        <tr><td>$\mathbf z$</td><td>fresh Gaussian jitter each step</td><td>same as $\mathbf x$</td><td>$\mathcal N(0,I)$ — the "temperature"</td></tr>
+      </tbody>
+    </table>
+
+    <!-- ============================ MATH: the reveal ============================ -->
+    <h2>★ The three-line reveal</h2>
+
+    <p>Here is the payoff. We already <em>have</em> a network — $\epsilon_\theta$, trained by
+      $\mathcal L_{\text{simple}}$ on page 55. Claim: it <em>is</em> the score, up to a
+      constant you can look up. Watch. The forward process handed us a Gaussian in closed
+      form (page 54, Eq. 3.3):</p>
+
+    <p>$$q(\mathbf x_t\mid\mathbf x_0)=\mathcal N\!\big(\sqrt{\bar\alpha_t}\,\mathbf x_0,\;
+        (1-\bar\alpha_t)\,I\big)
+        \;\Rightarrow\;
+        \log q = -\frac{\lVert \mathbf x_t-\sqrt{\bar\alpha_t}\,\mathbf x_0\rVert^2}
+        {2(1-\bar\alpha_t)} + \text{const}.$$</p>
+
+    <p>Differentiate the log-density with respect to $\mathbf x_t$ (a quadratic — one line),
+      then substitute Eq. 3.3's own definition
+      $\mathbf x_t-\sqrt{\bar\alpha_t}\,\mathbf x_0=\sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon$:</p>
+
+    <p>$$\nabla_{\mathbf x_t}\log q
+        = -\frac{\mathbf x_t-\sqrt{\bar\alpha_t}\,\mathbf x_0}{1-\bar\alpha_t}
+        = -\frac{\sqrt{1-\bar\alpha_t}\,\boldsymbol\epsilon}{1-\bar\alpha_t}
+        = -\frac{\boldsymbol\epsilon}{\sqrt{1-\bar\alpha_t}}.$$</p>
+
+    <div class="box key"><span class="box-title">🔑 The score is your noise-predictor, rescaled</span>
+      Replacing the true (unknown) $\boldsymbol\epsilon$ by the network that estimates it:
+      $$\mathbf s_\theta(\mathbf x_t,t) \;=\; -\frac{\epsilon_\theta(\mathbf x_t,t)}{\sqrt{1-\bar\alpha_t}}.$$
+      The intractable $\nabla_{\mathbf x}\log p$ that stopped us on page 53 is
+      <em>literally the network we already have</em>, divided by the schedule number
+      $\sqrt{1-\bar\alpha_t}$. And there is the <b>minus sign</b> — the predict answer:
+      the score points <em>opposite</em> to $\boldsymbol\epsilon$. Of course it does — the
+      noise points away from the data, so unwinding it (toward the data) is its negative.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / value</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf s_\theta(\mathbf x_t,t)$</td><td>the (approximate) score at noise level $t$</td><td>same as $\mathbf x_t$</td><td>what we are solving for</td></tr>
+        <tr><td>$\epsilon_\theta(\mathbf x_t,t)$</td><td>the noise-prediction network</td><td>same as $\mathbf x_t$</td><td>trained on page 55 by $\mathcal L_{\text{simple}}$</td></tr>
+        <tr><td>$\mathbf x_t$</td><td>the noised sample being scored</td><td>$(C,H_{\text{lat}},W_{\text{lat}})$</td><td>Eq. 3.3</td></tr>
+        <tr><td>$\bar\alpha_t$</td><td>cumulative signal retention, $\prod_{s\le t}\alpha_s$</td><td>scalar, $1\!\to\!4\times10^{-5}$</td><td>the $\beta$ schedule (page 54)</td></tr>
+        <tr><td>$\sqrt{1-\bar\alpha_t}$</td><td>the noise std — the lookup number</td><td>scalar, $0\!\to\!1$</td><td>the schedule</td></tr>
+      </tbody>
+    </table>
+
+    <div class="ribbon">score        s_theta(x_t, t)          (C, H_lat, W_lat)   # e.g. (32, 128, 128)
+epsilon      eps_theta(x_t, t)        (C, H_lat, W_lat)   # network output, same shape
+scalar       sqrt(1 - alphabar[t])    ()                  # one number, per t
+s_theta  =  -eps_theta / sqrt(1 - alphabar[t])            (C, H_lat, W_lat)   # elementwise</div>
+
+    <p>Two consequences you will cash in later. First, this is what makes the CFG derivation
+      on page 61 possible — <em>classifier-free guidance is a statement about scores</em>,
+      and now you know scores are just rescaled $\epsilon$. Second, it unifies two papers that
+      were thought to be different methods: <b>NCSN</b> (Song &amp; Ermon, 2019 — "train a score
+      model") and <b>DDPM</b> (Ho et al., 2020 — "train a noise predictor") are the
+      <em>same algorithm</em>, discovered independently. Same lesson is coming again on
+      page 57, where flow matching turns out to be a third face of the same object.</p>
+
+    <!-- ============================ Why noise ============================ -->
+    <h2>Why the noise was necessary all along</h2>
+
+    <p>The score $\nabla_{\mathbf x}\log p$ only exists where $p > 0$. Real images live on a
+      <b>thin manifold</b> — a crumpled sheet inside the enormous pixel (or latent) space.
+      <em>Off</em> the sheet, $p = 0$, $\log p = -\infty$, and the gradient is undefined:
+      there is no arrow telling a stray point which way to go. Adding Gaussian noise
+      <b>inflates the sheet into a solid</b> — it convolves the data with $\mathcal N(0,\sigma^2 I)$,
+      smearing probability mass into the voids so that <em>every</em> point gets a well-defined
+      arrow. That is the predict payoff's deeper half: you cannot learn the raw data's score;
+      you can only learn the <em>noised</em> data's score, which is exactly what
+      $\epsilon_\theta(\cdot, t)$ gives you.</p>
+
+    <div class="box key"><span class="box-title">🔑 The schedule is a smoothing curriculum</span>
+      A single noise level gives one blurred landscape. A <em>ladder</em> of levels
+      (large&nbsp;$\sigma$ → small&nbsp;$\sigma$) is a curriculum: at large $\sigma$ the
+      landscape is one broad hill, so <em>coarse</em> arrows find the right neighborhood;
+      as $\sigma$ shrinks the hills sharpen and <em>fine</em> arrows find the right house.
+      Sampling is annealing down that ladder — which is precisely what running $t$ from $T$
+      down to $0$ does. Drag the demo below and watch the arrows go from "point at the center
+      of mass" to "point at the nearest mode."
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Tweedie's formula — the posterior-mean denoiser</span>
+      The same score gives the best guess of the clean image in one shot:
+      $$\hat{\mathbf x}_0 = \frac{\mathbf x_t + (1-\bar\alpha_t)\,\mathbf s_\theta(\mathbf x_t,t)}{\sqrt{\bar\alpha_t}}
+        = \mathbb E[\mathbf x_0\mid\mathbf x_t].$$
+      Substituting $\mathbf s_\theta=-\epsilon_\theta/\sqrt{1-\bar\alpha_t}$ recovers page 55's
+      $\hat{\mathbf x}_0=(\mathbf x_t-\sqrt{1-\bar\alpha_t}\,\epsilon_\theta)/\sqrt{\bar\alpha_t}$ —
+      same object. Reading it as a <em>posterior mean</em> explains why $\hat{\mathbf x}_0$ is
+      blurry at high $t$: an average over everything the noise could have hidden.
+    </div>
+
+    <!-- ============================ SDE view ============================ -->
+    <h2>The SDE view: staircase becomes ramp</h2>
+
+    <p>DDPM's 1000 discrete steps are a staircase. Let $T\to\infty$ and the staircase becomes
+      a smooth ramp — a <b>stochastic differential equation</b>. The forward noising of page 54
+      is the <b>VP-SDE</b> ("variance preserving"):</p>
+
+    <p>$$d\mathbf x = -\tfrac12\,\beta(t)\,\mathbf x\,dt + \sqrt{\beta(t)}\;d\mathbf w.$$</p>
+
+    <p>The drift $-\tfrac12\beta\mathbf x$ shrinks the signal; the $d\mathbf w$ term injects
+      noise. Note $\mathrm{Var}[d\mathbf w]\propto dt$, so noise accumulates as $\sqrt{dt}$ —
+      the same random-walk $\sqrt{N}$ law you already know. Set the drift to zero ($f=0$) and
+      you get the <b>VE-SDE</b> ("variance exploding"), which is <b>NCSN</b> — and which
+      ComfyUI exposes as the <b>"Karras sigmas"</b> scheduler. That dropdown is not a mystery
+      setting; it is a choice of SDE.</p>
+
+    <div class="box key"><span class="box-title">🔑 The reverse-time SDE runs on the score</span>
+      Anderson (1982): every forward SDE has a reverse-time twin, and the score is the piece
+      that makes it run:
+      $$d\mathbf x = \big[\,f(\mathbf x,t) - g(t)^2\,\mathbf s_\theta(\mathbf x,t)\,\big]\,dt
+        + g(t)\,d\bar{\mathbf w}.$$
+      This is the theorem the whole field stands on: <em>learn the score, and you can integrate
+      the noising process backwards to generate.</em> DDPM's ancestral sampler is one
+      discretization of it; the deterministic probability-flow ODE (page 57, page 59's DDIM) is
+      another. Every sampler in your ComfyUI dropdown is a numerical scheme for <em>this line</em>.
+    </div>
+
+    <p class="xref"><b>Translation note.</b> Papers write the score as $s_\theta$ or
+      $\nabla_{\mathbf x}\log p_t$; the "VE / VP" names are Song et al. (2021); "Karras sigmas"
+      is Karras et al. (2022, EDM). $\sigma$ here is a <em>noise standard deviation</em>
+      (diffusion's $\sigma_t$), never a sigmoid — on this track a logistic is written
+      <code>torch.sigmoid</code> / <code>SiLU</code>.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: deriving the reverse-time drift from Anderson's theorem</summary><div>
+      <p>Anderson's time-reversal takes a forward Itô SDE
+        $d\mathbf x=f\,dt+g\,d\mathbf w$ and shows the reverse process satisfies
+        $d\mathbf x=[f-g^2\nabla_{\mathbf x}\log p_t(\mathbf x)]\,dt+g\,d\bar{\mathbf w}$,
+        where $\bar{\mathbf w}$ is a Wiener process running in reverse time and $p_t$ is the
+        marginal density at time $t$. For the VP-SDE, $f=-\tfrac12\beta(t)\mathbf x$ and
+        $g=\sqrt{\beta(t)}$, so the reverse drift is
+        $-\tfrac12\beta\mathbf x-\beta\,\mathbf s_\theta$. Dropping the $g\,d\bar{\mathbf w}$
+        term and halving the score correction gives the deterministic
+        <em>probability-flow ODE</em>, whose marginals match the SDE at every $t$ — that is
+        why DDIM ($\eta{=}0$, page 59) reaches the same distribution without re-injecting
+        noise. Nothing on later pages depends on this derivation; it is here for the reader who
+        wants to see where the $-g^2\mathbf s$ comes from.</p>
+    </div></details>
+
+    <!-- ============================ DEMO D56.1 ============================ -->
+    <h2>Demo — the score field, and the annealing curriculum</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      A closed-form mixture-of-Gaussians density (no network — real calculus in JS). The arrows
+      are $\mathbf s(\mathbf x)=\nabla_{\mathbf x}\log p_\sigma(\mathbf x)$ evaluated on a grid;
+      four seeded Langevin walkers follow them. Drag the smoothing $\sigma$ from large to small
+      and watch coarse "find the neighborhood" arrows sharpen into "find the mode" arrows.
+    </div>
+    <div class="demo track-diffusion">
+      <div class="demo-head">Score field $\nabla_{\mathbf x}\log p_\sigma$ + Langevin walkers <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-score" height="360"></canvas>
+        <div class="controls" id="d-score-ctrls"></div>
+        <div class="readout" id="d-score-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO D56.2 ============================ -->
+    <h2>Demo — the score identity, verified not asserted</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      This finite-differences the Gaussian log-density $\nabla_{\mathbf x_t}\log q(\mathbf x_t\mid\mathbf x_0)$
+      numerically and compares it, component by component, against the closed form
+      $-\boldsymbol\epsilon/\sqrt{1-\bar\alpha_t}$. Sweep $t$: the two agree to machine precision —
+      the readout's max error stays far below $10^{-4}$ (typically $\sim\!10^{-11}$ or smaller)
+      at every noise level. The identity is not a claim — it is arithmetic.
+    </div>
+    <div class="demo track-diffusion">
+      <div class="demo-head">Numerical score check <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="controls" id="d-check-ctrls"></div>
+        <div class="readout assert" id="d-check-out"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/score_check.py</code> — finite-difference the Gaussian log-density in PyTorch and
+      <code>assert torch.allclose(fd, -eps / (1 - alphabar[t]).sqrt())</code>. It prints the max
+      absolute error at a few noise levels. "The score identity, verified, not asserted." <em>(instant.)</em>
+    </div>
+
+    <div class="thread"><b>[THREAD: the chain rule — beat 7, closed]</b> The score is
+      $\nabla_{\mathbf x}\log p$: the same differentiation you ran in backprop, aimed at the
+      image, and it turned out to <em>be</em> $\epsilon_\theta$ rescaled. Next reopening:
+      page 61, where CFG steers by combining two scores.</p>
+    </div>
+
+    <p class="xref"><b>Where this goes.</b> ← 55 ($\mathcal L_{\text{simple}}$, the network we
+      just reinterpreted). → 57 (the velocity / probability-flow ODE view), → 61 (CFG is a
+      score statement — this page is its hard prerequisite).</p>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-56"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* small deterministic RNG so every reload is identical */
+  function mulberry32(a) {
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gauss(rnd) { // Box–Muller
+    let u = 0, v = 0;
+    while (u === 0) u = rnd();
+    while (v === 0) v = rnd();
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+  }
+
+  /* ---- DEMO D56.1: closed-form score field + Langevin walkers ---- */
+  (function () {
+    const canvas = document.getElementById("d-score");
+    const out = document.getElementById("d-score-out");
+    // three data modes (equal weight) + a small base width; smoothing sigma adds in quadrature
+    const modes = [[-1.6, -1.2], [1.7, -0.9], [0.1, 1.7]];
+    const sig0 = 0.22;                       // base data width
+    const RANGE = 3.3;
+
+    // score of a smoothed mixture of isotropic Gaussians, variance s2 = sig0^2 + sigma^2
+    function score(x, y, s2) {
+      let wsum = 0, sx = 0, sy = 0;
+      for (const [mx, my] of modes) {
+        const dx = x - mx, dy = y - my;
+        const w = Math.exp(-(dx * dx + dy * dy) / (2 * s2)); // common const cancels
+        wsum += w;
+        sx += w * (-(dx) / s2);
+        sy += w * (-(dy) / s2);
+      }
+      if (wsum < 1e-300) return [0, 0];
+      return [sx / wsum, sy / wsum];
+    }
+
+    const sigCtrl = makeCtrl(document.getElementById("d-score-ctrls"),
+      { label: "smoothing σ (large → small)", min: 0.05, max: 2.0, step: 0.05, value: 1.20, fmt: v => v.toFixed(2) });
+
+    const accent = () => cssVar("--track-diffusion", "#ff9466");
+    const dimC = () => cssVar("--text-dim", "#8391ab");
+
+    function drawArrow(g, x0, y0, x1, y1, color, w) {
+      g.save(); g.strokeStyle = color; g.fillStyle = color; g.lineWidth = w || 1.4;
+      g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+      const ang = Math.atan2(y1 - y0, x1 - x0), h = 4.2;
+      g.beginPath(); g.moveTo(x1, y1);
+      g.lineTo(x1 - h * Math.cos(ang - 0.4), y1 - h * Math.sin(ang - 0.4));
+      g.lineTo(x1 - h * Math.cos(ang + 0.4), y1 - h * Math.sin(ang + 0.4));
+      g.closePath(); g.fill(); g.restore();
+    }
+
+    function draw() {
+      const sigma = sigCtrl.get();
+      const s2 = sig0 * sig0 + sigma * sigma;
+      const p = new Plot(canvas, { xmin: -RANGE, xmax: RANGE, ymin: -RANGE, ymax: RANGE, xlabel: "x₁", ylabel: "x₂" });
+      p.clear(); p.grid();
+      const g = p.g;
+
+      // quiver: 13x13 grid, arrow length ∝ tanh(|s|), direction = normalized score
+      const N = 13, cell = (p._tx(RANGE) - p._tx(-RANGE)) / N;
+      for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+        const x = -RANGE + (i + 0.5) * (2 * RANGE) / N;
+        const y = -RANGE + (j + 0.5) * (2 * RANGE) / N;
+        const [gx, gy] = score(x, y, s2);
+        const mag = Math.hypot(gx, gy);
+        if (mag < 1e-6) continue;
+        const len = (0.42 * cell) * Math.tanh(mag * 0.35);   // visual scaling only
+        const ux = gx / mag, uy = gy / mag;
+        const px = p._tx(x), py = p._ty(y);
+        // note: canvas y is down, data y is up → _ty already flips; direction uy must flip too
+        drawArrow(g, px, py, px + ux * len, py - uy * len, dimC(), 1.2);
+      }
+
+      // data modes as reference dots
+      g.save(); g.fillStyle = accent();
+      for (const [mx, my] of modes) { g.beginPath(); g.arc(p._tx(mx), p._ty(my), 4.5, 0, 2 * Math.PI); g.fill(); }
+      g.restore();
+
+      // four seeded Langevin walkers, annealed at the CURRENT sigma
+      const rnd = mulberry32(20240607);
+      const starts = [[-2.6, 2.4], [2.7, 2.2], [-2.4, -2.6], [2.5, -2.7]];
+      const delta = 0.012, STEPS = 90;
+      for (let w = 0; w < starts.length; w++) {
+        let [x, y] = starts[w];
+        const xs = [x], ys = [y];
+        for (let s = 0; s < STEPS; s++) {
+          const [gx, gy] = score(x, y, s2);
+          x += 0.5 * delta * gx + Math.sqrt(delta) * gauss(rnd);
+          y += 0.5 * delta * gy + Math.sqrt(delta) * gauss(rnd);
+          x = Math.max(-RANGE, Math.min(RANGE, x));
+          y = Math.max(-RANGE, Math.min(RANGE, y));
+          xs.push(x); ys.push(y);
+        }
+        p.trace(xs, ys, accent(), 1.6);
+        g.save(); g.fillStyle = accent(); g.globalAlpha = 0.9;
+        g.beginPath(); g.arc(p._tx(x), p._ty(y), 3, 0, 2 * Math.PI); g.fill(); g.restore();
+      }
+
+      const near = sigma < 0.35 ? "sharp &amp; local — walkers settle into the nearest mode"
+                 : sigma > 1.2 ? "broad — every arrow points at the center of mass"
+                 : "mid-range — arrows resolve the three basins";
+      out.innerHTML = `smoothing σ = <b>${sigma.toFixed(2)}</b> → effective variance ` +
+        `s² = σ₀² + σ² = ${(sig0 * sig0).toFixed(3)} + ${(sigma * sigma).toFixed(2)} = ` +
+        `<b>${s2.toFixed(3)}</b> · field is ${near}. ` +
+        `Score at the origin: |s| = <b>${Math.hypot(...score(0, 0, s2)).toFixed(3)}</b>.`;
+    }
+    sigCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO D56.2: numerical score check against -eps/sqrt(1-alphabar) ---- */
+  (function () {
+    const out = document.getElementById("d-check-out");
+    // linear DDPM schedule, beta 1e-4 -> 0.02 over T=1000 (matches page 54)
+    const T = 1000, b0 = 1e-4, b1 = 0.02;
+    const alphabar = new Float64Array(T + 1); alphabar[0] = 1;
+    let acc = 1;
+    for (let t = 1; t <= T; t++) { const beta = b0 + (b1 - b0) * (t - 1) / (T - 1); acc *= (1 - beta); alphabar[t] = acc; }
+
+    // fixed data vector + fixed noise draw (seeded), dim 4
+    const rnd = mulberry32(31337);
+    const D = 4;
+    const x0 = [], eps = [];
+    for (let i = 0; i < D; i++) { x0.push(gauss(rnd) * 0.8); eps.push(gauss(rnd)); }
+
+    const tCtrl = makeCtrl(document.getElementById("d-check-ctrls"),
+      { label: "noise level t", min: 1, max: 999, step: 1, value: 250, fmt: v => v.toFixed(0) });
+
+    function logq(xt, sa, om) {   // sa=sqrt(alphabar), om=(1-alphabar); returns log q(xt|x0) up to const
+      let s = 0;
+      for (let i = 0; i < D; i++) { const d = xt[i] - sa * x0[i]; s += d * d; }
+      return -s / (2 * om);
+    }
+
+    function draw() {
+      const t = Math.round(tCtrl.get());
+      const ab = alphabar[t], sa = Math.sqrt(ab), om = 1 - ab, so = Math.sqrt(om);
+      const xt = x0.map((v, i) => sa * v + so * eps[i]);
+
+      // analytic score = -eps / sqrt(1-alphabar)
+      const analytic = eps.map(e => -e / so);
+      // finite-difference each component of grad_xt log q
+      const h = 1e-4, fd = [];
+      for (let i = 0; i < D; i++) {
+        const xp = xt.slice(), xm = xt.slice();
+        xp[i] += h; xm[i] -= h;
+        fd.push((logq(xp, sa, om) - logq(xm, sa, om)) / (2 * h));
+      }
+      let maxErr = 0;
+      for (let i = 0; i < D; i++) maxErr = Math.max(maxErr, Math.abs(fd[i] - analytic[i]));
+      const smag = Math.hypot(...analytic);
+
+      const rows = analytic.map((a, i) =>
+        `  s[${i}]  FD ${fd[i] >= 0 ? " " : ""}${fd[i].toFixed(5)}   closed ${a >= 0 ? " " : ""}${a.toFixed(5)}`).join("\n");
+
+      out.innerHTML =
+        `t = ${t}   ᾱ<sub>t</sub> = ${ab.toExponential(3)}   √(1−ᾱ<sub>t</sub>) = <b>${so.toFixed(4)}</b>\n` +
+        `identity:  s_θ = −ε / √(1−ᾱ<sub>t</sub>)   ⇒   |s| = <b>${smag.toFixed(4)}</b>\n\n` +
+        rows + `\n\n` +
+        `max |FD − (−ε/√(1−ᾱ<sub>t</sub>))| = <span class="${maxErr < 1e-4 ? 'flag-ok' : 'flag-bad'}">${maxErr.toExponential(2)}</span> ` +
+        `${maxErr < 1e-4 ? '✓ identity holds' : '✗'}`;
+    }
+    tCtrl.onInput(draw);
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-56", [
+    {
+      q: "The score $\\mathbf s_\\theta = \\nabla_{\\mathbf x}\\log p_t(\\mathbf x)$ is a gradient with respect to what?",
+      opts: [
+        "The network parameters $\\theta$ — it is what you backprop into",
+        "The image / latent $\\mathbf x$ — same shape as the data, nothing to do with weights",
+        "The timestep $t$",
+        "The loss $\\mathcal L$"
+      ],
+      a: 1,
+      why: "The subscript on $\\nabla_{\\mathbf x}$ says it: the score differentiates $\\log p$ with respect to the input. Confusing it with $\\nabla_\\theta\\mathcal L$ (the training gradient) is the classic slip — same operator, different variable."
+    },
+    {
+      q: "What sign relates the learned score to the noise-prediction network?",
+      opts: [
+        "$\\mathbf s_\\theta = +\\,\\epsilon_\\theta/\\sqrt{1-\\bar\\alpha_t}$ — they point the same way",
+        "$\\mathbf s_\\theta = -\\,\\epsilon_\\theta/\\sqrt{1-\\bar\\alpha_t}$ — opposite directions",
+        "They are unrelated; the score needs a separately trained model",
+        "$\\mathbf s_\\theta = \\epsilon_\\theta$ exactly, no rescaling"
+      ],
+      a: 1,
+      why: "The three-line derivation lands on a minus sign: noise points away from the data, the score points toward it. The 'separately trained score model' option is the NCSN-vs-DDPM misconception — they are the same object."
+    },
+    {
+      q: "At some noise level, $\\sqrt{1-\\bar\\alpha_t} = 0.5$ and the network reports $\\epsilon_\\theta = 1.0$. What is the score magnitude $|\\mathbf s_\\theta|$?",
+      num: 2.0, tol: 0.1,
+      why: "$|\\mathbf s_\\theta| = |{-}\\epsilon_\\theta|/\\sqrt{1-\\bar\\alpha_t} = 1.0/0.5 = 2.0$. Dividing by a number below 1 amplifies — the same mechanism as page 55's $159\\times$ blow-up as $t\\to T$."
+    },
+    {
+      q: "Why is adding noise necessary before you can learn a score at all?",
+      opts: [
+        "Noise makes training faster to converge",
+        "Off the thin data manifold $p=0$ so $\\nabla\\log p$ is undefined; noise inflates the sheet into a solid, giving every point an arrow",
+        "Noise is a regularizer that prevents overfitting",
+        "It is not necessary — you could learn the raw data score directly"
+      ],
+      a: 1,
+      why: "Real data lives on a measure-zero sheet; the raw score is undefined off it (the 'learn it directly' distractor). Convolving with $\\mathcal N(0,\\sigma^2 I)$ spreads mass into the voids so the score exists everywhere."
+    },
+    {
+      q: "ComfyUI's \"Karras sigmas\" scheduler corresponds to which continuous-time object?",
+      opts: [
+        "The VP-SDE (the DDPM forward process)",
+        "The VE-SDE / NCSN parameterization ($f=0$, variance exploding)",
+        "The ELBO from page 55",
+        "A learning-rate schedule for training"
+      ],
+      a: 1,
+      why: "Karras/EDM uses the variance-exploding SDE — zero drift, noise scale $\\sigma$ swept from $\\sigma_{\\max}\\approx 80$ down to $0$. That is NCSN. Mistaking it for the VP-SDE (DDPM) is the named confusion this page fixes."
+    }
+  ], "Score matching — self-check");
+
+});
+</script>
+</body>
+</html>

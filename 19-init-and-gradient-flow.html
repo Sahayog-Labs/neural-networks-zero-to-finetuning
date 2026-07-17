@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>19. Initialization &amp; Gradient Flow — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the variance/backprop ledgers carry KaTeX products and matrices
+   wider than a phone. Let each ledger scroll inside its own box on narrow
+   screens so the page body never scrolls horizontally. Desktop is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* Long PyTorch identifiers in inline code (e.g. clip_grad_norm_(...)) must wrap
+   rather than push the box past a phone's width. */
+.box code { overflow-wrap: anywhere; }
+.demo-grid { display: grid; grid-template-columns: 1fr; gap: 10px; }
+.btnrow { margin: 10px 0 0; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.btnrow .seg { display: inline-flex; border: 1px solid var(--border, #333); border-radius: 8px; overflow: hidden; }
+.btnrow .seg button { border: none; border-radius: 0; }
+.btnrow .seg button.on { background: var(--accent, #b48cff); color: #10121a; }
+</style>
+</head>
+<body data-page="19-init-and-gradient-flow.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Setting the Gain on a 100-Stage Amplifier</h1>
+    <p class="subtitle">Initialization, vanishing/exploding gradients, and clipping are not three topics. They are
+      one number — the per-stage gain $g$ — told forward (how you set the weights) and backward (what the gradient
+      does on the way home). Get $g$ near 1 and a 100-layer network trains; miss it and it is dead before you press
+      Train.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:CHAIN — the verb, iterated $L$ times]</b>. Page&nbsp;14 mechanised the chain rule into one backprop
+      recursion, $\boldsymbol\delta^{(\ell)} = \big(W^{(\ell+1)\top}\boldsymbol\delta^{(\ell+1)}\big)\odot
+      \phi'(\mathbf z^{(\ell)})$. Stack that recursion $L$ deep and it becomes a <em>product of $L$ factors</em> —
+      and a product of factors is an amplifier. This page is what happens when you run that amplifier a hundred
+      stages: the same geometric product governs both how the signal flows forward and how the gradient flows back.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered immediately below in "The two numbers" box. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You stack 100 layers. Each one multiplies the signal's scale by a factor $g$ — a per-stage gain. If
+      $g = 1.1$, what is the signal's scale by layer 100 relative to layer 0? What if $g = 0.9$? Compute
+      $1.1^{100}$ and $0.9^{100}$ before you scroll, and write down what each does to a network.
+    </div>
+
+    <!-- ==================================================================== -->
+    <!-- PART A — INITIALIZATION (THE FORWARD PASS)                            -->
+    <!-- ==================================================================== -->
+    <h2>Part A — Initialization: setting $g$ before any data arrives</h2>
+
+    <div class="box key"><span class="box-title">🔑 The two numbers that decide everything</span>
+      Resolving the prediction directly: a per-stage gain compounds geometrically over depth, so by layer 100 the
+      signal is scaled by $g^{100}$.
+      $$1.1^{100} = \mathbf{13{,}781}, \qquad 0.9^{100} = \mathbf{2.7\times10^{-5}}.$$
+      A gain of $1.1$ — a mere 10% too hot — blows the signal up by four orders of magnitude and <b>clips</b>.
+      A gain of $0.9$ — 10% too cold — collapses it to nothing and <b>vanishes</b>. You need $g \approx 1.000$,
+      forward <em>and</em> backward. Two numbers do more than a page of prose: initialization is the discipline of
+      pinning $g$ to 1 before a single example is seen. (<code>constants.md</code> §9.3, [DER].)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Why all-zeros (or any constant) fails: symmetry never breaks</span>
+      Set every weight to zero — or to any single constant — and every neuron in a layer computes the
+      <em>same</em> pre-activation, receives the <em>same</em> gradient, and takes the <em>same</em> step. They stay
+      identical forever: a 4096-wide layer collapses to <b>one</b> effective neuron, and the loss drops to the prior
+      and flatlines. The failure is not that gradients are <em>zero</em> — it is that they are <em>identical</em>.
+      Randomness in $W$ is what breaks the tie. Note the asymmetry: <b>biases can safely start at zero</b> (the
+      random $W$ already breaks symmetry), so "never initialize to zero" is an over-generalization — it is about $W$.
+    </div>
+
+    <h3>The three-line derivation behind every init scheme</h3>
+    <p>Take one pre-activation $z_j = \sum_{i=1}^{n_{\text{in}}} w_{ji}\,x_i$. Assume the weights are zero-mean and
+      independent of the inputs. Variance of a sum of independent terms is the sum of variances, and for a product
+      of independent zero-mean variables the variances multiply, so:</p>
+    <div class="box rule"><span class="box-title">📐 Variance propagation (training §9.2)</span>
+      $$\mathrm{Var}(z_j) \;=\; n_{\text{in}}\,\mathrm{Var}(w)\,\mathrm{Var}(x).$$
+      To hold the signal's scale constant across a layer — $\mathrm{Var}(z) = \mathrm{Var}(x)$, i.e. $g = 1$ — you
+      need exactly
+      $$\boxed{\;\mathrm{Var}(w) = \dfrac{1}{n_{\text{in}}}\;}$$
+      That single requirement is the <em>whole</em> of Xavier and He; everything else is a correction to it.
+      <table class="ledger" style="margin-top:.7em">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$z_j$</td><td>pre-activation of unit $j$ (before the nonlinearity)</td><td>scalar</td><td>$z_j=\sum_i w_{ji}x_i$</td></tr>
+          <tr><td>$n_{\text{in}}$</td><td>fan-in — number of inputs feeding the layer</td><td>count</td><td>layer width</td></tr>
+          <tr><td>$\mathrm{Var}(w)$</td><td>variance of a single weight</td><td>scalar</td><td>the init distribution — <b>what we set</b></td></tr>
+          <tr><td>$\mathrm{Var}(x)$</td><td>variance of a single input activation</td><td>scalar</td><td>the previous layer's output</td></tr>
+          <tr><td>$\mathrm{Var}(z)$</td><td>variance of the pre-activation</td><td>scalar</td><td>what we want $= \mathrm{Var}(x)$</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p>Two named corrections adjust the "1" for what the activation does to the variance:</p>
+    <ul>
+      <li><b>Xavier / Glorot</b> (for tanh / sigmoid, roughly linear near 0):
+        $\mathrm{Var}(w) = \dfrac{2}{n_{\text{in}} + n_{\text{out}}}$ — averages fan-in and fan-out so the signal is
+        preserved forward <em>and</em> backward.</li>
+      <li><b>He / Kaiming</b> (for ReLU): $\mathrm{Var}(w) = \dfrac{2}{n_{\text{in}}}$. The "2" is not decoration —
+        it is literally <em>"because ReLU throws away half the signal"</em> (it zeroes every negative input), so you
+        double the variance to compensate.</li>
+    </ul>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: He init at $d = 4096$ predicts GPT-2's config file</span>
+      <b>[THREAD:QWEN]</b> Qwen3-8B's residual width is $d = 4096$. A hidden linear layer has $n_{\text{in}} = 4096$,
+      so He init sets
+      $$\mathrm{Var}(w) = \frac{2}{4096}, \qquad \mathrm{std}(w) = \sqrt{\frac{2}{4096}} = \mathbf{0.0221}.$$
+      GPT-2 shipped with weights initialized at std $\approx 0.02$. <b>The theory predicts the config file</b> —
+      that 0.0221 and the 0.02 you find in real model code are the same fact. (<code>constants.md</code> §9.3, [DER].)
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: GPT-2 scales residual projections by $1/\sqrt{2L}$ so the residual stream doesn't grow with depth</summary><div>
+      <p>The residual stream is a running <em>sum</em>: each block adds its output back. Summing $L$ roughly
+        independent contributions grows the stream's variance $\propto L$ (the same geometric-product logic, applied
+        to an accumulating sum instead of a chain). GPT-2 counters this by scaling the weights of the layers that
+        write <em>into</em> the residual stream by $1/\sqrt{2L}$, so the accumulated variance stays $O(1)$ regardless
+        of depth. It is the same "pin the gain to 1" discipline, bookkept over a sum rather than a product.</p>
+    </div></details>
+
+    <details class="deepdive"><summary>🔬 Deep dive: μP rescales init and per-layer LR so the optimal learning rate transfers from a small proxy to a large model</summary><div>
+      <p><b>[EST — medium confidence.]</b> Maximal-update parameterization (μP) rescales both the initialization and
+        the per-layer learning rate as a function of width, so that the learning rate that is optimal on a narrow
+        proxy model stays optimal on a much wider one. This is why labs can tune hyperparameters on a 40M-parameter
+        model and apply them to a 40B one, and it is the theory behind the folklore that "the learning rate should
+        shrink as the model gets wider." Mentioned so you recognize it; not derived here.</p>
+    </div></details>
+
+    <div class="box rule"><span class="box-title">📐 The four bad-init failure signatures (training §9.3)</span>
+      Each seeds a row of page&nbsp;24's debugging table:
+      <ol style="margin:.4em 0 0">
+        <li><b>All-zeros / constant</b> → loss flatlines at the prior; symmetry never breaks.</li>
+        <li><b>Too small</b> (std $\sim 10^{-3}$) → signal vanishes with depth; looks exactly like a dead learning
+          rate, and is misdiagnosed as one constantly.</li>
+        <li><b>Too large</b> (std $\sim 1.0$) → activations saturate or overflow to NaN.</li>
+        <li><b>Constant nonzero</b> → identical to all-zeros: symmetry, not scale, is the problem.</li>
+      </ol>
+      Note that (2) and (3) are <em>opposite symptoms — stuck vs NaN — from the same cause</em>: a mis-set gain.
+    </div>
+
+    <!-- ===================== DEMO 1 ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Push one random input through a 20-layer network and watch the activation std at each depth. Drag
+      <b>init scale</b>: too small and the curve dives to the floor, too large and it rockets off the top; land it on
+      the marked He/Xavier scale and it holds flat across all 20 layers. The <b>Zero-init</b> button shows symmetry —
+      every unit identical, std&nbsp;$=0$.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Init explorer · activation std vs depth <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-init" height="320"></canvas>
+        <div class="controls" id="d-init-ctrls"></div>
+        <div class="btnrow">
+          <span style="color:var(--text-dim)">activation:</span>
+          <span class="seg" id="d-init-act">
+            <button class="btn secondary on" data-act="tanh" type="button">tanh</button>
+            <button class="btn secondary" data-act="relu" type="button">relu</button>
+          </span>
+          <button class="btn secondary" id="d-init-he" type="button">Snap to He/Xavier</button>
+          <button class="btn secondary" id="d-init-zero" type="button">Zero-init</button>
+        </div>
+        <div class="readout" id="d-init-out"></div>
+      </div>
+    </div>
+
+    <!-- ==================================================================== -->
+    <!-- PART B — VANISHING / EXPLODING GRADIENTS (THE BACKWARD PASS)          -->
+    <!-- ==================================================================== -->
+    <h2>Part B — Vanishing / exploding gradients: the same product, run backward</h2>
+
+    <p>Initialization pinned the gain for the <em>forward</em> signal. But the gradient runs the network in reverse,
+      and it hits the <em>same</em> multiplication at every layer. Iterate page&nbsp;14's $\boldsymbol\delta$
+      recursion (BP2) all the way from the output to layer 1 and it telescopes into a product of $L$ factors:</p>
+
+    <div class="box rule"><span class="box-title">📐 The gradient is a product of $L$ factors (training §10.2)</span>
+      $$\boldsymbol\delta^{(1)} \;=\; \Big(\textstyle\prod_{\ell=1}^{L-1} W^{(\ell+1)\top}\,
+        \mathrm{diag}\,\phi'(\mathbf z^{(\ell)})\Big)\,\boldsymbol\delta^{(L)}.$$
+      If the typical factor's magnitude is $<1$, the product <b>vanishes</b>; if $>1$, it <b>explodes</b>. This is
+      the identical $g^{L}$ story as Part A's $1.1^{100}$ / $0.9^{100}$ — one lesson, two directions.
+      <b>[THREAD:CHAIN]</b> (each factor is exactly one step of the page-14 recursion).
+      <table class="ledger" style="margin-top:.7em">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\boldsymbol\delta^{(\ell)}$</td><td>$\partial\mathcal L/\partial\mathbf z^{(\ell)}$ — the backprop workhorse</td><td>$(d_\ell,1)$</td><td>page 14, BP2</td></tr>
+          <tr><td>$W^{(\ell+1)}$</td><td>the next layer's weights</td><td>$(d_{\ell+1},d_\ell)$</td><td>forward pass</td></tr>
+          <tr><td>$\phi'(\mathbf z^{(\ell)})$</td><td>activation slope at the <em>cached</em> pre-activation</td><td>$(d_\ell,1)$</td><td>forward cache (this is why training eats VRAM)</td></tr>
+          <tr><td>$\mathrm{diag}(\cdot)$</td><td>puts the slope vector on a diagonal so it scales each component</td><td>$(d_\ell,d_\ell)$</td><td>—</td></tr>
+          <tr><td>$L$</td><td>number of layers — the number of factors</td><td>count</td><td>architecture</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: why deep sigmoid stacks could not be trained</span>
+      The sigmoid's derivative peaks at the origin: $\sigma'(0) = \sigma(0)\,(1-\sigma(0)) = 0.5 \times 0.5 =
+      \mathbf{0.25}$, and it is smaller everywhere else. So <em>every</em> layer multiplies the gradient by at most
+      $0.25$:
+      $$0.25^{10} = 9.54\times10^{-7}, \qquad 0.25^{32} = \mathbf{5.4\times10^{-20}}.$$
+      After 32 sigmoid layers the gradient reaching layer 1 is $5.4\times10^{-20}$ — still a perfectly
+      <em>representable</em> float32 number (fp32 reaches down to $\sim10^{-38}$), but effectively <b>dead</b>: the
+      weight will not move in any human timescale. It is tiny, <em>not</em> zero — the machine-vs-math theme again.
+      This is precisely why deep sigmoid networks were untrainable, and why the field moved to ReLU/tanh, careful
+      init, and residuals. (<code>constants.md</code> §9.3, [DER].)
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The historical fixes are one lineage solving one problem</span>
+      Trunk owns the <b>WHY</b>; Part&nbsp;III owns the WHERE (the block diagram). (D-14.)
+      <ol style="margin:.4em 0 0">
+        <li><b>Better activations.</b> ReLU has derivative exactly $1$ on its active half — no shrinkage, no
+          saturation for $z>0$.</li>
+        <li><b>Careful init</b> (Part A) — pin the per-stage factor to $\approx 1$.</li>
+        <li><b>Residual connections — the identity term.</b> A residual block computes $y = x + F(x)$, so its
+          Jacobian is
+          $$\frac{\partial y}{\partial x} = I + \frac{\partial F}{\partial x}.$$
+          The $+I$ guarantees a gradient path of magnitude $\approx 1$ through <em>any</em> depth, no matter what
+          $F$ does. <b>Worked:</b> a plain gain of $0.9$ over 36 layers gives $0.9^{36} = \mathbf{0.0225}$ — a $44\times$
+          attenuation; with the residual highway that same path stays $\approx 1$. (Foreshadows the residual stream
+          of the transformer block, D-14.)</li>
+        <li><b>Normalization</b> (page&nbsp;20) — keeps the gain near 1 <em>during</em> training, not just at init.</li>
+      </ol>
+    </div>
+
+    <!-- ===================== DEMO 2 ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Run one backward pass through an $L$-layer network and watch the gradient norm reaching each depth (log
+      scale). Choose <b>sigmoid</b> and the norm decays into the floor like $0.25^\ell$; flip on the <b>residual</b>
+      toggle and the $+I$ path holds it flat; flip on <b>clip@1.0</b> to cap the exploding case. This is Demo 1's
+      geometric product, run backward.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Gradient through depth · $\|\boldsymbol\delta^{(\ell)}\|$ vs depth <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-grad" height="320"></canvas>
+        <div class="controls" id="d-grad-ctrls"></div>
+        <div class="btnrow">
+          <span style="color:var(--text-dim)">activation:</span>
+          <span class="seg" id="d-grad-act">
+            <button class="btn secondary on" data-act="sigmoid" type="button">sigmoid</button>
+            <button class="btn secondary" data-act="tanh" type="button">tanh</button>
+            <button class="btn secondary" data-act="relu" type="button">relu</button>
+          </span>
+          <button class="btn secondary" id="d-grad-res" type="button">residual: off</button>
+          <button class="btn secondary" id="d-grad-clip" type="button">clip@1.0: off</button>
+        </div>
+        <div class="readout" id="d-grad-out"></div>
+      </div>
+    </div>
+
+    <!-- ==================================================================== -->
+    <!-- PART C — GRADIENT CLIPPING (THE OPERATIONAL PATCH)                    -->
+    <!-- ==================================================================== -->
+    <h2>Part C — Gradient clipping: the operational patch</h2>
+
+    <div class="box rule"><span class="box-title">📐 Global-norm clipping at 1.0 (constants.md §9.3, [VP])</span>
+      Even with good init, a rare batch can produce a gradient spike. Global-norm clipping caps it: if the whole
+      gradient vector's norm exceeds a threshold $c$, rescale it back to length $c$ while keeping its direction —
+      $$\text{if } \|\mathbf g\| > c: \quad \mathbf g \leftarrow c\,\frac{\mathbf g}{\|\mathbf g\|}.$$
+      The near-universal value is $c = \mathbf{1.0}$. <b>Order matters absolutely:</b> clip <em>after</em>
+      <code>backward()</code> (the gradients must exist) and <em>before</em> <code>step()</code> (or the optimizer
+      already moved). Clip the wrong thing, or at the wrong time, and it silently does nothing.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Never fp16 on the Spark — bf16 has fp32's range</span>
+      fp16 has only 5 exponent bits: its maximum finite value is $\mathbf{65{,}504}$. A single activation past that
+      overflows to <code>inf</code>, which becomes <code>NaN</code> the moment it meets a subtraction — a whole run
+      lost to one large number. bf16 keeps fp32's <em>8</em> exponent bits (same range, fewer mantissa bits), so it
+      does not overflow on the values a network actually produces. On Blackwell there is no reason to reach for
+      fp16; the DGX&nbsp;Spark should never see it. (<code>constants.md</code> §9.3 / §9.7; ties to page&nbsp;24's
+      NaN table.)
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Six traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Init just needs to be random."</span>
+      It needs a <em>specific variance</em> tied to fan-in and activation. A random-but-wrong-scale init fails
+      exactly like zeros — the signal vanishes or explodes — just less obviously, because the network still
+      <em>looks</em> initialized.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "He init is for everything."</span>
+      He assumes ReLU. Pair He with tanh and you over-scale by $\sqrt2$ <em>per layer</em>: over 50 layers that is
+      $2^{25} \approx 3\times10^{7}$ too hot. Match the scheme to the activation.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "All-zeros fails because the gradients are zero."</span>
+      They are <em>identical</em>, not necessarily zero — symmetry never breaks. And <b>biases can</b> start at
+      zero: the random $W$ already broke the tie.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Vanishing gradients are a solved, historical problem."</span>
+      The mechanism is the same geometric product it always was. Residuals, normalization, and scaled init
+      <em>manage</em> it; they do not repeal it. Very deep or recurrent stacks still hit it.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Clipping fixes a high learning rate."</span>
+      Clipping caps <em>rare spikes</em>. A persistently-too-high $\eta$ still diverges every step; clipping just
+      makes the divergence tidier. Fix the learning rate, not the symptom.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Exploding and vanishing are opposite bugs needing opposite fixes."</span>
+      They are the <em>same product</em> with the factor on opposite sides of 1. The same three tools — scaled init,
+      residuals, normalization — address both. There is one disease here, not two.
+    </div>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>Run it on your box</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/19_init_variance.py</code> — measures per-layer activation std for zeros / too-small / too-large /
+      He on a deep net, prints the He value $\mathrm{std} = 0.0221$ for $d=4096$, and checks it against
+      <code>torch.nn.init.kaiming_normal_</code>.
+    </div>
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/19_grad_flow.py</code> — a deep MLP that logs per-layer gradient norm for sigmoid vs relu vs
+      residual, demonstrates <code>torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)</code> with the pre/post
+      norm, and prints the $0.25^{32} = 5.4\times10^{-20}$ number so you see the dead gradient on your own hardware.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-19"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+  const good   = () => vizUtils.cssVar("--good", "#5ce6a0");
+  const bad    = () => vizUtils.cssVar("--bad", "#ff6b6b");
+  const dim    = () => vizUtils.cssVar("--text-dim", "#8a93a6");
+
+  // population std of an array of numbers
+  function std(a) {
+    const n = a.length; if (!n) return 0;
+    let m = 0; for (const v of a) m += v; m /= n;
+    let s = 0; for (const v of a) s += (v - m) * (v - m);
+    return Math.sqrt(s / n);
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* DEMO 1 — Init explorer: activation std vs depth (REAL forward pass) */
+  /* ------------------------------------------------------------------ */
+  (function () {
+    const WIDTH = 40, DEPTH = 20, SEED = 7;
+    const canvas = document.getElementById("d-init");
+    const out    = document.getElementById("d-init-out");
+    let act = "tanh", zero = false;
+
+    // slider carries log10(scale); scale = 10**v
+    const sc = makeCtrl(document.getElementById("d-init-ctrls"),
+      { label: "init scale (std of W)", min: -3, max: 0.5, step: 0.02, value: -0.75,
+        fmt: v => Math.pow(10, v).toPrecision(3) });
+
+    // Theoretical "flat" scale for the current activation and width.
+    function idealScale() { return act === "relu" ? Math.sqrt(2 / WIDTH) : Math.sqrt(1 / WIDTH); }
+
+    // One real forward pass; returns the per-layer activation std (length DEPTH+1).
+    function measure(scale) {
+      const rng = new NN.RNG(SEED);
+      const sizes = new Array(DEPTH + 1).fill(WIDTH);
+      const opts = zero ? { act, init: "zeros", rng } : { act, initScale: scale, rng };
+      const net = new NN.MLP(sizes, opts);
+      const irng = new NN.RNG(SEED + 1);
+      let h = []; for (let i = 0; i < WIDTH; i++) h.push(irng.normal(0, 1));
+      const stds = [std(h)];
+      for (const L of net.layers) {
+        const o = L.forward(h).map(v => v.data);   // real weighted sum + activation
+        stds.push(std(o));
+        h = o;
+      }
+      return stds;
+    }
+
+    function draw() {
+      const scale = zero ? 0 : Math.pow(10, sc.get());
+      const stds = measure(scale);
+      const xs = stds.map((_, i) => i);
+      const FLOOR = 1e-6;
+      const ys = stds.map(v => Math.max(v, FLOOR));
+
+      const p = new Plot(canvas, { xmin: 0, xmax: DEPTH, ymin: FLOOR, ymax: 1e6, ylog: true,
+        xlabel: "layer depth", ylabel: "activation std" });
+      p.clear(); p.grid();
+      p.hline(1.0, dim(), [4, 4]);                 // healthy = flat at input std 1
+      p.label(0.4, 1.6, "healthy: flat @ std 1", dim());
+      p.trace(xs, ys, accent(), 2.5);
+
+      const g = stds[0] > 0 ? Math.pow(stds[DEPTH] / stds[0], 1 / DEPTH) : 0;
+      const ideal = idealScale();
+      let verdict;
+      if (zero) verdict = `<b style="color:${bad()}">every unit identical — std = 0</b>: symmetry never breaks, the layer is one neuron`;
+      else if (stds[DEPTH] < 1e-4) verdict = `<b style="color:${bad()}">vanished</b> (std → ${stds[DEPTH].toExponential(1)})`;
+      else if (stds[DEPTH] > 1e3) verdict = `<b style="color:${bad()}">exploded</b> (std → ${stds[DEPTH].toExponential(1)})`;
+      else verdict = `<b style="color:${good()}">held ~flat</b> (std → ${stds[DEPTH].toFixed(2)})`;
+
+      out.innerHTML =
+        `per-stage gain <b>g = (std<sub>20</sub>/std<sub>0</sub>)<sup>1/20</sup> = ${g ? g.toFixed(3) : "0"}</b>` +
+        ` &nbsp;·&nbsp; ${verdict}<br>` +
+        `<span style="color:${dim()}">${act} needs scale ≈ <b>${ideal.toPrecision(3)}</b> ` +
+        `(√${act === "relu" ? "2" : "1"}/${WIDTH}) to hold g ≈ 1 — the equation std<sub>ℓ+1</sub> = g·std<sub>ℓ</sub>, live.</span>`;
+    }
+
+    sc.onInput(() => { zero = false; draw(); });
+    document.getElementById("d-init-act").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-act]"); if (!b) return;
+      act = b.dataset.act;
+      [...e.currentTarget.querySelectorAll("button")].forEach(x => x.classList.toggle("on", x === b));
+      draw();
+    });
+    document.getElementById("d-init-he").addEventListener("click", () => {
+      zero = false;
+      sc.input.value = Math.log10(idealScale());
+      sc.input.dispatchEvent(new Event("input"));   // refresh the value label
+      draw();
+    });
+    document.getElementById("d-init-zero").addEventListener("click", () => { zero = true; draw(); });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ------------------------------------------------------------------ */
+  /* DEMO 2 — Gradient through depth (REAL backward pass)               */
+  /* ------------------------------------------------------------------ */
+  (function () {
+    const WIDTH = 24, SEED = 11;
+    const canvas = document.getElementById("d-grad");
+    const out    = document.getElementById("d-grad-out");
+    let act = "sigmoid", residual = false, clip = false;
+
+    const dep = makeCtrl(document.getElementById("d-grad-ctrls"),
+      { label: "depth L (layers)", min: 2, max: 40, step: 1, value: 30, fmt: v => v.toFixed(0) });
+
+    // One real backward pass; returns per-layer grad norm + the global param-grad norm.
+    function measure(depth) {
+      const rng = new NN.RNG(SEED);
+      const sizes = new Array(depth + 1).fill(WIDTH);
+      const net = new NN.MLP(sizes, { act, outAct: act, rng }); // activation on every layer
+      const irng = new NN.RNG(SEED + 1);
+      let h = []; for (let i = 0; i < WIDTH; i++) h.push(new NN.Value(irng.normal(0, 1)));
+      const layerOuts = [];
+      for (const L of net.layers) {
+        let o = L.forward(h);
+        if (residual && o.length === h.length) o = o.map((v, i) => v.add(h[i])); // y = F(x) + x
+        layerOuts.push(o);
+        h = o;
+      }
+      // loss = 0.5 Σ h_i^2 — a real scalar with a gradient into every activation
+      let loss = new NN.Value(0);
+      for (const v of h) loss = loss.add(v.mul(v).mul(0.5));
+      loss.backward();
+
+      let norms = layerOuts.map(arr => Math.sqrt(arr.reduce((s, v) => s + v.grad * v.grad, 0)));
+      const params = net.parameters();
+      const gnorm = Math.sqrt(params.reduce((s, p) => s + p.grad * p.grad, 0));
+      let capped = false;
+      if (clip && gnorm > 1.0) { const f = 1.0 / gnorm; norms = norms.map(n => n * f); capped = true; }
+      return { norms, gnorm, capped };
+    }
+
+    function draw() {
+      const depth = Math.round(dep.get());
+      const { norms, gnorm, capped } = measure(depth);
+      const FLOOR = 1e-30;
+      const xs = norms.map((_, i) => i + 1);           // layer 1..depth
+      const ys = norms.map(v => Math.max(v, FLOOR));
+
+      const p = new Plot(canvas, { xmin: 1, xmax: depth, ymin: FLOOR, ymax: 1e6, ylog: true,
+        xlabel: "layer ℓ (1 = deepest from loss)", ylabel: "‖δ⁽ˡ⁾‖  grad norm" });
+      p.clear(); p.grid();
+      p.trace(xs, ys, residual ? good() : accent(), 2.5);
+
+      const first = norms[0];
+      const underflowed = first < 1e-25;
+      const decay = norms.length > 1 && norms[norms.length - 1] > 0
+        ? Math.pow(first / norms[norms.length - 1], 1 / (norms.length - 1)) : 1;
+
+      let tag;
+      if (residual) tag = `<b style="color:${good()}">residual highway holds the gradient (+I path)</b>`;
+      else if (act === "sigmoid") tag = `<b style="color:${bad()}">sigmoid: decays ~0.25 per layer toward the floor</b>`;
+      else if (underflowed) tag = `<b style="color:${bad()}">underflowed at layer 1</b>`;
+      else tag = `gradient survives to layer 1`;
+
+      out.innerHTML =
+        `grad norm at <b>layer 1 = ${first === 0 ? "0" : first.toExponential(2)}</b>` +
+        (underflowed ? ` <span style="color:${bad()}">(underflowed)</span>` : "") +
+        ` &nbsp;·&nbsp; ${tag}<br>` +
+        `<span style="color:${dim()}">global ‖g‖ = <b>${gnorm.toExponential(2)}</b>` +
+        (clip ? (capped ? ` → <b style="color:${good()}">clipped to 1.0</b> (×${(1 / gnorm).toExponential(1)})`
+                        : ` (below 1.0 — clip does nothing, correctly)`) : "") +
+        ` &nbsp;·&nbsp; the equation ‖δ⁽ˡ⁾‖ ≈ (factor)·‖δ⁽ˡ⁺¹⁾‖ compounding over ${depth} layers, live.</span>`;
+    }
+
+    dep.onInput(draw);
+    document.getElementById("d-grad-act").addEventListener("click", (e) => {
+      const b = e.target.closest("button[data-act]"); if (!b) return;
+      act = b.dataset.act;
+      [...e.currentTarget.querySelectorAll("button")].forEach(x => x.classList.toggle("on", x === b));
+      draw();
+    });
+    const resBtn = document.getElementById("d-grad-res");
+    resBtn.addEventListener("click", () => { residual = !residual; resBtn.textContent = "residual: " + (residual ? "on" : "off"); resBtn.classList.toggle("on", residual); draw(); });
+    const clipBtn = document.getElementById("d-grad-clip");
+    clipBtn.addEventListener("click", () => { clip = !clip; clipBtn.textContent = "clip@1.0: " + (clip ? "on" : "off"); clipBtn.classList.toggle("on", clip); draw(); });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ------------------------------------------------------------------ */
+  /* QUIZ                                                                */
+  /* ------------------------------------------------------------------ */
+  renderQuiz("quiz-19", [
+    {
+      q: "He-init standard deviation for a hidden layer of width $n_{\\text{in}} = 4096$ (ReLU):",
+      num: 0.0221, tol: 0.0025, unit: "std",
+      why: "$\\sqrt{2/4096} = 0.0221$ — essentially GPT-2's shipped $\\approx 0.02$. The theory predicts the config file."
+    },
+    {
+      q: "A per-stage gain of $g = 0.9$ over 100 layers scales the signal by $0.9^{100} =$ ?",
+      num: 2.7e-5, tol: 5e-6,
+      why: "$0.9^{100} = 2.7\\times10^{-5}$ — the vanishing case. A 10%-too-cold gain collapses the signal over depth."
+    },
+    {
+      q: "The gradient through 32 sigmoid layers is multiplied by at most $0.25$ each time: $0.25^{32} =$ ?",
+      num: 5.4e-20, tol: 1e-20,
+      why: "$0.25^{32} = 5.4\\times10^{-20}$ — tiny but still a representable float32 number, not exactly 0. Effectively dead, but the machine-vs-math distinction matters."
+    },
+    {
+      q: "The maximum value of the sigmoid's derivative $\\sigma'(z) = \\sigma(z)(1-\\sigma(z))$ is:",
+      num: 0.25, tol: 0.005,
+      why: "Maximized at $z=0$: $0.5 \\times 0.5 = 0.25$. Every sigmoid layer shrinks the gradient by at least $4\\times$."
+    },
+    {
+      q: "Why does all-zeros initialization fail?",
+      opts: [
+        "The gradients are exactly zero, so nothing updates",
+        "Every neuron in a layer stays identical — symmetry never breaks",
+        "Zero weights overflow to NaN on the first step",
+        "The learning rate becomes undefined"
+      ],
+      a: 1,
+      why: "The gradients are identical, not necessarily zero: all units get the same update and never differentiate. (Biases, by contrast, can safely start at zero.)"
+    },
+    {
+      q: "In He init, $\\mathrm{Var}(w) = 2/n_{\\text{in}}$, the factor of 2 is there because:",
+      opts: [
+        "There are two moments to track (mean and variance)",
+        "ReLU discards half the signal (zeros every negative input), so you double the variance to compensate",
+        "It accounts for both forward and backward passes",
+        "The gradient is computed twice"
+      ],
+      a: 1,
+      why: "ReLU zeroes negatives, halving the propagated variance; the 2 restores it. Pair He with tanh instead and you over-scale by √2 per layer."
+    },
+    {
+      q: "A residual block $y = x + F(x)$ keeps gradients alive at any depth because its Jacobian is:",
+      opts: [
+        "$\\frac{\\partial F}{\\partial x}$ alone",
+        "$I + \\frac{\\partial F}{\\partial x}$ — the $+I$ preserves a magnitude-$\\approx$1 gradient path",
+        "$I \\cdot \\frac{\\partial F}{\\partial x}$, which multiplies the gradients",
+        "$\\frac{\\partial F}{\\partial x} - I$"
+      ],
+      a: 1,
+      why: "The identity term $+I$ is an ungated highway: no matter how small $\\partial F/\\partial x$ gets, the gradient still flows through the $I$ at magnitude $\\approx 1$."
+    },
+    {
+      q: "Global-norm gradient clipping must be applied:",
+      opts: [
+        "Before backward(), to pre-limit the gradients",
+        "After backward() and before step() — the gradients must exist, and the optimizer must not have moved yet",
+        "After step(), on the updated weights",
+        "Inside the loss function"
+      ],
+      a: 1,
+      why: "Clip after backward() (so .grad is populated) and before step() (so the optimizer uses the clipped value). Wrong order silently does nothing."
+    }
+  ], "Initialization & gradient flow — self-check");
+
+});
+</script>
+</body>
+</html>

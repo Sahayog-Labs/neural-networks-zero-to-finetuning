@@ -1,0 +1,1034 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>62. Fine-Tuning Diffusion on Your Data — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* page-local: thread tags, cross-ref line, data tables, shape ribbon, radios/selects —
+     the same small kit page 54 established for this track. Plus a stacked-bar ledger and
+     a four-places pipeline diagram, both hand-drawn on canvas (no bar-chart primitive
+     in Plot). */
+  .thread { font-size: .84rem; color: var(--text-dim); border-left: 2px dotted var(--track-diffusion);
+            padding: 4px 0 4px 12px; margin: 1.2em 0; }
+  .thread b { color: var(--track-diffusion); }
+  .xref { font-size: .84rem; color: var(--text-dim); }
+  table.data { border-collapse: collapse; width: 100%; font-family: var(--mono); font-size: .85rem; margin: .6em 0; }
+  table.data th, table.data td { border: 1px solid var(--border); padding: 5px 9px; text-align: right; }
+  table.data th { color: var(--text-dim); font-weight: 600; }
+  table.data td:first-child, table.data th:first-child { text-align: left; }
+  .ribbon { font-family: var(--mono); font-size: .82rem; background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 6px; padding: 10px 12px; white-space: pre; overflow-x: auto; color: var(--text-dim); margin: .6em 0; }
+  .flag-bad { color: var(--bad); font-weight: 700; }
+  .flag-ok  { color: var(--good); font-weight: 700; }
+  .radio-row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 4px 0; }
+  .radio-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 4px; }
+  .radio-row .grp-label { font-size: .8rem; color: var(--text-dim); margin-right: 6px; }
+  .toggle-row { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; margin: 8px 0; }
+  .toggle-row label { font-size: .82rem; color: var(--text); display: inline-flex; align-items: center; gap: 5px; }
+  .filmwrap { overflow-x: auto; }
+  .est-note { font-size: .78rem; color: var(--text-dim); margin-top: 6px; }
+  .taxo-test { font-weight: 700; }
+</style>
+</head>
+<body data-page="62-fine-tuning-diffusion-on-your-data.html" class="track-diffusion">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VI · Diffusion Track ◇ · Milestone</span>
+    <h1>Fine-Tuning Diffusion: Putting <em>Your</em> Thing in the Model</h1>
+    <p class="subtitle">Everything on your disk — the LoRAs in <code>models/loras/</code>,
+      the ControlNets, the IP-Adapters — is one of a small number of ways to change what a
+      diffusion model does without retraining it from scratch. This page gives you the
+      taxonomy, the arithmetic, and a protocol for knowing whether it worked.</p>
+
+    <!-- ============================ PREDICT ============================ -->
+    <!-- on-page-resolution: answered in "The Civitai ratio, resolved" right after the
+         taxonomy table. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You train a LoRA on 20 photos in 20 minutes. You download a ControlNet someone trained
+      on 100k+ images. One of those changed the base model; one didn't. Which is which — and
+      why are there roughly <b>500,000 LoRAs</b> on Civitai but only about <b>15 useful
+      ControlNets</b>? Commit to an answer before you scroll.
+    </div>
+
+    <!-- ============================ TAXONOMY ============================ -->
+    <h2>★ The taxonomy: WHERE, WHAT, WHICH</h2>
+
+    <p>The trunk's three-things-taxonomy page already gave you the axes; this page
+      instantiates them for diffusion. <strong>WHERE</strong> does the change live:</p>
+
+    <div class="box key"><span class="box-title">🔑 Four places a diffusion adaptation can live</span>
+      <table class="ledger">
+        <thead><tr><th>WHERE</th><th>What changes</th><th>Typical size</th></tr></thead>
+        <tbody>
+          <tr><td>All weights</td><td>every parameter of the denoiser moves</td><td>full FT, 24 GB+ (FLUX.1-dev)</td></tr>
+          <tr><td>A low-rank correction</td><td>$\Delta W = \tfrac{\alpha}{r}BA$ added to selected weights</td><td><b>LoRA</b>, 10–200 MB</td></tr>
+          <tr><td>The vocabulary</td><td>one new embedding vector, nothing else</td><td><b>textual inversion</b>, 3 KB</td></tr>
+          <tr><td>Nowhere — you change the <em>input</em></td><td>an extra conditioning signal, base frozen</td><td>ControlNet / IP-Adapter, 0 change to $\theta$</td></tr>
+        </tbody>
+      </table>
+      Orthogonal to WHERE is <strong>WHAT</strong> (form vs. facts — facts you can't teach
+      this way; that's what RAG is for) and <strong>WHICH recipe</strong> (SFT / DreamBooth /
+      DPO). <strong>The test that actually separates them:</strong>
+      <p class="taxo-test">After you're done, is the base model different?</p>
+      LoRA, DreamBooth, full FT → <b>yes</b>, the weights moved. ControlNet, IP-Adapter →
+      <b>no</b> — bit-identical base model, you bolted something onto the input pipeline.
+      "DreamBooth vs. LoRA" is a category error you'll see argued online: DreamBooth is
+      <em>what you train</em> (a recipe — rare-token + prior-preservation loss), LoRA is
+      <em>how you store it</em> (a parameterization). Modern practice is both at once — the
+      actual training script in the wild is named <code>train_dreambooth_lora_flux.py</code>.
+    </div>
+
+    <p><strong>The Civitai ratio, resolved.</strong> A LoRA changes the model — but by a tiny,
+      cheap, low-rank nudge, trainable on 20 photos in minutes. A ControlNet changes
+      <em>nothing</em> about the base model; it is a whole new encoder (~360M params [EST] —
+      not in <code>constants.md</code>, carried from the brief, flagged) trained on the full
+      distribution the base model was trained on (100k+ pose/depth/edge pairs), because it has
+      to work for <em>every</em> subject, not one. That is why 500,000 people can each ship a
+      LoRA of their own face by lunchtime, and why the field has produced perhaps 15 ControlNets
+      total that anyone actually uses — training one is a full research project, not a
+      Tuesday afternoon.</p>
+
+    <!-- ============================ WHY NOT FULL FT ============================ -->
+    <h2>Why not just fully fine-tune?</h2>
+
+    <p class="thread"><b>[THREAD: The memory budget · beat]</b> Same 16 B/param rule from
+      p.18/p.49, new host. Full FT on a 12B or 32B diffusion transformer is measured against
+      the same <b>121.6875 GiB</b> [MEA-DEV] ceiling.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Full fine-tune, priced</span>
+      Standard bf16-mixed AdamW state is 16 B/param (weights 2 + grad 2 + fp32 master 4 +
+      Adam $m$ 4 + Adam $v$ 4), the same ledger p.18 built for Qwen3-8B:
+      <table class="data">
+        <thead><tr><th>Model</th><th>Params</th><th>State ($P\times16$B)</th><th>+ activations</th><th>vs 121.69 GiB [MEA-DEV]</th></tr></thead>
+        <tbody>
+          <tr><td>FLUX.1-dev</td><td>12 B [VP]</td><td>192 GB</td><td>≈ <b>196 GB</b> [DER]</td><td class="flag-bad">✗ 1.6× over</td></tr>
+          <tr><td>FLUX.2-dev</td><td>32 B [VP]</td><td>512 GB</td><td>≈ <b>520 GB</b> [DER], <em>denoiser only</em></td><td class="flag-bad">✗ 4.2× over</td></tr>
+        </tbody>
+      </table>
+      That FLUX.2-dev row prices only the denoiser transformer. Its 24B Mistral-3 text
+      encoder, if it stays resident during training rather than being precomputed, is
+      <em>another</em> <b>48 GB</b> on top — the ledger demo below prices that addition
+      exactly, and is where the "precompute embeddings" toggle earns its keep. Even before
+      that: 20 images against a billion-image prior is <strong>catastrophic forgetting</strong>
+      waiting to happen, it costs 24 GB per concept (you can't stack ten concepts), and it
+      re-derives nothing you don't already know from the LLM track's own full-FT-vs-LoRA page.
+      The 16-B/param rule doesn't care what the tensor draws.
+    </div>
+
+    <!-- ============================ LORA DERIVED ============================ -->
+    <h2>★ LoRA, instantiated on your FLUX.1-dev</h2>
+
+    <p>The trunk derived $W_0 + \tfrac{\alpha}{r}BA$, the $B{=}0$ no-op at init, and the
+      187× identity on Qwen3-8B (p.40). Point back — nothing below re-derives that; it
+      plugs <em>your</em> model's numbers into the same equation.</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$W_0$</td><td>frozen pretrained weight</td><td>$(d_{out},d_{in})$</td><td>the checkpoint on disk</td></tr>
+        <tr><td>$B,A$</td><td>LoRA up/down factors</td><td>$(d_{out},r)$, $(r,d_{in})$</td><td>trained; $B$ init zero</td></tr>
+        <tr><td>$r$</td><td>rank</td><td>scalar</td><td>a hyperparameter</td></tr>
+        <tr><td>$\alpha$</td><td>LoRA scaling (<code>network_alpha</code>)</td><td>scalar</td><td>a hyperparameter</td></tr>
+        <tr><td>$\alpha/r$</td><td>the effective scale multiplying $BA$</td><td>scalar</td><td>computed</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ One attention projection, worked</span>
+      A single FLUX.1-dev attention projection is square, $d=3072$:
+      $$3072\times3072 = \mathbf{9{,}437{,}184}\text{ params.}$$
+      At $r=16$: $16(3072+3072) = 16\times6144 = \mathbf{98{,}304}$ params —
+      $98{,}304 / 9{,}437{,}184 = \mathbf{1.04\%}$, a <b>96× reduction</b> [DER] on that one
+      matrix. Summed over the whole model's attention projections: <b>≈30M params = 0.25% of
+      12B</b> [EST — verify against <code>FluxTransformer2DModel</code>] → <b>60 MB</b> in
+      bf16. That 60 MB file is what lands in your <code>models/loras/</code> folder.
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Memory, state-to-state</span>
+      <table class="data">
+        <thead><tr><th></th><th>Full FT</th><th>LoRA $r{=}16$</th><th>Ratio</th></tr></thead>
+        <tbody>
+          <tr><td>frozen weights (bf16)</td><td colspan="2">24 GB (both — the base never leaves VRAM)</td><td>1×</td></tr>
+          <tr><td>trainable + grad (bf16)</td><td>24 GB</td><td>0.06 GB</td><td>400×</td></tr>
+          <tr><td>optimizer state (AdamW fp32 $m,v$, $k_O{=}8$)</td><td><b>96 GB</b></td><td><b>0.24 GB</b></td><td><b>400×</b></td></tr>
+          <tr><td>activations [EST]</td><td>≈4–6 GB</td><td>≈4–6 GB (unchanged — see warning)</td><td>1×</td></tr>
+          <tr><td><b>total state</b></td><td><b>≈196 GB</b></td><td><b>≈29–31 GB</b> [DER]+[EST act]</td><td>—</td></tr>
+        </tbody>
+      </table>
+      The optimizer line is the headline: <b>96 GB → 0.24 GB, a factor of ≈400</b> [DER] —
+      because AdamW state scales with <em>trainable</em> params (12B vs. 30M), and that ratio
+      is even sharper than the LLM track's 187× because the diffusion attn-only target is a
+      smaller slice of the model.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The win is not the weights</span>
+      All <b>24 GB</b> of frozen base weights are still resident in VRAM whether you train a
+      LoRA or not — LoRA freezes them, it does not delete them. It also does <b>not</b>
+      shorten the computation graph: activations are ~unchanged between full FT and LoRA at
+      the same batch/resolution (constants.md §2.4). If you measure your LoRA run and find it
+      sitting above 29–31 GB by roughly the activation term, that is expected, not a leak.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 <code>network_alpha</code> and <code>strength</code> — your daily knobs</span>
+      The effective scale multiplying $BA$ is $\alpha/r$, not $\alpha$ alone. Trainers commonly
+      default <code>network_alpha = r/2</code> — which <b>halves</b> your adapter's effect
+      before you've turned a single knob in ComfyUI. This is <b>the single most common "why
+      isn't my LoRA learning?" cause</b> [EST — training-tool convention, not a
+      <code>constants.md</code> figure]: the fix is either raise LR ~2× or set
+      <code>network_alpha = r</code>. ComfyUI's <code>strength_model</code> slider is a
+      <em>further</em> multiplier on top of that:
+      $$W = W_0 + \text{strength}\cdot\frac{\alpha}{r}\,BA.$$
+      <code>strength &gt; 1.0</code> is <b>extrapolation past what you trained</b> — the exact
+      same move as pushing $w_g &gt; 1$ on p.61, the exact same failure mode (over-saturated,
+      "fried" output). <span class="thread"><b>[THREAD: The dot product · beat]</b> $BA$ is a
+      sum of $r$ rank-one outer products — the atom, reopened as "the directions a LoRA is
+      allowed to push in."</span>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: where to attach a LoRA, and the variant zoo</summary><div>
+      <p><code>to_q, to_k, to_v, to_out</code> — attention-only — is the diffusion default
+      (D-06/D-11): this is a claim about <em>where cross-modal binding lives</em>, not a
+      parameter-budget trick. Cross-attention-only targets teach "a new word" (a subject);
+      adding the convolutions (LoCon) teaches "a new look" (a style). QLoRA on a 4-bit base is
+      the practical path for <b>FLUX.2-dev</b>: NF4 with double-quant is
+      <b>0.516 B/param = 4.127 bits/param</b> [VP, <code>constants.md</code> §3] — but only if
+      you explicitly set <code>bnb_4bit_use_double_quant=True</code>; leave it at its library
+      default (False) and you silently get <b>0.5625 B/param</b> [VP] instead, 9% more base
+      memory than the number every guide quotes.</p>
+      <table class="data">
+        <thead><tr><th>Variant</th><th>Idea</th></tr></thead>
+        <tbody>
+          <tr><td>DoRA</td><td>decompose $W$ into magnitude × direction, LoRA the direction</td></tr>
+          <tr><td>LoHa / LoKr</td><td>Hadamard / Kronecker factorizations — more expressive per param, more fragile to tune</td></tr>
+          <tr><td>LoRA+</td><td>different LR for $A$ and $B$ (they have different init scales)</td></tr>
+        </tbody>
+      </table>
+      Plain LoRA at $r{=}16$ is roughly 95% of what's actually shipped on Civitai [EST]. The
+      zoo exists; you rarely need it.
+    </div></details>
+
+    <!-- ============================ RANK / LR / EXAMPLES ============================ -->
+    <h2>★ Rank, LR, example-count — one principle, three symptoms</h2>
+
+    <div class="box key"><span class="box-title">🔑 How much are you asking the model to learn?</span>
+      <b>Rank follows the information content of the dataset, not the model size.</b> A
+      diffusion concept LoRA — your face, your dog, a specific object — is one point on a
+      manifold the model already knows how to draw; 15–20 images [EST] of it need only
+      $r{=}8\text{–}32$. Push $r$ much higher on 20 images and the adapter <b>memorizes</b>
+      the training photos instead of learning the concept — it has capacity to spare and
+      spends it on noise. (LLM SFT sits at the opposite end: a dataset of instructions is
+      information-dense, so $r{=}64\text{–}256$ is nearly free — reconciling with the LLM
+      track's own rank choice, D-09/D-11.)
+      <br><br>
+      <b>LR follows trainable-param count</b> (the same principle p.40 states for the LLM
+      track): fewer trainable params tolerate a higher LR because the loss landscape they move
+      in is smaller.
+      <table class="data">
+        <thead><tr><th>Method</th><th>LR</th><th>Trainable params</th></tr></thead>
+        <tbody>
+          <tr><td>Diffusion full FT / DreamBooth</td><td><b>1e-6 – 5e-6</b></td><td>1.2e10</td></tr>
+          <tr><td>Diffusion LoRA</td><td><b>1e-4</b></td><td>3e7</td></tr>
+          <tr><td>Textual inversion</td><td><b>5e-4 – 5e-3</b></td><td><b>768</b></td></tr>
+        </tbody>
+      </table>
+      [EST, <code>constants.md</code> §9.4] — labelled as the table's own tag, and stated as a
+      transferable principle rather than three unrelated folklore numbers.
+      <div class="box warn" style="margin-top:10px"><span class="box-title">⚠️ The 100× trap</span>
+        Diffusion LoRA's LR is <b>1e-4</b>, not the full-FT figure of 1e-6 — a hundred-fold gap
+        (D-09). Copy the full-FT learning rate into a LoRA config and the adapter trains at
+        1/100th the speed it should; the loss barely moves and it looks like the LoRA "isn't
+        learning" when it is simply crawling. This is the single most common diffusion
+        fine-tuning bug reported online.
+      </div>
+    </div>
+
+    <!-- ============================ DREAMBOOTH / TI ============================ -->
+    <h2>DreamBooth and textual inversion</h2>
+
+    <div class="box worked"><span class="box-title">✍️ DreamBooth: a rare token plus a mirror</span>
+      Bind the concept to a rare token (e.g. <code>sks</code>) and add a
+      <b>prior-preservation</b> term so the model doesn't forget what "a photo of a man" means
+      in general:
+      $$\mathcal{L}_{\text{DB}} = \mathbb{E}\big\|\boldsymbol\epsilon - \epsilon_\theta(\cdot,\mathbf{c}_{\text{sks}})\big\|^2
+        + \lambda_{pp}\,\mathbb{E}\big\|\boldsymbol\epsilon' - \epsilon_\theta(\cdot,\mathbf{c}_{\text{class}})\big\|^2,
+        \qquad \lambda_{pp} = 1.0.$$
+      <table class="ledger">
+        <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+        <tr><td>$\mathbf{c}_{\text{sks}}$</td><td>conditioning on the rare trigger token</td><td>$(S_{\text{txt}},d_c)$</td><td>your captions</td></tr>
+        <tr><td>$\mathbf{c}_{\text{class}}$</td><td>conditioning on the plain class word ("a man")</td><td>same</td><td>your captions</td></tr>
+        <tr><td>class images</td><td><b>generated by the base model itself</b> — a snapshot of its own prior</td><td>—</td><td>not real photos; a mirror it's held up to</td></tr>
+        <tr><td>$\lambda_{pp}$</td><td>prior-preservation weight</td><td>scalar</td><td>fixed at 1.0</td></tr>
+      </table>
+      <b>30-second drift diagnostic:</b> after training, generate "a photo of a man" with
+      <em>no</em> trigger token. If it's <em>your</em> specific person — the concept leaked
+      into the general class — that's drift; add prior-preservation images (or more of them).
+      If it stays generic, skip it. (Live disagreement in the community over whether
+      prior-preservation is worth the extra training cost for small personal LoRAs — this is
+      the actual diagnostic that settles it for your case, not folklore.)
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Textual inversion — the intellectual climax of this page</span>
+      Freeze <em>everything</em> — the whole denoiser, untouched — and optimize one new
+      embedding vector $v^\star \in \mathbb{R}^{d_c}$. For SD1.5's CLIP encoder, $d_c = 768$:
+      $$768 \text{ floats} \times 4\text{ B} = \mathbf{3\text{ KB}}.$$
+      The model already knew how to draw your thing — it has to, it was trained on billions of
+      images that certainly include your general category. <b>TI doesn't teach it anything; it
+      finds an address in a space the model already has and labels it.</b> The 3 KB is a
+      pointer, not a payload. Rule to hold: <b>TI retrieves; LoRA teaches.</b>
+    </div>
+
+    <!-- ============================ CONTROLNET / IP-ADAPTER ============================ -->
+    <h2>ControlNet and IP-Adapter — not fine-tuning</h2>
+
+    <div class="box key"><span class="box-title">🔑 Two more places to attach, neither one $\theta$</span>
+      <b>ControlNet:</b> clone the encoder half of the denoiser, feed the clone a hint (an
+      edge map, a depth map, a pose skeleton), and wire its output back into the frozen
+      original via <b>zero-initialized convolutions</b> — the same "start the new thing at
+      exactly zero so it's a no-op on step 0" move you've now met three times: LoRA's $B{=}0$,
+      adaLN-Zero's $\alpha{=}0$ (p.59), and this. ~360M params [EST — brief-sourced, not in
+      <code>constants.md</code>] ≈ 1.4 GB [EST] — not a LoRA-scale object; the reason so few
+      exist.
+      <br><br>
+      <b>IP-Adapter:</b> decoupled cross-attention — a second cross-attention branch reads a
+      CLIP <em>image</em> encoding instead of text, and its output is added to the text branch:
+      $$Z = \mathrm{Attn}(Q, K_{\text{text}}, V_{\text{text}}) + \lambda\,\mathrm{Attn}(Q, K_{\text{img}}, V_{\text{img}}).$$
+      <table class="ledger">
+        <tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr>
+        <tr><td>$Q$</td><td>image queries (shared with the text branch)</td><td>$(HW, d_{\text{head}})$</td><td>the denoiser's own hidden state</td></tr>
+        <tr><td>$K_{\text{text}}, V_{\text{text}}$</td><td>the original, untouched text projections</td><td>$(S_{\text{txt}}, d_{\text{head}})$</td><td>frozen, unchanged</td></tr>
+        <tr><td>$K_{\text{img}}, V_{\text{img}}$</td><td><b>new</b> projections of a CLIP image embedding</td><td>same shape family</td><td>the only new weights added</td></tr>
+        <tr><td>$\lambda$</td><td>image-branch mixing weight</td><td>scalar</td><td>ComfyUI's <code>weight</code> slider</td></tr>
+      </table>
+      The text branch is untouched; only $W_K',W_V'$ for the image branch are new — "a mixing
+      desk, not a surgery."
+      <br><br>
+      <b>The punchline:</b> you can stack a LoRA ($\theta$ changes) + a ControlNet ($\mathbf{c}$
+      gains an input) + an IP-Adapter ($\mathbf{c}$ gains another input) + a text prompt
+      ($\mathbf{c}$ again) all at once, and they don't collide — because they aren't the same
+      <em>kind</em> of object. Your messy ComfyUI node graph has a clean type signature
+      underneath it.
+    </div>
+
+    <!-- ============================ DATASET CRAFT ============================ -->
+    <details class="deepdive"><summary>🔬 Deep dive: dataset craft, derived from the loss (not folklore)</summary><div>
+      <p><b>The invariance principle:</b> the model learns whatever is <em>constant</em> across
+        your dataset. So make the concept constant and vary everything else — angle, lighting,
+        background, crop. 15–20 images [EST] is the usual sweet spot; "more is often worse,"
+        because 100 photos taken in one sitting bundle "this face" with "this lighting, this
+        outfit, this room" and the model can't tell which part you meant.</p>
+      <div class="box key" style="margin:.6em 0"><span class="box-title">🔑 Caption what you want to VARY, omit what you BAKE IN</span>
+        This is <em>derived</em> from the loss, not a style guide: any feature that appears in
+        the caption $\mathbf{c}$ gets attributed to those words, and the model learns to draw it
+        only when asked. Any feature that's <em>absent</em> from every caption has nowhere to go
+        but the trigger token / the weights themselves. So: training a <em>subject</em> — describe
+        the context, omit the subject. Training a <em>style</em> — describe the content, omit the
+        style (this is exactly how "triggerless" style LoRAs work: the style word never appears
+        in a single caption, so it has no home except the adapter weights).
+      </div>
+      <p><b>Bucketing</b> is a batching constraint, not a quality knob: group images by aspect
+        ratio so every batch has a constant pixel count → constant latent token count → constant
+        step time. Dimensions divisible by 64 come from the pipeline's own compounded
+        downsampling: $f{=}8$ (VAE) $\times\ 2$ (patchify) $\times\ 4 = 64$. "Ten minutes reading
+        your own captions beats a week of hyperparameter search."</p>
+    </div></details>
+
+    <!-- ============================ EVALUATION ============================ -->
+    <h2>Evaluating a LoRA — a protocol, not a vibe</h2>
+
+    <div class="box warn"><span class="box-title">⚠️ The loss curve is nearly useless</span>
+      Diffusion training loss is dominated by the <em>random $t$ draw</em> (p.55) — a lucky
+      batch of high-$t$ steps looks like a plateau, a batch near $t\approx500$ looks like a
+      spike, and the curve stays flat-with-huge-variance whether the model is learning
+      cleanly or quietly memorizing your 20 photos. Watching it converge tells you almost
+      nothing.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The protocol</span>
+      <ul>
+        <li><b>Fixed prompt grid, fixed seeds, every 250 steps</b> → a contact sheet you can
+          flip through like a flipbook.</li>
+        <li><b>The Mars probe:</b> "sks man as an astronaut on Mars, full body" — an
+          out-of-distribution prompt that tests whether the concept generalizes or only
+          reproduces training poses.</li>
+        <li><b>The drift control:</b> "a photo of a man", no trigger — did the concept leak
+          into the general class (the DreamBooth diagnostic above, reused here as a protocol
+          step).</li>
+        <li><b>A strength sweep:</b> a healthy LoRA should be usable around
+          <code>strength_model = 1.0</code> without artifacts; if it only looks right at 0.6,
+          something's off.</li>
+        <li><b>ArcFace IdentitySim</b> for faces specifically: &gt;0.6 good, &gt;0.4
+          recognizable [EST].</li>
+        <li><b>Your eyes</b> are the actual metric here — the protocol's job is to turn "the
+          vibe" into a repeatable procedure, not to replace judgment with a number.</li>
+      </ul>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: six overfitting signs, and why FID/CLIP-score don't save you</summary><div>
+      <ul>
+        <li><b>Background bleed</b> (the training backdrop shows up uninvited) → caption the
+          background so it isn't "constant" anymore.</li>
+        <li><b>Pose lock</b> (every output copies a training pose) → add pose variety to the
+          dataset.</li>
+        <li><b>Adherence collapse</b> (the prompt stops mattering) → over-trained; back off
+          steps or LR.</li>
+        <li><b>Contrast burn</b> (blown highlights/shadows) → classic over-training artifact,
+          same family as CFG-frying.</li>
+        <li><b>Memorization</b> (outputs are near-duplicates of specific training photos) →
+          rank too high for the dataset size, or too many steps.</li>
+      </ul>
+      <p>FID and CLIP-score are worth naming and distrusting: FID assumes a Gaussian feature
+        distribution that real image sets don't have, it's badly biased at small $N$ (exactly
+        your 20-image regime), and both scores are gameable by simply cranking CFG higher —
+        "the judge and the defendant share a brain" (both are built from the same class of
+        vision-language embeddings the generator was steered toward). Use them as a coarse
+        sanity check, never as the deciding number.</p>
+    </div></details>
+
+    <!-- ============================ TOOLING HANDOFF ============================ -->
+    <h2>The tooling handoff</h2>
+
+    <p>Train in <b>ai-toolkit</b> or <b>kohya_ss</b> → output is a <code>.safetensors</code>
+      LoRA → drop it in <code>~/ComfyUI/models/loras/</code> → load with
+      <code>LoraLoader</code>. Here's the annotated bottom of a real <code>config.toml</code> —
+      every line traces to a page you've already read:</p>
+
+    <div class="codeblock" data-lang="toml">
+      <div class="codeblock-head"><span class="lang-tag">TOML</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">[network]</span></span>
+<span class="line">network_dim = <span class="tok-num">16</span>              <span class="tok-com"># r — dataset info content, this page</span></span>
+<span class="line">network_alpha = <span class="tok-num">16</span>            <span class="tok-com"># NOT r/2 — the halved-effect trap, this page</span></span>
+<span class="line"><span class="tok-kw">[optimizer]</span></span>
+<span class="line">learning_rate = <span class="tok-num">1e-4</span>          <span class="tok-com"># diffusion LoRA — NOT the 1e-6 full-FT figure, this page</span></span>
+<span class="line"><span class="tok-kw">[scheduler]</span></span>
+<span class="line">timestep_sampling = <span class="tok-str">"flux_shift"</span>   <span class="tok-com"># logit-normal + shift — p.57</span></span>
+<span class="line">model_prediction_type = <span class="tok-str">"raw"</span>       <span class="tok-com"># which coordinate the net reports — p.55 / p.57</span></span>
+<span class="line">guidance_scale = <span class="tok-num">1.0</span>              <span class="tok-com"># the distillation gotcha — p.61</span></span>
+<span class="line">discrete_flow_shift = <span class="tok-num">3.0</span>        <span class="tok-com"># his own FLUX.2-dev scheduler value — p.57</span></span></code></pre>
+    </div>
+
+    <p>That config file <em>is</em> the course, condensed to eight lines.</p>
+
+    <!-- ============================ DEMO 1: RANK SLIDER / SVD ============================ -->
+    <h2>Demo — the rank slider: LoRA's hypothesis, verified on a picture</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      The trunk's SVD/rank page made the case in the abstract. Here it is on a real image: a
+      real singular-value decomposition, computed live in your browser (power iteration on
+      $A^\top A$, ~40 components, deflated one at a time — open the console, it's really
+      running). Drag $r$ and watch the reconstruction, the residual, and the scree plot all
+      move together.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Rank-$r$ reconstruction $\sum_{i\le r}\sigma_i\,u_i v_i^\top$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="filmwrap"><canvas id="d-svd-img" height="160"></canvas></div>
+        <canvas id="d-svd-scree" height="180"></canvas>
+        <div class="controls" id="d-svd-ctrls"></div>
+        <div class="readout" id="d-svd-out">Computing the SVD…</div>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 2: MEMORY LEDGER ============================ -->
+    <h2>Demo — where the memory goes</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Pick FLUX.1-dev + full FT — the bar leaps to <b>183.5 GiB</b>, 61.8 GiB past
+      your measured <b>121.6875 GiB</b> ceiling. Switch to LoRA $r{=}16$: the base-weight block
+      (≈22 GiB) stays essentially the same size — it's just "trainable" instead of "frozen"
+      now — while the optimizer segment collapses from ≈134 GiB to under a gigabyte, and the
+      total falls to <b>27.5 GiB</b>. Then pick FLUX.2-dev + LoRA and watch it come back
+      close to the edge — <b>117.7 GiB</b>, barely fitting. Toggle "precompute text
+      embeddings": the encoder segment (his 24B Mistral-3 text encoder, resident in bf16
+      whenever it isn't precomputed) drops out by exactly <b>48 GB</b>, taking the total to
+      <b>73.0 GiB</b> — from a razor-thin 1.0× headroom to a comfortable 1.7×, for one
+      checkbox.
+    </div>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">Memory ledger vs. his measured ceiling <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-mem-bar" height="150"></canvas>
+        <div class="radio-row" id="d-mem-model">
+          <span class="grp-label">model:</span>
+          <label><input type="radio" name="mem-model" value="sd15"> SD1.5</label>
+          <label><input type="radio" name="mem-model" value="sdxl"> SDXL</label>
+          <label><input type="radio" name="mem-model" value="flux1" checked> FLUX.1-dev</label>
+          <label><input type="radio" name="mem-model" value="flux2"> FLUX.2-dev</label>
+        </div>
+        <div class="radio-row" id="d-mem-method">
+          <span class="grp-label">method:</span>
+          <label><input type="radio" name="mem-method" value="full"> full FT</label>
+          <label><input type="radio" name="mem-method" value="lora16" checked> LoRA r=16</label>
+          <label><input type="radio" name="mem-method" value="lora64"> LoRA r=64</label>
+          <label><input type="radio" name="mem-method" value="qlora"> QLoRA-4bit</label>
+        </div>
+        <div class="radio-row" id="d-mem-opt">
+          <span class="grp-label">optimizer:</span>
+          <label><input type="radio" name="mem-opt" value="mixed" checked> AdamW mixed (fp32 master+m+v, k_O=12)</label>
+          <label><input type="radio" name="mem-opt" value="fp32mv"> AdamW fp32 m,v only, no master (k_O=8)</label>
+          <label><input type="radio" name="mem-opt" value="bit8"> AdamW 8-bit (k_O≈2)</label>
+        </div>
+        <div class="toggle-row">
+          <label><input type="checkbox" id="d-mem-ckpt"> gradient checkpointing</label>
+          <label><input type="checkbox" id="d-mem-preemb"> precompute text embeddings (FLUX.2-dev)</label>
+          <label><input type="checkbox" id="d-mem-prelat"> precompute VAE latents</label>
+        </div>
+        <div class="readout" id="d-mem-out"></div>
+        <p class="est-note">Model sizes: FLUX.1-dev 12B and FLUX.2-dev 32B are [VP]
+          (<code>constants.md</code> §9.6). SD1.5 (≈0.86B UNet) and SDXL (≈2.6B UNet) are
+          widely-cited public figures <b>[EST]</b> — not frozen in <code>constants.md</code> —
+          shown for contrast only. LoRA trainable-fraction (0.25% of P at $r{=}16$, scaled
+          linearly with $r$) is calibrated to the FLUX.1-dev attn-only figure above and
+          carried [EST] to the other three models. The default optimizer (AdamW mixed,
+          $k_O{=}12$) reproduces the <b>196 GB / 520 GB</b> full-FT figures above at their
+          default settings; switch to "fp32 m,v only" ($k_O{=}8$) to reproduce the
+          diffusion-specific <b>29–31 GB</b> LoRA figure and the <b>96 GB → 0.24 GB, ≈400×</b>
+          optimizer-only comparison verbatim — both are real, named conventions (full FT
+          conventionally keeps an fp32 master copy; LoRA training commonly skips it since the
+          adapter is tiny), not a contradiction.</p>
+      </div>
+    </div>
+
+    <!-- ============================ DEMO 3: FOUR PLACES ============================ -->
+    <h2>Demo — the four places, one pipeline</h2>
+
+    <div class="demo track-diffusion">
+      <div class="demo-head">What each method actually touches <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-four" height="230"></canvas>
+        <div class="radio-row" id="d-four-method">
+          <span class="grp-label">method:</span>
+          <label><input type="radio" name="four-method" value="lora" checked> LoRA</label>
+          <label><input type="radio" name="four-method" value="ti"> Textual inversion</label>
+          <label><input type="radio" name="four-method" value="controlnet"> ControlNet</label>
+          <label><input type="radio" name="four-method" value="ipadapter"> IP-Adapter</label>
+          <label><input type="radio" name="four-method" value="full"> Full FT</label>
+        </div>
+        <div class="readout" id="d-four-out"></div>
+      </div>
+    </div>
+
+    <p>LoRA and full FT light up $\theta$ — the denoiser itself changed. Textual inversion
+      lights exactly one token inside $\mathbf{c}$ — the denoiser is untouched. ControlNet and
+      IP-Adapter light up $\mathbf{c}$'s pipeline (a new input arrives) while $\theta$ stays
+      grey. <b>Two of these five change the model; three change the message it's shown.</b></p>
+
+    <!-- ============================ CODE ARTIFACTS ============================ -->
+    <h2>Code artifacts</h2>
+
+    <div class="box try"><span class="box-title">Try it — <code>code/lora_from_scratch.py</code> (manifest D10)</span>
+      <code>LoRALinear</code> in ~30 lines, no <code>peft</code>, wrapping a real FLUX.2
+      attention module. Prints <code>9,437,184</code> base vs. LoRA's <code>98,304</code> =
+      <b>1.04%</b>; asserts bit-identical output at step 0 ($B{=}0$); then swaps in
+      <code>peft</code> and reproduces the same numbers. The diffusion-side twin of
+      <code>05_lora_from_scratch.py</code> from p.40 — same equation, different host.
+      <em>(~1 min.)</em>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it — <code>code/train_lora_flux.py</code> (manifest D11, the main artifact)</span>
+      DreamBooth-LoRA on <b>20 of your own images</b> against FLUX.1-dev (or FP8 FLUX.2-dev):
+      precomputes text embeddings and latents to disk (prints GB saved), bf16, gradient
+      checkpointing, AdamW8bit, <code>guidance_scale=1.0</code>, logit-normal timestep
+      sampling. Prints the step-0 memory breakdown matching the demo above, and saves a
+      ComfyUI-compatible <code>.safetensors</code> straight into your
+      <code>models/loras/</code>. "ComfyUI's LoRA trainer node, unwrapped."
+      <em>(~20–40 min.)</em>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it — <code>code/caption_ab.py</code> (manifest D17, the experiment nobody ships)</span>
+      Trains <b>two</b> SD1.5 LoRAs on the identical 20 images — Strategy A (detailed
+      captions) vs. Strategy B (bare trigger token) — and runs the Mars-probe test on both.
+      You <em>measure</em> the caption-what-you-vary rule instead of taking it on faith.
+      Label the outcome [EST]/[MEA] — a real ablation, not a frozen claim. <em>(~20–40 min.)</em>
+    </div>
+
+    <p>Named but not detailed here — small, single-purpose scripts: <code>textual_inversion.py</code>
+      (trains the one 768-float vector above, prints <code>Trainable parameters: 768</code>),
+      <code>eval_lora.py</code> (runs the evaluation protocol → a contact sheet), and
+      <code>comfy_export.py</code> (the last step of the loop, into <code>models/loras/</code>).</p>
+
+    <!-- milestone: page 62 of 65 ≈ 95% — the diffusion track's closing checkpoint -->
+    <div class="milestone" data-progress="95">
+      <span class="milestone-flag">Milestone</span>
+      Both tracks are done. You now own the full adaptation toolkit twice over — LoRA, rank,
+      the memory ledger, the taxonomy — once for language, once for pixels, and you've seen
+      they're the same equation on two different bodies.
+      <span class="milestone-pct">95%</span> of the course.
+    </div>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-62"></div>
+
+    <p class="xref" style="margin-top:2em">← p.40/41 (the trunk's LoRA math and number formats,
+      re-instantiated here, not re-derived), p.53 (VAE, 84M params, a rounding error against
+      the frozen 24 GB base), p.55 (this is the loss a diffusion LoRA minimizes), p.57
+      (<code>discrete_flow_shift</code>, <code>timestep_sampling</code>), p.58/59
+      (<code>to_q/k/v/out</code>, the attach points), p.60 (the memory ledger this page
+      extends), p.61 (<code>guidance_scale=1.0</code>, the <code>strength</code>/CFG-frying
+      analogy). → the capstone (pages 63–65): FLUX.2's own text encoder is a 40-layer GQA
+      Mistral-3 — every component the LLM track taught you, staring back at you from your own
+      disk.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- shared: paint a smooth synthetic scene (same family as p.54's) so the SVD
+     demo has real, spatially-correlated structure — a photograph without needing
+     to ship a JPEG through a static, offline, file:// page. ---- */
+  function paintScene(ctx, N) {
+    const g = ctx.createLinearGradient(0, 0, 0, N);
+    g.addColorStop(0, "#264a7a"); g.addColorStop(1, "#cddcef");
+    ctx.fillStyle = g; ctx.fillRect(0, 0, N, N);
+    ctx.fillStyle = "#f2c94c"; ctx.beginPath();
+    ctx.arc(N * 0.7, N * 0.24, N * 0.1, 0, 2 * Math.PI); ctx.fill();
+    ctx.fillStyle = "#31543a"; ctx.beginPath();
+    ctx.moveTo(0, N); ctx.lineTo(N * 0.4, N * 0.42); ctx.lineTo(N * 0.82, N); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = "#4a7a52"; ctx.beginPath();
+    ctx.moveTo(N * 0.46, N); ctx.lineTo(N * 0.76, N * 0.58); ctx.lineTo(N, N); ctx.closePath(); ctx.fill();
+    // a soft radial vignette so the low-frequency content dominates, matching the
+    // "real photos are approximately low-rank" story the demo makes.
+    const rg = ctx.createRadialGradient(N * 0.5, N * 0.5, N * 0.1, N * 0.5, N * 0.5, N * 0.75);
+    rg.addColorStop(0, "rgba(0,0,0,0)"); rg.addColorStop(1, "rgba(0,0,0,0.18)");
+    ctx.fillStyle = rg; ctx.fillRect(0, 0, N, N);
+  }
+
+  /* ---- DEMO 1: real power-iteration SVD, computed live, then a live rank-r
+     reconstruction driven by a slider. The decomposition (A^T A, deflated one
+     component at a time) is the one part of this page's math that would be too
+     slow to redo on every slider tick, so it runs ONCE at page load; the
+     reconstruction sum_{i<=r} sigma_i u_i v_i^T that the reader actually watches
+     move is recomputed from scratch on every drag — real math, live. ---- */
+  (function () {
+    const N = 128;                 // image side; keeps the O(N^3) SVD build fast enough for a slider page
+    const K = 40;                  // singular components extracted
+    const imgCanvas = document.getElementById("d-svd-img");
+    const screeCanvas = document.getElementById("d-svd-scree");
+    const ctrlsHost = document.getElementById("d-svd-ctrls");
+    const out = document.getElementById("d-svd-out");
+
+    const scene = document.createElement("canvas");
+    scene.width = N; scene.height = N;
+    const sctx = scene.getContext("2d");
+    paintScene(sctx, N);
+    const px = sctx.getImageData(0, 0, N, N).data;
+
+    // grayscale matrix A, row-major, values in [0,1]
+    const A = new Float64Array(N * N);
+    for (let p = 0; p < N * N; p++) {
+      A[p] = (0.299 * px[p * 4] + 0.587 * px[p * 4 + 1] + 0.114 * px[p * 4 + 2]) / 255;
+    }
+    const at = (i, j) => A[i * N + j];
+
+    // C = A^T A  (N x N), symmetric PSD — eigen-decomposition of C gives the right
+    // singular vectors V and squared singular values.
+    function computeSVD() {
+      const C = new Float64Array(N * N);
+      for (let i = 0; i < N; i++) {
+        for (let j = i; j < N; j++) {
+          let s = 0;
+          for (let k = 0; k < N; k++) s += at(k, i) * at(k, j);
+          C[i * N + j] = s; C[j * N + i] = s;
+        }
+      }
+      const V = [], sigmas = [], U = [];
+      const rng = new NN.RNG(1729);
+      for (let comp = 0; comp < K; comp++) {
+        let v = new Float64Array(N);
+        for (let i = 0; i < N; i++) v[i] = rng.normal(0, 1);
+        // power iteration on the deflated C
+        for (let it = 0; it < 55; it++) {
+          const nv = new Float64Array(N);
+          for (let i = 0; i < N; i++) {
+            let s = 0;
+            for (let j = 0; j < N; j++) s += C[i * N + j] * v[j];
+            nv[i] = s;
+          }
+          let norm = 0; for (let i = 0; i < N; i++) norm += nv[i] * nv[i];
+          norm = Math.sqrt(norm) || 1;
+          for (let i = 0; i < N; i++) v[i] = nv[i] / norm;
+        }
+        // Rayleigh quotient -> eigenvalue of C -> singular value of A
+        let lambda = 0;
+        {
+          const Cv = new Float64Array(N);
+          for (let i = 0; i < N; i++) { let s = 0; for (let j = 0; j < N; j++) s += C[i * N + j] * v[j]; Cv[i] = s; }
+          for (let i = 0; i < N; i++) lambda += v[i] * Cv[i];
+        }
+        lambda = Math.max(lambda, 0);
+        const sigma = Math.sqrt(lambda);
+        // deflate: C -= lambda * v v^T
+        for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) C[i * N + j] -= lambda * v[i] * v[j];
+        // u_i = A v_i / sigma_i
+        const u = new Float64Array(N);
+        if (sigma > 1e-9) {
+          for (let i = 0; i < N; i++) { let s = 0; for (let j = 0; j < N; j++) s += at(i, j) * v[j]; u[i] = s / sigma; }
+        }
+        V.push(v); U.push(u); sigmas.push(sigma);
+      }
+      return { U, sigmas, V };
+    }
+
+    const { U, sigmas, V } = computeSVD();
+
+    // Frobenius norm of A, for relative-error readouts.
+    let frobA = 0; for (let p = 0; p < N * N; p++) frobA += A[p] * A[p]; frobA = Math.sqrt(frobA);
+
+    function reconstruct(r) {
+      const R = new Float64Array(N * N);
+      for (let c = 0; c < r; c++) {
+        const s = sigmas[c], u = U[c], v = V[c];
+        for (let i = 0; i < N; i++) {
+          const su = s * u[i];
+          for (let j = 0; j < N; j++) R[i * N + j] += su * v[j];
+        }
+      }
+      return R;
+    }
+
+    const tile = document.createElement("canvas"); tile.width = N; tile.height = N;
+    const resTile = document.createElement("canvas"); resTile.width = N; resTile.height = N;
+
+    function drawGray(fg, x, y, side, arr, label, clamp01) {
+      const t = tile; t.width = N; t.height = N;
+      const tctx = t.getContext("2d");
+      const im = tctx.createImageData(N, N), d = im.data;
+      for (let p = 0; p < N * N; p++) {
+        let v = arr[p]; if (clamp01) v = Math.max(0, Math.min(1, v));
+        const g8 = Math.round(v * 255);
+        d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = g8; d[p * 4 + 3] = 255;
+      }
+      tctx.putImageData(im, 0, 0);
+      fg.imageSmoothingEnabled = true;
+      fg.drawImage(t, x, y, side, side);
+      fg.strokeStyle = cssVar("--border", "#3b4a6b"); fg.strokeRect(x, y, side, side);
+      fg.fillStyle = cssVar("--text-dim", "#8391ab"); fg.font = "12px system-ui"; fg.textAlign = "left";
+      fg.fillText(label, x, y - 6);
+    }
+
+    function drawResidual(fg, x, y, side, orig, recon, gain) {
+      const t = resTile; t.width = N; t.height = N;
+      const tctx = t.getContext("2d");
+      const im = tctx.createImageData(N, N), d = im.data;
+      for (let p = 0; p < N * N; p++) {
+        const g8 = Math.round(Math.max(0, Math.min(1, 0.5 + gain * (orig[p] - recon[p]))) * 255);
+        d[p * 4] = d[p * 4 + 1] = d[p * 4 + 2] = g8; d[p * 4 + 3] = 255;
+      }
+      tctx.putImageData(im, 0, 0);
+      fg.imageSmoothingEnabled = true;
+      fg.drawImage(t, x, y, side, side);
+      fg.strokeStyle = cssVar("--border", "#3b4a6b"); fg.strokeRect(x, y, side, side);
+      fg.fillStyle = cssVar("--text-dim", "#8391ab"); fg.font = "12px system-ui"; fg.textAlign = "left";
+      fg.fillText("residual ×4 gain", x, y - 6);
+    }
+
+    const rCtrl = makeCtrl(ctrlsHost, { label: "rank r", min: 1, max: K, step: 1, value: 8, fmt: v => v.toFixed(0) });
+
+    function draw() {
+      const r = Math.round(rCtrl.get());
+      const R = reconstruct(r);
+
+      const dpr = window.devicePixelRatio || 1;
+      const side = 140, gap = 22, H = side + 24, W = side * 3 + gap * 4;
+      imgCanvas.width = Math.round(W * dpr); imgCanvas.height = Math.round(H * dpr); imgCanvas.style.height = H + "px";
+      const fg = imgCanvas.getContext("2d"); fg.setTransform(dpr, 0, 0, dpr, 0, 0); fg.clearRect(0, 0, W, H);
+      drawGray(fg, gap, 20, side, A, "original", false);
+      drawGray(fg, gap * 2 + side, 20, side, R, `rank r=${r} reconstruction`, true);
+      drawResidual(fg, gap * 3 + side * 2, 20, side, A, R, 4);
+
+      // scree plot: log-y singular values with a vline at r
+      let errNum = 0;
+      for (let p = 0; p < N * N; p++) { const e = A[p] - R[p]; errNum += e * e; }
+      const relErr = Math.sqrt(errNum) / frobA;
+
+      const sp = new Plot(screeCanvas, { xmin: 1, xmax: K, ymin: Math.max(1e-3, Math.min(...sigmas) * 0.5), ymax: sigmas[0] * 1.3, ylog: true, xlabel: "component i", ylabel: "σ_i" });
+      sp.clear(); sp.grid();
+      const xs = sigmas.map((_, i) => i + 1);
+      sp.trace(xs, sigmas, cssVar("--accent", "#b48cff"), 2.5);
+      sp.vline(r, cssVar("--track-diffusion", "#ff9466"), [4, 4]);
+
+      const storedParams = r * (N + N + 1);
+      const fullParams = N * N;
+      const compression = fullParams / storedParams;
+
+      out.innerHTML = `stored: $r(N{+}N{+}1) = ${r}\\times${2 * N + 1} = ${storedParams.toLocaleString()}$ ` +
+        `vs. full $N^2 = ${fullParams.toLocaleString()}$ ` +
+        `→ <b>${compression.toFixed(1)}×</b> compression · relative Frobenius error ` +
+        `<b>${(relErr * 100).toFixed(1)}%</b>`;
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    rCtrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO 2: memory ledger, stacked bar (hand-drawn — Plot has no bar primitive) ---- */
+  (function () {
+    const canvas = document.getElementById("d-mem-bar");
+    const out = document.getElementById("d-mem-out");
+    const GiB = 1024 ** 3;
+    const CEILING_GIB = 121.6875;
+
+    const MODELS = {
+      sd15:  { P: 0.86e9, label: "SD1.5",      est: true },
+      sdxl:  { P: 2.6e9,  label: "SDXL",       est: true },
+      flux1: { P: 12e9,   label: "FLUX.1-dev", est: false },
+      flux2: { P: 32e9,   label: "FLUX.2-dev", est: false },
+    };
+    // constants.md §2.1: AdamW mixed-precision (fp32 master+m+v) = 12; AdamW fp32 m,v only = 8; AdamW 8-bit ≈ 2.
+    // Default (mixed, k_O=12) reproduces the "196 GB / 520 GB" full-FT figures above at their default settings;
+    // switching to "fp32 m,v only" (k_O=8) reproduces the diffusion-specific "29-31 GB" / "96 GB → 0.24 GB, ~400×"
+    // LoRA figures verbatim — both are real, named conventions, not a contradiction.
+    const K_O = { mixed: 12, fp32mv: 8, bit8: 2 };
+    const bW_bf16 = 2, bW_nf4 = 0.515869;
+
+    function loraFraction(method) {
+      // calibrated to the FLUX.1-dev attn-only figure: r=16 -> 0.25% of P (constants §9.6)
+      if (method === "lora16" || method === "qlora") return 0.0025;
+      if (method === "lora64") return 0.0025 * 4;         // linear in r
+      return 1.0; // full FT: every param trainable
+    }
+
+    function compute() {
+      const modelKey = document.querySelector('input[name="mem-model"]:checked').value;
+      const method = document.querySelector('input[name="mem-method"]:checked').value;
+      const optKey = document.querySelector('input[name="mem-opt"]:checked').value;
+      const ckpt = document.getElementById("d-mem-ckpt").checked;
+      const preEmb = document.getElementById("d-mem-preemb").checked;
+      const preLat = document.getElementById("d-mem-prelat").checked;
+
+      const m = MODELS[modelKey];
+      const P = m.P;
+      const bW = method === "qlora" ? bW_nf4 : bW_bf16;
+      const frac = loraFraction(method);
+      const Nt = method === "full" ? P : P * frac;
+      const kO = K_O[optKey];
+
+      const frozenB = (method === "full" ? 0 : P) * bW;          // frozen weights: 0 if full FT (all trainable), else the base
+      const trainB = Nt * 2;                                     // trainable weights, bf16
+      const gradB = Nt * 2;                                      // gradients, bf16
+      const optB = Nt * kO;                                      // optimizer state
+      let actGiB = (P / 12e9) * 4.5;                              // [EST] baseline scaled off FLUX.1-dev's ~4-6 GB figure
+      if (ckpt) actGiB *= 0.45;
+
+      let encoderGiB = 0;
+      if (modelKey === "flux2" && !preEmb) encoderGiB = (24e9 * 2) / GiB;   // Mistral-3 24B, bf16, resident
+      let vaeGiB = 0;
+      if (!preLat) vaeGiB = (84e6 * 2) / GiB;                                // p.53's 84.0M-param VAE, bf16, resident
+
+      const segs = [
+        { name: "frozen weights", gib: frozenB / GiB, color: "var(--text-dim)" },
+        { name: "trainable", gib: trainB / GiB, color: "var(--accent)" },
+        { name: "gradients", gib: gradB / GiB, color: "var(--accent2)" },
+        { name: "optimizer", gib: optB / GiB, color: "var(--warn)" },
+        { name: "activations [EST]", gib: actGiB, color: "var(--try)" },
+      ];
+      if (encoderGiB > 0) segs.push({ name: "text encoder (Mistral-3 24B, resident)", gib: encoderGiB, color: "var(--bad)" });
+      if (vaeGiB > 0) segs.push({ name: "VAE encoder (resident)", gib: vaeGiB, color: "var(--deep)" });
+
+      return { segs, total: segs.reduce((a, s) => a + s.gib, 0), m, method, kO };
+    }
+
+    function draw() {
+      const { segs, total, m, method, kO } = compute();
+      const th = vizUtils.themeColors();
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth || 600, H = +canvas.getAttribute("height");
+      canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); canvas.style.height = H + "px";
+      const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+
+      const padL = 16, padR = 16, barY = 44, barH = 42;
+      const maxScale = Math.max(total, CEILING_GIB) * 1.12;
+      const usable = W - padL - padR;
+      const xFor = (gib) => padL + (gib / maxScale) * usable;
+
+      // segments
+      let cx = padL;
+      g.font = "11px " + (th.mono || "monospace");
+      for (const s of segs) {
+        const w = (s.gib / maxScale) * usable;
+        if (w <= 0) continue;
+        // s.color is "var(--x)" — cssVar wants just the "--x" name
+        g.fillStyle = cssVar(s.color.slice(4, -1), "#888");
+        g.fillRect(cx, barY, Math.max(w, 0.5), barH);
+        cx += w;
+      }
+      g.strokeStyle = cssVar("--border", "#3b4a6b"); g.strokeRect(padL, barY, usable, barH);
+
+      // ceiling line
+      const cxLine = xFor(CEILING_GIB);
+      g.save();
+      g.strokeStyle = cssVar("--bad", "#ff6b6b"); g.setLineDash([5, 4]); g.lineWidth = 2;
+      g.beginPath(); g.moveTo(cxLine, barY - 10); g.lineTo(cxLine, barY + barH + 10); g.stroke();
+      g.restore();
+      g.fillStyle = cssVar("--bad", "#ff6b6b"); g.font = "11px system-ui"; g.textAlign = "center";
+      g.fillText("121.6875 GiB (his measured ceiling)", Math.min(Math.max(cxLine, 100), W - 110), barY - 16);
+
+      // legend
+      let ly = barY + barH + 26, lx = padL;
+      g.textAlign = "left"; g.font = "11px system-ui";
+      for (const s of segs) {
+        const c = getComputedStyle(document.documentElement).getPropertyValue(s.color.slice(4, -1)).trim() || "#888";
+        g.fillStyle = c; g.fillRect(lx, ly - 9, 10, 10);
+        g.fillStyle = cssVar("--text-dim", "#8391ab");
+        const label = `${s.name} (${s.gib.toFixed(2)} GiB)`;
+        g.fillText(label, lx + 14, ly);
+        lx += 14 + g.measureText(label).width + 20;
+        if (lx > W - 160) { lx = padL; ly += 18; }
+      }
+
+      const verdict = total > CEILING_GIB
+        ? `<span class="flag-bad">✗ ${total.toFixed(2)} GiB — over his measured ceiling by ${(total - CEILING_GIB).toFixed(2)} GiB</span>`
+        : `<span class="flag-ok">✓ ${total.toFixed(2)} GiB — fits, ${(CEILING_GIB / total).toFixed(1)}× headroom</span>`;
+      out.innerHTML = `${m.label}${m.est ? " [EST size]" : " [VP size]"} · method <b>${method}</b> · optimizer $k_O{=}${kO}$ · ${verdict}`;
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    ["mem-model", "mem-method", "mem-opt"].forEach(name => {
+      document.querySelectorAll(`input[name="${name}"]`).forEach(r => r.addEventListener("change", draw));
+    });
+    ["d-mem-ckpt", "d-mem-preemb", "d-mem-prelat"].forEach(id => document.getElementById(id).addEventListener("change", draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO 3: the four places, one pipeline diagram ---- */
+  (function () {
+    const canvas = document.getElementById("d-four");
+    const out = document.getElementById("d-four-out");
+
+    const BYTES = {
+      lora: { theta: true, c: false, bytes: "≈60 MB (attn-only, r=16, bf16)" },
+      full: { theta: true, c: false, bytes: "24 GB (FLUX.1-dev, bf16)" },
+      ti: { theta: false, c: true, bytes: "3 KB (768 floats)" },
+      controlnet: { theta: false, c: true, bytes: "≈1.4 GB [EST] (new encoder branch)" },
+      ipadapter: { theta: false, c: true, bytes: "new K/V image projections only, tens of MB [EST]" },
+    };
+
+    function draw() {
+      const method = document.querySelector('input[name="four-method"]:checked').value;
+      const info = BYTES[method];
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth || 620, H = +canvas.getAttribute("height");
+      canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr); canvas.style.height = H + "px";
+      const g = canvas.getContext("2d"); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+
+      const good = cssVar("--text-dim", "#8391ab"), hot = cssVar("--bad", "#ff6b6b"),
+            border = cssVar("--border", "#3b4a6b"), text = cssVar("--text", "#e4e0f2");
+      g.font = "12px system-ui"; g.textAlign = "center"; g.textBaseline = "middle";
+
+      function box(x, y, w, h, label, on) {
+        g.fillStyle = on ? "color-mix(in srgb, " + hot + " 22%, transparent)" : cssVar("--bg-panel2", "#1d1829");
+        g.strokeStyle = on ? hot : border; g.lineWidth = on ? 2.5 : 1.5;
+        g.fillRect(x, y, w, h); g.strokeRect(x, y, w, h);
+        g.fillStyle = on ? hot : text;
+        label.split("\n").forEach((ln, i) => g.fillText(ln, x + w / 2, y + h / 2 + (i - (label.split("\n").length - 1) / 2) * 14));
+      }
+      function arrow(x0, y0, x1, y1) {
+        g.strokeStyle = good; g.lineWidth = 1.5; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+        const ang = Math.atan2(y1 - y0, x1 - x0);
+        g.beginPath(); g.moveTo(x1, y1);
+        g.lineTo(x1 - 8 * Math.cos(ang - 0.4), y1 - 8 * Math.sin(ang - 0.4));
+        g.lineTo(x1 - 8 * Math.cos(ang + 0.4), y1 - 8 * Math.sin(ang + 0.4));
+        g.closePath(); g.fillStyle = good; g.fill();
+      }
+
+      // row 1: text -> encoder -> c
+      const y1 = 46, bh = 40;
+      box(20, y1, 90, bh, "prompt", false);
+      arrow(110, y1 + bh / 2, 150, y1 + bh / 2);
+      box(150, y1, 100, bh, method === "ipadapter" ? "encoder\n(+image enc.)" : "encoder", method === "controlnet" || method === "ipadapter");
+      arrow(250, y1 + bh / 2, 290, y1 + bh / 2);
+      box(290, y1, 70, bh, "c", info.c);
+
+      // row 2: x_T -> [theta] -> x_0 -> VAE -> image
+      const y2 = 130;
+      box(20, y2, 70, bh, "x_T (noise)", false);
+      arrow(90, y2 + bh / 2, 130, y2 + bh / 2);
+      box(130, y2, 100, bh, "[θ] denoiser", info.theta);
+      arrow(230, y2 + bh / 2, 270, y2 + bh / 2);
+      box(270, y2, 60, bh, "x_0", false);
+      arrow(330, y2 + bh / 2, 370, y2 + bh / 2);
+      box(370, y2, 60, bh, "VAE", false);
+      arrow(430, y2 + bh / 2, 470, y2 + bh / 2);
+      box(470, y2, 80, bh, "image", false);
+
+      // c feeds into the denoiser
+      g.strokeStyle = info.c ? hot : good; g.lineWidth = info.c ? 2.5 : 1.5;
+      g.beginPath(); g.moveTo(325, y1 + bh); g.lineTo(325, y2 - 4); g.lineTo(180, y2 - 4); g.lineTo(180, y2); g.stroke();
+
+      out.innerHTML = `<b>${method}</b> changes: ${info.bytes} — ` +
+        (info.theta ? "$\\theta$ moves." : "$\\theta$ is bit-identical; the message $\\mathbf{c}$ (or its pipeline) grew.");
+      if (window.renderMathInElement) renderMathInElement(out, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    document.querySelectorAll('input[name="four-method"]').forEach(r => r.addEventListener("change", draw));
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-62", [
+    {
+      q: "A ControlNet trained on 100k+ pose/depth pairs and a LoRA trained on your 20 photos are both called \"custom nodes\" in ComfyUI. Which one actually changed the base model's weights?",
+      opts: ["Both — they're the same kind of object", "The LoRA — the ControlNet leaves the base bit-identical and adds a new input", "The ControlNet — the LoRA only changes the prompt", "Neither — both are inference-time tricks"],
+      a: 1,
+      why: "The test is: after training, is the base model different? LoRA — yes. ControlNet — no, it's bit-identical; you bolted on a new input pipeline. Treating them as the same kind of object is the named category error."
+    },
+    {
+      q: "The learning rate you should use for a diffusion LoRA (not full fine-tune) is on the order of:",
+      num: 1e-4, tol: 3e-5,
+      why: "Diffusion LoRA LR ≈ 1e-4 [EST, constants.md §9.4] — the full-FT/DreamBooth figure of 1e-6–5e-6 is a hundred-fold smaller (the D-09 trap). Using the full-FT rate makes a LoRA train at 1/100th speed and look like it 'isn't learning'."
+    },
+    {
+      q: "LoRA's memory win over full fine-tuning comes primarily from:",
+      opts: ["Smaller activations during the forward/backward pass", "Optimizer state (96 GB → 0.24 GB, ≈400×) — the base weights are still fully resident", "Not needing gradients at all", "A smaller VAE"],
+      a: 1,
+      why: "Frozen base weights (24 GB for FLUX.1-dev) stay resident either way. LoRA shrinks the trainable-param count, which shrinks gradients and — most dramatically — AdamW's optimizer state, ≈400× on this page's numbers. Activations are unchanged (constants.md §2.4) — the named misconception."
+    },
+    {
+      q: "How many trainable parameters does textual inversion add for SD1.5 ($d_c=768$)?",
+      num: 768, tol: 0,
+      why: "One new embedding vector, $v^\\star \\in \\mathbb{R}^{768}$ — 768 floats × 4 B = 3 KB. Everything else in the model is frozen; TI finds an address in a space the model already has."
+    },
+    {
+      q: "Your LoRA trainer defaults to <code>network_alpha = r/2</code>. Left as-is, this:",
+      opts: ["Doubles your LoRA's effective strength", "Halves your LoRA's effective strength — you need ~2× the LR to compensate", "Has no effect; alpha is cosmetic", "Only matters at inference, not training"],
+      a: 1,
+      why: "The effective scale multiplying $BA$ is $\\alpha/r$. Setting $\\alpha = r/2$ makes that $0.5$ instead of $1$ — half the intended update magnitude. It's the single most common 'why isn't my LoRA learning?' cause."
+    },
+    {
+      q: "The caption-what-you-vary rule says you should caption:",
+      opts: ["Everything, as accurately and completely as possible", "What you want the model to be able to VARY at generation time — omit what you're baking in", "Nothing — captions don't matter for LoRA", "Only the trigger word"],
+      a: 1,
+      why: "Derived from the loss, not folklore: any feature present in every caption's words gets attributed to those words; anything absent from every caption has nowhere to go but the weights/trigger. Subject LoRAs describe context and omit the subject; style LoRAs describe content and omit the style."
+    },
+    {
+      q: "During diffusion LoRA training, the loss curve is:",
+      opts: ["A reliable, low-variance signal of learning progress", "Nearly useless — dominated by the random timestep $t$ draw each step — use a fixed prompt-grid contact sheet instead", "Only useful after 10,000 steps", "Identical to the LLM track's cross-entropy curve"],
+      a: 1,
+      why: "The random $t\\sim\\mathcal{U}\\{1,T\\}$ draw (p.55) swamps the signal: a batch of high-$t$ steps looks flat, one near $t\\approx500$ spikes, whether the model is learning cleanly or memorizing. The protocol substitutes a fixed prompt grid at fixed seeds."
+    },
+    {
+      q: "In ComfyUI you set <code>strength_model = 1.4</code> on a LoRA. This is:",
+      opts: ["Always safe — higher strength just means a stronger effect", "Extrapolation past what you trained — the same failure mode as pushing CFG's $w_g$ above what the model was tuned for", "A no-op above 1.0", "Only relevant for ControlNet, not LoRA"],
+      a: 1,
+      why: "$W = W_0 + \\text{strength}\\cdot\\frac{\\alpha}{r}BA$; strength $>1$ pushes past the range the adapter was trained to operate in — the identical over-saturation / 'frying' failure mode as $w_g>1$ CFG (p.61)."
+    }
+  ], "Fine-tuning diffusion — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,612 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>32. Causal Masking: 4096 Signals Per Pass — The LLM Hinge — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The flagship demo is the same fixed 10-token / 8-head attention
+   rig as page 30 (bit-identical seed), now driven by a mask-mode selector
+   instead of a temperature slider — this page's knob is WHAT each row may
+   see, not how sharp the softmax is. A second small demo is a pure-arithmetic
+   "signals strip": S causal cells lit vs ~0.15S MLM cells lit. */
+.att-grid { display: grid; grid-template-columns: 1.35fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 860px) { .att-grid { grid-template-columns: 1fr; } }
+.att-row { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin: 8px 0; }
+.att-row select { background: var(--bg-code); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; padding: 3px 6px; font-family: var(--mono, monospace); }
+.att-row label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: .9rem; cursor: pointer; }
+.att-btn { background: var(--bg-code); color: var(--text); border: 1px solid var(--accent);
+  border-radius: 6px; padding: 4px 10px; cursor: pointer; font-size: .85rem; }
+.att-btn:hover { background: var(--accent); color: #fff; }
+.stat { font-family: var(--mono, monospace); }
+.stat.bad { color: var(--bad, #e06c75); font-weight: 700; }
+.stat.good { color: var(--good, #6cc57a); font-weight: 700; }
+.ribbon { font-family: var(--mono, monospace); font-size: .82rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); }
+.hinge { display: inline-block; font-size: .68rem; padding: 2px 9px; border-radius: 20px;
+  border: 1px solid var(--track-llm); color: var(--track-llm); letter-spacing: .5px;
+  text-transform: uppercase; margin-left: 8px; vertical-align: middle; }
+@media (max-width: 780px) { .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="32-causal-masking.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Causal Masking: 4096 Signals Per Pass <span class="hinge">→ the LLM hinge</span></h1>
+    <p class="subtitle">Page 31 gave the diffusion hinge — where $K,V$ come from. This is the other one: how
+      <em>one</em> sequence, masked by time-order, turns a single forward pass into as many training signals as it
+      has tokens. This is the beat that makes LLM pretraining economically possible.</p>
+
+    <!-- ===================== THREADS ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product]</b> reopened implicitly — the mask is added to the same $QK^\top$ scores page 29 built
+      and page 30 scaled; nothing about the atom changes, only which entries survive the softmax.
+      <b>[THREAD:chain-rule]</b> reopened implicitly — the row-renormalization the mask relies on is page 30's
+      softmax Jacobian, $A_i(1-A_i)$, doing its job on the <em>surviving</em> entries only.
+    </div>
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:memory-budget beat 2]</b>. <em>Same reality check</em> page 28 seeded ("arithmetic intensity is
+      what bandwidth-bound decode costs you"). <em>What is new:</em> causality is not just a training trick — it is
+      the exact reason the KV cache is <em>sound</em> to keep at all. <em>Reopen later:</em> page 37 sizes the cache
+      this page makes legal (144 KiB/token, Qwen3-8B).
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You have one 4,096-token document. Training a next-token LLM on it, how many separate "predict the next
+      token" learning signals do you get from a <b>single</b> forward pass — <b>1</b>, about <b>15% of 4,096</b>,
+      or <b>all 4,096</b>? Commit before you scroll — you have watched LLMs generate token-by-token, and that
+      intuition is about to mislead you.
+    </div>
+    <p>The answer is <b>all 4,096</b> — every one of the sequence's positions yields a valid "predict my successor"
+      loss term from the <em>same</em> matmul, and that number is the whole reason LLM pretraining is affordable.
+      The mechanism that makes it true, and not a cheat, is the causal mask below; the signals counter in the demo
+      lands you on the number itself.</p>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 1 — intuition -->
+    <!-- ============================================================= -->
+    <h2>The blindfold, and what it buys</h2>
+    <p>Train a model to predict the next token, and let it <em>see</em> the next token while it predicts, and it
+      learns the trivial cheat: copy the token sitting one slot to the right. Zero loss, zero understanding. The
+      <b>causal mask</b> is a blindfold that keeps training honest — position $i$ may attend only to itself and its
+      predecessors, $j \le i$, never $j > i$.</p>
+    <p>The non-obvious part isn't the blindfold — it's what the blindfold <em>buys</em>. Because every position is
+      now a legitimate, un-cheatable "predict my successor" problem, <b>one sequence of length $S$ becomes $S$
+      training examples at once</b>, all computed in a single parallel forward pass. That fact is section 3 below,
+      and it is the largest single reason decoder-only pretraining scales the way it does.</p>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 2 — the mask -->
+    <!-- ============================================================= -->
+    <h2>The mask: additive, before softmax</h2>
+    <p>The mask $M$ is $(S,S)$: zero where position $i$ is allowed to look at position $j$, $-\infty$ where it
+      isn't. It is <em>added</em> to the scaled scores, <em>before</em> the softmax:</p>
+    <p>$$M_{ij} = \begin{cases} 0 & j \le i \\ -\infty & j > i \end{cases}
+      \qquad\qquad A = \operatorname{softmax}_{\text{row}}\!\Big(\dfrac{QK^\top}{\sqrt{d_{\text{head}}}} + M\Big).$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$Q,K$</td><td>query / key projections, page 29–30's objects</td><td>$(S, d_{\text{head}})$</td><td>the block's $XW_Q^\top, XW_K^\top$</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head width — the score's std, page 30</td><td>128 (Qwen3-8B)</td><td>config <code>head_dim</code></td></tr>
+        <tr><td>$M$</td><td>additive causal mask — $0$ or $-\infty$, strictly upper-triangular in its $-\infty$ entries</td><td>$(S,S)$</td><td>fixed by position order, not learned</td></tr>
+        <tr><td>$A$</td><td>attention weights — row $i$ has $i{+}1$ live columns, sums to 1</td><td>$(S,S)$</td><td>the row-softmax of the masked scores</td></tr>
+      </tbody>
+    </table>
+
+    <p>In practice $-\infty$ is <code>torch.finfo(dtype).min</code> — about $-3.39\times10^{38}$ in <code>bfloat16</code>
+      — so $\exp(\cdot)$ underflows the masked entries to exactly $0$ before the row is renormalized. Row $i$ ends
+      up with $i{+}1$ live columns out of $S$: row $0$ sees only itself, row $S{-}1$ sees everything.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Watch out — additive, not multiplicative (the real bug)</span>
+      <p>Additive-before-softmax <em>renormalizes the survivors</em> — every row still sums to exactly 1, because
+        that renormalization is softmax's whole job. Multiplying the attention weights by a $0/1$ mask
+        <em>after</em> the softmax skips that renormalization, and the row simply loses mass.</p>
+      <p>Take the course's frozen three-logit softmax from page 30, $z=[2.0,1.0,0.1] \Rightarrow
+        \hat y = [\mathbf{0.659001},\,0.242433,\,0.098566]$. Imagine that's row 0 of a 3-token sequence, causally
+        masked so row 0 may see only column 0:</p>
+      <ul style="margin:6px 0 0">
+        <li><b>Correct (additive, before softmax):</b> only logit 0 survives the mask; softmax of a single value
+          renormalizes to $[\mathbf{1.0},\,0,\,0]$ — row sum $= 1.0$.</li>
+        <li><b>Buggy (multiplicative, after softmax):</b> zero out columns 1,2 of the already-computed
+          $\hat y$: $[\mathbf{0.659001},\,0,\,0]$ — row sum $= 0.659001 \ne 1$. The kept weight is whatever the
+          <em>unmasked</em> softmax happened to give column 0, not the honest "this is the only thing I can see."</li>
+      </ul>
+      <p style="margin:6px 0 0">Multiply the demo below into buggy mode and watch row 0's kept mass sit near
+        $1/S$ instead of $1$ — the earlier the row, the worse the shrinkage, because early rows have the fewest
+        live columns to begin with.</p>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 3 — the efficiency insight -->
+    <!-- ============================================================= -->
+    <h2>THE efficiency insight — $S$ signals per pass</h2>
+    <p>Turn the mask's consequence into an equation. Because position $i$'s output depends only on $x_{\le i}$, a
+      single forward pass over a length-$S$ sequence yields <b>$S$ simultaneous next-token predictions</b>, each a
+      valid, un-cheatable loss term:</p>
+    <p>$$J = -\frac{1}{S}\sum_{i=1}^{S} \log p_\theta\big(x_{i+1} \mid x_{\le i}\big)$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$J$</td><td>batch-averaged loss for this sequence</td><td>scalar, nats</td><td>notation §2 — $J$ is always batch-averaged</td></tr>
+        <tr><td>$S$</td><td>sequence length</td><td>up to 40,960 (Qwen3-8B)</td><td>the training slice</td></tr>
+        <tr><td>$x_{i+1}$</td><td>the true next token at position $i{+}1$</td><td>integer in $[0,V)$</td><td>the data, shifted by one</td></tr>
+        <tr><td>$x_{\le i}$</td><td>the prefix up to and including position $i$</td><td>—</td><td>what the mask permits position $i$ to see</td></tr>
+        <tr><td>$p_\theta(\cdot\mid x_{\le i})$</td><td>the model's softmax over the vocab, computed <em>at</em> position $i$</td><td>$(V,)$</td><td>the block stack + LM head, causally masked</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      A 4,096-token training slice gives <b>$S = \mathbf{4096}$ training signals from one pass</b> [DER — direct
+      consequence of the mask, not measured]. Contrast masked-language modeling (BERT), which masks $\approx 15\%$
+      of tokens and gets $\approx 0.15$ signals per token against causal LM's $1.0$: a
+      <b>$\approx\mathbf{6.7\times}$ data-efficiency gap per forward FLOP</b> ($1/0.15 = 6.\overline{6}$)
+      [$M$ for the $15\%$ figure — a stated hyperparameter, not this page's measurement]. This is the largest single
+      piece of the honest "why decoder-only won" story (page 35).
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 4 — the generation payoff -->
+    <!-- ============================================================= -->
+    <h2>The generation payoff — why causality <em>is</em> the KV cache</h2>
+    <p>Turn the mask around and read it as a promise about the <em>past</em>, not just a restriction on the
+      present. Position $i$ depends only on $j \le i$ — so once position $j$'s key and value are computed, no later
+      token's arrival can ever change them. That is not an optimization; it's a fact the mask guarantees.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea — the KV cache is a consequence, not a bolt-on</span>
+      Because earlier positions' $K,V$ are frozen by the mask, you compute each position's $K,V$ <b>once</b> and
+      <b>cache</b> it. Every new generated token is a single query against the cached $K,V$ — not a full
+      recompute of the sequence. <b>Caching is only sound because causality guarantees the past can't change.</b>
+      Page 37 sizes exactly what this buys: <b>144 KiB/token</b> for Qwen3-8B's GQA cache (constants.md §4).
+    </div>
+    <p>The honest flip side: at <em>inference</em> the transformer goes sequential again, one new token at a time,
+      and inherits RNN economics — bandwidth-bound decode, page 28's irony, quantified on the roofline (page 43).
+      Training parallelism and generation's cache are the <em>same</em> fact, read in two directions.</p>
+
+    <!-- ============================================================= -->
+    <!-- SECTION 5 — parallel training vs sequential inference -->
+    <!-- ============================================================= -->
+    <h2>Parallel training vs sequential inference — the distinction to nail</h2>
+    <p>At <b>training</b>, all $S$ positions are computed in the <em>same matmul</em>. The mask constrains
+      <em>what each position may see</em>; it says nothing about <em>when</em> that position is computed — they are
+      all computed together, right now. That is the exact property that separates a transformer from an RNN
+      (page 28): the RNN's sequential dependency lives in the <em>computation itself</em>; the transformer's
+      causality lives only in <em>visibility</em>.</p>
+    <p>Only at <b>decode</b> — generating one new token at a time, each depending on the last — does it become
+      sequential. That's not the mask's doing; it's the nature of autoregressive generation. The mask is what makes
+      the sequential part <em>cheap</em> once you're in it (the cache above); it is not what causes the
+      sequentiality.</p>
+
+    <!-- ============================================================= -->
+    <!-- MISCONCEPTIONS -->
+    <!-- ============================================================= -->
+    <h2>Five traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ Watch out</span>
+      <p><b>(a) "Causal masking makes the model slower — it's a limitation."</b> The opposite: it is the
+        <em>enabling trick</em> for parallel training. Without it you'd need RNN economics at <em>training</em>
+        time too. Fix with the 4,096-signals-per-pass fact above.</p>
+      <p><b>(b) "The mask is applied to the output — to $A$, after softmax."</b> It's applied to the logits,
+        <em>before</em> softmax, additively. Apply it after and rows stop summing to 1 (the worked box above).</p>
+      <p><b>(c) "Causal = the model reads left-to-right, one token at a time."</b> Only at <em>inference</em>. At
+        training, all positions are computed in one matmul; the mask limits visibility, not timing.</p>
+      <p><b>(d) "The KV cache is a separate optimization you bolt on later."</b> It is a direct <em>consequence</em>
+        of causality — past $K,V$ are frozen by the mask, which is the only reason caching is correct at all.</p>
+      <p><b>(e) "Diffusion U-Nets are causal too."</b> No — image self-attention is bidirectional and unmasked
+        (page 31's fork). Causality is a property of <em>time-ordered generation</em>, not of attention in
+        general.</p>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- FLAGSHIP DEMO 1 — the causal-mask toggle -->
+    <!-- ============================================================= -->
+    <h2>The causal-mask toggle</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      The same fixed 10-token sentence and seeded per-head $W_Q,W_K,W_V$ as page 30 — a real
+      $\operatorname{softmax}(QK^\top/\sqrt{d_{\text{head}}}+M)V$, recomputed live. Switch mask mode: watch the
+      upper triangle black out under the correct mask, and watch row sums quietly break under the buggy one.
+    </div>
+    <div class="demo">
+      <div class="demo-head">softmax(QKᵀ/√d_head + M)V · 8 heads · 3 mask modes <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="att-grid">
+          <div>
+            <canvas id="d-heat" height="330"></canvas>
+          </div>
+          <div>
+            <p style="margin:0 0 6px"><b>Row you're inspecting</b> — its weights over the 10 keys:</p>
+            <canvas id="d-row" height="150"></canvas>
+          </div>
+        </div>
+        <div class="att-row">
+          <label class="chk">Head:
+            <select id="d-head"></select>
+          </label>
+          <label class="chk">Inspect row (query):
+            <select id="d-row-sel"></select>
+          </label>
+          <label class="chk">Mask mode:
+            <select id="d-mode">
+              <option value="none">No mask (bidirectional)</option>
+              <option value="correct" selected>Causal — additive, before softmax (correct)</option>
+              <option value="buggy">Causal — multiplicative, after softmax (the bug)</option>
+            </select>
+          </label>
+        </div>
+        <div class="readout" id="d-heat-out"></div>
+      </div>
+    </div>
+
+    <p>Three things to make happen, in order:</p>
+    <ol>
+      <li>Start on <b>row 0 ("The")</b>, correct mode. The heatmap shows a single lit cell — row 0's entropy is
+        <b>exactly 0</b>, effective keys <b>1.00</b>: it can only see itself. Step the row selector up and watch
+        the live column count grow and entropy climb with it.</li>
+      <li>Switch to <b>buggy mode</b> on the same row. The kept weight is whatever the unmasked softmax happened to
+        give column 0 — the readout's row sum drops <em>below</em> 1.00 and turns red. That's the failure mode
+        from the worked box, live.</li>
+      <li>Flip back to <b>correct</b> and watch the surviving weights in each row visibly <em>grow</em> as the row
+        renormalizes over its $\le i$ survivors — "masking isn't deletion; the row still sums to one; that is why
+        the mask goes in before the softmax."</li>
+    </ol>
+
+    <!-- ============================================================= -->
+    <!-- FLAGSHIP DEMO 2 — the signals counter -->
+    <!-- ============================================================= -->
+    <h2>The signals counter</h2>
+    <div class="demo">
+      <div class="demo-head">S training signals, one forward pass — causal LM vs MLM <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-signals" height="120"></canvas>
+        <div class="controls" id="d-signals-ctrls"></div>
+        <p style="margin:8px 0 0"><button class="att-btn" id="d-signals-4096">↦ S = 4096 (this page's number)</button></p>
+        <div class="readout" id="d-signals-out"></div>
+      </div>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- CODE ARTIFACT -->
+    <!-- ============================================================= -->
+    <h2>The code that proves it</h2>
+    <div class="box try"><span class="box-title">Try it — <code>code/causal_mask.py</code></span>
+      (1) Calls <code>F.scaled_dot_product_attention(..., is_causal=True)</code> and, from a manual reference
+      implementation, asserts the weight matrix is strictly-lower-triangular with every row summing to 1.
+      (2) Reproduces the multiply-after-softmax bug and prints early rows summing to $<1$.
+      (3) From <b>one</b> forward pass over a length-$S$ sequence, computes the full per-position cross-entropy
+      vector — $S$ loss terms, one pass — and prints $S$. (4) A tiny caching demo: generates 3 tokens and asserts
+      the cached $K,V$ for earlier positions are bit-identical across steps.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> math</span>
+<span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn <span class="tok-kw">as</span> nn</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line">torch.<span class="tok-fn">manual_seed</span>(<span class="tok-num">32</span>)</span>
+<span class="line">B, S, d_head, V = <span class="tok-num">1</span>, <span class="tok-num">10</span>, <span class="tok-num">16</span>, <span class="tok-num">50</span></span>
+<span class="line">Q = torch.<span class="tok-fn">randn</span>(B, S, d_head)</span>
+<span class="line">K = torch.<span class="tok-fn">randn</span>(B, S, d_head)</span>
+<span class="line">Vv = torch.<span class="tok-fn">randn</span>(B, S, d_head)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># (1) SDPA's fused kernel gives no weight matrix back, so build the reference</span></span>
+<span class="line"><span class="tok-com"># manually to check it against, exactly what SDPA computes under is_causal=True.</span></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">manual_causal_attention</span>(Q, K, Vv):</span>
+<span class="line">    scores = Q @ K.<span class="tok-fn">transpose</span>(-<span class="tok-num">1</span>, -<span class="tok-num">2</span>) / math.<span class="tok-fn">sqrt</span>(Q.shape[-<span class="tok-num">1</span>])   <span class="tok-com"># (B,S,S)</span></span>
+<span class="line">    mask = torch.<span class="tok-fn">triu</span>(torch.<span class="tok-fn">ones</span>(S, S, dtype=torch.bool), diagonal=<span class="tok-num">1</span>)          <span class="tok-com"># j &gt; i</span></span>
+<span class="line">    scores = scores.<span class="tok-fn">masked_fill</span>(mask, torch.<span class="tok-fn">finfo</span>(scores.dtype).min)  <span class="tok-com"># additive, before softmax</span></span>
+<span class="line">    A = F.<span class="tok-fn">softmax</span>(scores, dim=-<span class="tok-num">1</span>)</span>
+<span class="line">    <span class="tok-kw">return</span> A @ Vv, A</span>
+<span class="line"></span>
+<span class="line">O_manual, A = <span class="tok-fn">manual_causal_attention</span>(Q, K, Vv)</span>
+<span class="line">O_sdpa = F.<span class="tok-fn">scaled_dot_product_attention</span>(Q, K, Vv, is_causal=<span class="tok-kw">True</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> torch.<span class="tok-fn">allclose</span>(O_manual, O_sdpa, atol=<span class="tok-num">1e-5</span>), <span class="tok-str">"SDPA and the manual reference must agree"</span></span>
+<span class="line"><span class="tok-kw">assert</span> torch.<span class="tok-fn">allclose</span>(A.<span class="tok-fn">sum</span>(dim=-<span class="tok-num">1</span>), torch.<span class="tok-fn">ones</span>(B, S), atol=<span class="tok-num">1e-5</span>), <span class="tok-str">"every row must sum to 1"</span></span>
+<span class="line"><span class="tok-kw">for</span> i <span class="tok-kw">in</span> <span class="tok-fn">range</span>(S):</span>
+<span class="line">    <span class="tok-kw">assert</span> torch.<span class="tok-fn">all</span>(A[<span class="tok-num">0</span>, i, i + <span class="tok-num">1</span>:] == <span class="tok-num">0</span>), <span class="tok-str">f"row {i} leaked into the future"</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">"(1) causal weights: strictly-lower-triangular, every row sums to 1 — OK"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># (2) the multiply-after-softmax bug: unmasked softmax, THEN zero the future.</span></span>
+<span class="line">scores_full = Q @ K.<span class="tok-fn">transpose</span>(-<span class="tok-num">1</span>, -<span class="tok-num">2</span>) / math.<span class="tok-fn">sqrt</span>(Q.shape[-<span class="tok-num">1</span>])</span>
+<span class="line">A_full = F.<span class="tok-fn">softmax</span>(scores_full, dim=-<span class="tok-num">1</span>)                     <span class="tok-com"># rows sum to 1 here</span></span>
+<span class="line">keep = ~torch.<span class="tok-fn">triu</span>(torch.<span class="tok-fn">ones</span>(S, S, dtype=torch.bool), diagonal=<span class="tok-num">1</span>)</span>
+<span class="line">A_buggy = A_full * keep                                          <span class="tok-com"># multiplicative, no renormalize</span></span>
+<span class="line">row_sums = A_buggy.<span class="tok-fn">sum</span>(dim=-<span class="tok-num">1</span>)[<span class="tok-num">0</span>]</span>
+<span class="line"><span class="tok-kw">assert</span> row_sums[<span class="tok-num">0</span>] &lt; <span class="tok-num">1.0</span>, <span class="tok-str">"row 0 must lose mass under the multiplicative bug"</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">"(2) buggy row sums (first 3):"</span>, row_sums[:<span class="tok-num">3</span>].<span class="tok-fn">tolist</span>())</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># (3) one forward pass, S loss terms.</span></span>
+<span class="line">logits = torch.<span class="tok-fn">randn</span>(B, S, V)                                  <span class="tok-com"># stand-in LM head output</span></span>
+<span class="line">targets = torch.<span class="tok-fn">randint</span>(<span class="tok-num">0</span>, V, (B, S))                            <span class="tok-com"># x_{i+1}, shifted</span></span>
+<span class="line">per_position_ce = F.<span class="tok-fn">cross_entropy</span>(logits.<span class="tok-fn">view</span>(-<span class="tok-num">1</span>, V), targets.<span class="tok-fn">view</span>(-<span class="tok-num">1</span>), reduction=<span class="tok-str">"none"</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> per_position_ce.<span class="tok-fn">numel</span>() == S</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"(3) one forward pass over S={{S}} tokens yields {{per_position_ce.numel()}} loss terms"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># (4) caching: generate 3 tokens; earlier positions' K,V must not change.</span></span>
+<span class="line">cache_K, cache_V = [], []</span>
+<span class="line">seq = torch.<span class="tok-fn">randn</span>(B, <span class="tok-num">4</span>, d_head)     <span class="tok-com"># a 4-token prompt</span></span>
+<span class="line"><span class="tok-kw">for</span> step <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">3</span>):</span>
+<span class="line">    k_new, v_new = seq.<span class="tok-fn">clone</span>(), seq.<span class="tok-fn">clone</span>()          <span class="tok-com"># identity "projection" — the caching logic is what's under test</span></span>
+<span class="line">    cache_K.<span class="tok-fn">append</span>(k_new.<span class="tok-fn">clone</span>()); cache_V.<span class="tok-fn">append</span>(v_new.<span class="tok-fn">clone</span>())</span>
+<span class="line">    next_tok = torch.<span class="tok-fn">randn</span>(B, <span class="tok-num">1</span>, d_head)</span>
+<span class="line">    seq = torch.<span class="tok-fn">cat</span>([seq, next_tok], dim=<span class="tok-num">1</span>)              <span class="tok-com"># sequence grows by one</span></span>
+<span class="line"><span class="tok-kw">for</span> step <span class="tok-kw">in</span> <span class="tok-fn">range</span>(<span class="tok-num">1</span>, <span class="tok-num">3</span>):</span>
+<span class="line">    <span class="tok-kw">assert</span> torch.<span class="tok-fn">equal</span>(cache_K[<span class="tok-num">0</span>], cache_K[step][:, :<span class="tok-num">4</span>]), <span class="tok-str">"earlier K must be bit-identical across steps"</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">"(4) cached K for the first 4 positions is bit-identical across 3 generation steps — OK"</span>)</span></code></pre>
+    </div>
+
+    <!-- ============================================================= -->
+    <!-- QUIZ -->
+    <!-- ============================================================= -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-32"></div>
+
+    <!-- ===================== CROSS-REFS ===================== -->
+    <div class="box key"><span class="box-title">↪ Where this goes</span>
+      <b>[THREAD:memory-budget beat 2]</b> the KV cache this page makes sound is sized on <b>page 37</b>
+      (144 KiB/token). <b>[THREAD:Qwen3-8B]</b> a 4,096-token training slice; decode goes bandwidth-bound (roofline,
+      <b>page 43</b>). Cross-refs: → page 31 (self vs cross — the <em>other</em> $K,V$-routing story) · → page 35
+      (signal density leads the "why decoder-only won" case) · → page 28 (decode inherits RNN economics).
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO 1: the causal-mask toggle — same fixed sentence/heads as page 30 ---- */
+  (function () {
+    const { Mat, attention, RNG, entropy: shannonEntropy } = NN;
+
+    // Bit-identical rig to page 30: same tokens, same seed, same per-head W's,
+    // so this page's demo is the SAME object under a different knob.
+    const TOKENS = ["The", "tired", "animal", "did", "not", "cross", "the", "street", "because", "it"];
+    const S = TOKENS.length, D_MODEL = 64, D_HEAD = 128, NHEADS = 8, TAU = Math.sqrt(D_HEAD);
+    const rng = new RNG(30);
+    const X = Mat.randn(S, D_MODEL, rng, 1);
+    const wScale = 1 / Math.sqrt(D_MODEL);
+    const heads = [];
+    for (let h = 0; h < NHEADS; h++) {
+      const Wq = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      const Wk = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      const Wv = Mat.randn(D_HEAD, D_MODEL, rng, wScale);
+      heads.push({ Q: X.matmul(Wq.T()), K: X.matmul(Wk.T()), V: X.matmul(Wv.T()) });
+    }
+
+    const canvas = document.getElementById("d-heat");
+    const rowCanvas = document.getElementById("d-row");
+    const out = document.getElementById("d-heat-out");
+    const headSel = document.getElementById("d-head");
+    const rowSel = document.getElementById("d-row-sel");
+    const modeSel = document.getElementById("d-mode");
+
+    for (let h = 0; h < NHEADS; h++) {
+      const o = document.createElement("option"); o.value = h; o.textContent = "head " + h; headSel.appendChild(o);
+    }
+    TOKENS.forEach((t, i) => {
+      const o = document.createElement("option"); o.value = i; o.textContent = i + " · " + t; rowSel.appendChild(o);
+    });
+    rowSel.value = "0"; // row 0 — the row that makes causality "felt" hardest
+
+    const hm = new Heatmap(canvas, {
+      data: [[0]], rowLabels: TOKENS, colLabels: TOKENS,
+      colormap: "sequential", cellText: true, colorbar: true, hover: true,
+      cellText: (v) => v >= 0.005 ? v.toFixed(2) : "",
+      onHover: (i) => { if (i != null) { rowSel.value = String(i); draw(); } },
+    });
+
+    function drawRow(row, i) {
+      const g = rowCanvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = rowCanvas.clientWidth || 320, h = +rowCanvas.getAttribute("height");
+      if (rowCanvas.width !== Math.round(w * dpr)) { rowCanvas.width = Math.round(w * dpr); rowCanvas.height = Math.round(h * dpr); }
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+      const accent = vizUtils.cssVar("--accent", "#b48cff");
+      const dim = vizUtils.cssVar("--text-dim", "#8391ab");
+      const pad = 22, bw = (w - pad * 2) / row.length, base = h - 20;
+      g.fillStyle = dim; g.font = "10px system-ui"; g.textAlign = "center";
+      const mx = Math.max(...row, 0.01);
+      for (let j = 0; j < row.length; j++) {
+        const bh = (row[j] / mx) * (base - 8);
+        g.fillStyle = accent;
+        g.fillRect(pad + j * bw + 1, base - bh, bw - 2, bh);
+        g.fillStyle = dim;
+        g.fillText(TOKENS[j].slice(0, 4), pad + j * bw + bw / 2, base + 12);
+      }
+      g.strokeStyle = dim; g.beginPath(); g.moveTo(pad, base); g.lineTo(w - pad, base); g.stroke();
+    }
+
+    function draw() {
+      const h = +headSel.value, i = +rowSel.value, mode = modeSel.value;
+      const H = heads[h];
+
+      if (mode === "none") {
+        const res = attention(H.Q, H.K, H.V, { temperature: TAU });
+        hm.setData(res.A.toArray());
+        const row = res.A.row(i);
+        drawRow(row, i);
+        const rowSum = row.reduce((a, b) => a + b, 0);
+        out.innerHTML =
+          `<b>no mask</b> — every row sees all ${S} keys · row <b>${i} "${TOKENS[i]}"</b>: ` +
+          `entropy <span class="stat">${res.entropy[i].toFixed(3)}</span> nats (max ${res.maxEntropy.toFixed(3)}) · ` +
+          `effective keys <span class="stat">${res.effKeys[i].toFixed(2)}</span> of ${S} · ` +
+          `row sum <span class="stat good">${rowSum.toFixed(3)}</span>`;
+      } else if (mode === "correct") {
+        const res = attention(H.Q, H.K, H.V, { temperature: TAU, causal: true });
+        hm.setData(res.A.toArray());
+        const row = res.A.row(i);
+        drawRow(row, i);
+        const rowSum = row.reduce((a, b) => a + b, 0);
+        out.innerHTML =
+          `<b>causal, correct (additive before softmax)</b> · row <b>${i} "${TOKENS[i]}"</b> may see ${i + 1} of ${S} keys: ` +
+          `entropy <span class="stat">${res.entropy[i].toFixed(3)}</span> nats (max ${res.maxEntropy.toFixed(3)}) · ` +
+          `effective keys <span class="stat">${res.effKeys[i].toFixed(2)}</span> · ` +
+          `row sum <span class="stat good">${rowSum.toFixed(3)}</span>` +
+          (i === 0 ? ` <span class="stat good">— entropy 0, exactly 1 effective key: it can only see itself</span>` : ``);
+      } else {
+        // buggy: unmasked softmax, THEN zero the future — no renormalization.
+        const res = attention(H.Q, H.K, H.V, { temperature: TAU });
+        const A = res.A.toArray();
+        const buggy = A.map((row, ri) => row.map((v, ci) => ci <= ri ? v : 0));
+        hm.setData(buggy);
+        const row = buggy[i];
+        drawRow(row, i);
+        const rowSum = row.reduce((a, b) => a + b, 0);
+        const cls = rowSum < 0.999 ? "bad" : "good";
+        out.innerHTML =
+          `<b>causal, buggy (multiplicative after softmax)</b> · row <b>${i} "${TOKENS[i]}"</b>: kept mass is whatever ` +
+          `the unmasked softmax gave the surviving columns — <b>never renormalized</b> · ` +
+          `row sum <span class="stat ${cls}">${rowSum.toFixed(3)}</span>` +
+          (rowSum < 0.999 ? ` <span class="stat bad">≠ 1 — this is the bug</span>` : ` <span class="stat">(last row: nothing was masked, so it happens to still sum to 1)</span>`);
+      }
+    }
+
+    headSel.addEventListener("change", draw);
+    rowSel.addEventListener("change", draw);
+    modeSel.addEventListener("change", draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO 2: the signals counter — pure, real arithmetic, live ---- */
+  (function () {
+    const canvas = document.getElementById("d-signals");
+    const out = document.getElementById("d-signals-out");
+    const sCtrl = makeCtrl(document.getElementById("d-signals-ctrls"),
+      { label: "S (sequence length)", min: 1, max: 4096, step: 1, value: 4096, fmt: v => Math.round(v).toString() });
+
+    function draw() {
+      const S = Math.round(sCtrl.get());
+      const mlm = 0.15 * S;
+      const ratio = S / mlm;
+
+      const g = canvas.getContext("2d");
+      const dpr = window.devicePixelRatio || 1;
+      const w = canvas.clientWidth || 600, h = +canvas.getAttribute("height");
+      if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, w, h);
+
+      const accent = vizUtils.cssVar("--accent", "#b48cff");
+      const dim = vizUtils.cssVar("--text-dim", "#8391ab");
+      const track = vizUtils.cssVar("--bg-code", "#1b2333");
+      const pad = 10, rowH = 32, gap = 20;
+
+      g.font = "11px system-ui"; g.textAlign = "left"; g.textBaseline = "middle";
+
+      // Row 1: causal LM — every one of S cells lit.
+      g.fillStyle = dim; g.fillText("causal LM — every position is a signal", pad, 10);
+      g.fillStyle = track; g.fillRect(pad, 16, w - 2 * pad, rowH);
+      g.fillStyle = accent; g.fillRect(pad, 16, (w - 2 * pad), rowH); // 100% lit
+
+      // Row 2: MLM — only ~15% of S cells lit, seeded so it's reproducible.
+      const y2 = 16 + rowH + gap;
+      g.fillStyle = dim; g.fillText("MLM (BERT, ~15% masked) — only masked positions are signals", pad, y2 - 6);
+      g.fillStyle = track; g.fillRect(pad, y2, w - 2 * pad, rowH);
+      const mrng = new NN.RNG(1234);
+      const cellW = (w - 2 * pad) / S;
+      g.fillStyle = accent;
+      for (let i = 0; i < S; i++) {
+        if (mrng.random() < 0.15) g.fillRect(pad + i * cellW, y2, Math.max(cellW, 0.6), rowH);
+      }
+
+      out.innerHTML =
+        `<b>S = ${S}</b> training signals from <b>one</b> causal forward pass vs ` +
+        `<b>${mlm.toFixed(1)}</b> (${(mlm / S * 100).toFixed(0)}%) for MLM — a ` +
+        `<b>${ratio.toFixed(1)}×</b> data-efficiency gap per forward FLOP` +
+        (S === 4096 ? ` <span class="stat good">(this page's number: 4096 vs ≈614, ≈6.7×)</span>` : ``);
+    }
+    sCtrl.onInput(draw);
+    document.getElementById("d-signals-4096").addEventListener("click", () => {
+      sCtrl.input.value = "4096"; sCtrl.input.dispatchEvent(new Event("input"));
+    });
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-32", [
+    {
+      q: "A causal pass over $S=2048$ tokens yields how many next-token training signals from one forward pass?",
+      num: 2048, tol: 0, unit: "",
+      why: "Every one of the $S$ positions is a legitimate, un-cheatable next-token prediction — $S$ signals, one pass."
+    },
+    {
+      q: "$S=4096$ (this page's training slice) — training signals from one forward pass:",
+      num: 4096, tol: 0, unit: "",
+      why: "$J=-\\frac{1}{S}\\sum_{i=1}^{S}\\log p_\\theta(x_{i+1}\\mid x_{\\le i})$ has $S$ terms — one per position — because the mask makes every position a valid query. This is THE efficiency insight."
+    },
+    {
+      q: "The causal mask is applied:",
+      opts: [
+        "To the logits, before softmax — additively ($-\\infty$)",
+        "To the attention weights, after softmax — multiplicatively (0/1)",
+        "To $Q$ and $K$, before the dot product",
+        "To $V$, after the weighted sum"
+      ],
+      a: 0,
+      why: "Additive-before-softmax lets the row renormalize over its survivors, so every row still sums to 1. Applying it after softmax (option 2) is misconception (b) — the real, common bug."
+    },
+    {
+      q: "You trained a causal model and early tokens' outputs are near-zero; their attention rows sum to $<1$. What did you do?",
+      opts: [
+        "Forgot the $\\sqrt{d_{\\text{head}}}$ scale",
+        "Multiplied a 0/1 mask after softmax instead of adding $-\\infty$ before it",
+        "Set the learning rate too high",
+        "Used MLM's 15% masking by mistake"
+      ],
+      a: 1,
+      why: "Row sums $<1$ is the fingerprint of the multiply-after-softmax bug — the row lost mass it should have renormalized over. $\\sqrt{d_{\\text{head}}}$ (page 30) governs softmax sharpness, not row totals."
+    },
+    {
+      q: "Causal masking enables the KV cache because:",
+      opts: [
+        "Position $i$ depends only on $j\\le i$, so past $K,V$ never change and can be cached",
+        "It makes the attention matmul cheaper per step",
+        "It reduces the number of trainable parameters",
+        "It removes the need for positional encoding"
+      ],
+      a: 0,
+      why: "Caching is only SOUND because the mask guarantees earlier positions' K,V are frozen — a direct consequence of causality, not a separate speed trick (misconception d)."
+    },
+    {
+      q: "At <em>training</em> time, causal masking means:",
+      opts: [
+        "The model processes tokens strictly one at a time, in order",
+        "All positions are computed in one matmul; the mask limits what each may see, not when it is computed",
+        "Each position requires its own separate forward pass",
+        "The mask is recomputed after every optimizer step"
+      ],
+      a: 1,
+      why: "Visibility (the mask) and timing (the computation) are different axes. Training computes all S positions together; only decode is sequential (misconception c)."
+    },
+    {
+      q: "Comparing signals per forward pass, causal LM vs MLM (BERT, ~15% masked):",
+      opts: [
+        "They're equal — both see every token",
+        "MLM gets more, since it predicts masked tokens directly",
+        "Causal LM gets $\\approx 6.7\\times$ more loss signals",
+        "Causal LM gets exactly 2× more"
+      ],
+      a: 2,
+      why: "Causal LM: 1.0 signal/token. MLM: $\\approx 0.15$ signal/token. $1/0.15 = 6.\\overline{6} \\approx 6.7\\times$ — the largest single piece of the \"why decoder-only won\" story (page 35)."
+    }
+  ], "Causal masking self-check");
+
+});
+</script>
+</body>
+</html>

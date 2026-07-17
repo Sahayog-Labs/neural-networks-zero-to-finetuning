@@ -1,0 +1,1016 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>47. Prompt vs RAG vs Fine-Tune — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions. Everything uses the shared CSS custom properties so
+     it stays theme-aware for free. */
+
+  /* long inline code tokens (filenames like code/06_..._showdown.ipynb) may break
+     on very narrow screens so they never push the body sideways. The .codeblock
+     lines use white-space:pre and are unaffected by this. */
+  code { overflow-wrap: anywhere; }
+
+  /* --- the decision-framework table --- */
+  .framework-wrap { overflow-x: auto; }
+  table.framework { width: 100%; border-collapse: collapse; margin: 12px 0 6px; font-size: .92rem; }
+  table.framework th, table.framework td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  table.framework th { color: var(--text-dim); font-weight: 600; }
+  table.framework td.verdict { font-weight: 700; overflow-wrap: anywhere; }
+  .v-none  { color: var(--text-dim); }
+  .v-rag   { color: var(--accent2); }
+  .v-ft    { color: var(--accent); }
+  .v-both  { color: #e0a33a; }
+
+  /* --- decision-tree walker --- */
+  .dtree { display: flex; flex-direction: column; gap: 10px; }
+  .dtree-q { font-size: 1.02rem; line-height: 1.5; }
+  .dtree-step { font-size: .78rem; color: var(--text-dim); letter-spacing: .04em; text-transform: uppercase; }
+  .dtree-btns { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .dtree-btns button { padding: 8px 20px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .9rem; font-family: var(--font); font-weight: 600; }
+  .dtree-btns button:hover { border-color: var(--accent); }
+  .dtree-trail { display: flex; flex-wrap: wrap; gap: 6px; margin: 2px 0 8px; }
+  .dtree-crumb { font-size: .74rem; padding: 3px 8px; border-radius: 20px; background: var(--bg-code); border: 1px solid var(--border); color: var(--text-dim); }
+  .dtree-crumb b { color: var(--text); font-weight: 700; }
+  .dtree-result { border-radius: 10px; padding: 14px 16px; border: 1px solid var(--border); background: var(--bg-code); }
+  .dtree-result .rec { font-size: 1.15rem; font-weight: 800; margin-bottom: 6px; }
+  .dtree-result .cost { font-size: .9rem; color: var(--text-dim); margin: 4px 0; }
+  .dtree-result .counter { font-size: .88rem; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); color: var(--text-dim); }
+  .dtree-result .counter b { color: var(--text); }
+
+  /* --- RAG sandbox --- */
+  .rag-grid { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .rag-grid { grid-template-columns: 1fr; } }
+  .rag-list { font-size: .85rem; }
+  .rag-list .rl-row { display: flex; gap: 8px; padding: 5px 7px; border-radius: 6px; align-items: baseline; }
+  .rag-list .rl-row.hit { background: color-mix(in srgb, var(--accent2) 18%, transparent); }
+  .rag-list .rl-rank { font-family: var(--mono); color: var(--text-dim); min-width: 20px; }
+  .rag-list .rl-score { font-family: var(--mono); color: var(--text-dim); margin-left: auto; white-space: nowrap; }
+  .rag-list .rl-txt { flex: 1; }
+  .rag-list .rl-txt code { font-size: .82rem; }
+  .qsel { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-code); color: var(--text); font-family: var(--font); font-size: .9rem; margin-bottom: 6px; }
+  .rag-freetext { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 8px; }
+  .rag-freetext input[type=text] { flex: 1 1 220px; min-width: 0; box-sizing: border-box; padding: 7px 10px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-code); color: var(--text); font-family: var(--font); font-size: .88rem; }
+  .rag-freetext button { padding: 6px 14px; border-radius: 7px; border: 1px solid var(--border); background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .82rem; font-family: var(--font); font-weight: 600; }
+  .rag-freetext button.secondary { color: var(--text-dim); }
+  .rag-freetext button:hover { border-color: var(--accent2); }
+  /* a disabled control (rerank while a free-text query is active) is dimmed and inert */
+  .ctrl.ctrl-disabled { opacity: .4; pointer-events: none; }
+  .rag-mode { font-size: .78rem; color: var(--text-dim); margin: 2px 0 8px; }
+  .rag-mode b { color: var(--text); }
+  .aha-note { font-size: .85rem; color: var(--text-dim); margin-top: 8px; padding: 8px 10px; border-left: 3px solid var(--accent2); background: var(--bg-code); border-radius: 0 6px 6px 0; }
+  .synthetic-note { font-size: .76rem; color: var(--text-dim); font-style: italic; margin: 4px 0 10px; }
+
+  /* --- pipeline diagram (deepdive) --- */
+  .pipe { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0; margin: 12px 0; font-size: .82rem; }
+  .pipe-stage { flex: 1 1 auto; min-width: 78px; text-align: center; padding: 10px 6px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-code); position: relative; }
+  .pipe-stage .ps-t { font-weight: 700; }
+  .pipe-stage .ps-s { font-size: .72rem; color: var(--text-dim); }
+  .pipe-arrow { align-self: center; padding: 0 4px; color: var(--text-dim); }
+  .pipe-ir  { border-color: var(--accent2); }
+  .pipe-gen { border-color: var(--accent); }
+  .pipe-legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: .8rem; color: var(--text-dim); margin-top: 6px; }
+  .pl-dot { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+</style>
+</head>
+<body data-page="47-prompt-rag-finetune.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>The Decision: Prompt vs RAG vs Fine-Tune</h1>
+    <p class="subtitle">The most expensive mistake in applied LLMs is fine-tuning a model
+      to make it "know" something. Two words keep you out of that trap for life:
+      <strong>fine-tuning teaches FORM, RAG supplies FACTS.</strong></p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>You now know how a model reads text in (p.44), what pretraining installs (p.45), and
+      how it decodes text back out under a bandwidth ceiling (p.46). Before you spend a single
+      GPU-hour training anything, this page answers the question everyone gets wrong first:
+      <em>which lever do I even pull?</em></p>
+
+    <!-- on-page-resolution: this PREDICT is answered in the "biggest warning box" section,
+         and again numerically by the decision-tree demo and the quiz. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you commit</span>
+      You want your model to answer questions about <strong>your own 200 documents</strong>.
+      Do you (a) fine-tune it on the documents, (b) put a search engine in front of it, or
+      (c) improve the prompt? Commit to one now — most people pick <strong>(a)</strong>, and it
+      is usually the wrong and most expensive answer. By the end of this page you'll know
+      exactly why, and what it costs.</p>
+    </div>
+
+    <!-- ===================== 1. THE RULE ===================== -->
+    <h2>The rule that ends most arguments</h2>
+    <div class="box key"><span class="box-title">🔑 The one rule</span>
+      <span style="font-size:1.1rem;font-weight:700;line-height:1.5;">Fine-tuning teaches
+      FORM. RAG supplies FACTS. If you can't answer the question by pasting the answer into
+      the prompt, fine-tuning won't fix it.</span>
+    </div>
+
+    <div class="track-banner track-llm"><span class="track-label">Trunk callback · D-18</span></div>
+    <p>This is not a new idea — it's one axis of the type-signature the trunk already gave you.
+      Back on <strong>page 42</strong> ("'Fine-tuning' names three things") you saw that the word
+      "fine-tuning" hides a <em>WHERE / WHAT</em> question: <em>where</em> does the new
+      information live, and <em>what</em> do you change to install it? FACTS live in the
+      <em>evidence</em>, so you change the <strong>input</strong>, not $\theta$. FORM lives in
+      the <em>behaviour</em>, so you change $\theta$. This page is that taxonomy turned into a
+      <em>decision</em>, and it is owned here.</p>
+
+    <!-- ===================== 2. THE FRAMEWORK ===================== -->
+    <h2>The honest framework: seven questions, stop at the first "yes"</h2>
+    <p>Walk them in order. The instant one answers "yes," you have your lever — do not keep
+      reading down the table looking for a reason to train something. The first row is the one
+      almost everyone skips, and it is free.</p>
+
+    <div class="framework-wrap">
+    <table class="framework">
+      <thead><tr><th>#</th><th>If…</th><th style="width:9rem">then</th><th>because</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>a better prompt or a few examples fixes it</td><td class="verdict v-none">do nothing but improve the prompt</td><td>works ~40% of the time, <b>zero cost</b>, zero risk</td></tr>
+        <tr><td>2</td><td>the model simply doesn't <em>know</em> the fact</td><td class="verdict v-rag">RAG</td><td>put the fact in the context window at inference time</td></tr>
+        <tr><td>3</td><td>answers must cite a source</td><td class="verdict v-rag">RAG</td><td>you can only cite what you retrieved</td></tr>
+        <tr><td>4</td><td>the knowledge changes weekly</td><td class="verdict v-rag">RAG</td><td>re-index a document; never re-train a model</td></tr>
+        <tr><td>5</td><td>it's about form / style / schema / house idiom</td><td class="verdict v-ft">fine-tune</td><td>behaviour lives in $\theta$; this is what training changes well</td></tr>
+        <tr><td>6</td><td>a 4,000-token instruction prompt is too slow / costly</td><td class="verdict v-ft">fine-tune (distill the prompt)</td><td>bake the instructions into weights; stop re-reading them</td></tr>
+        <tr><td>7</td><td>RAG works but the model won't <em>use</em> the retrieved context</td><td class="verdict v-both">both</td><td>RAG for the facts, a little SFT for the behaviour of grounding</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>Reasons 2–4 are all <span class="v-rag" style="font-weight:700">RAG</span>; reasons 5–6
+      are all <span class="v-ft" style="font-weight:700">fine-tune</span>; and they are cleanly
+      separated by the FORM/FACTS rule. Note what row 6 is: a completely legitimate reason to
+      fine-tune that <em>has nothing to do with knowledge</em>. We price it out below.</p>
+
+    <!-- ===================== 3. THE BIG WARNING ===================== -->
+    <h2>The field's most expensive mistake</h2>
+    <div class="box warn"><span class="box-title">⚠️ The one that costs the most — "I'll fine-tune on my company docs so it knows them"</span>
+      <p style="margin-top:6px">This is the misconception behind your PREDICT (a). Here is the
+      mechanism, not a slogan. SFT on your documents optimizes
+      $-\log p_\theta(\text{doc tokens})$ — it teaches the model to <em>write text that sounds
+      like your documents</em>. It does <strong>not</strong> build a retrievable index.</p>
+      <p>The facts smear across all <strong>8.19 billion parameters</strong> at a learning rate
+      of $2\times10^{-4}$; no single weight holds "the Q3 revenue was 4.1 million." The result is
+      fluent, confident, correctly-formatted <strong>wrong</strong> answers — which is
+      <em>strictly worse</em> than an obvious failure, because the house style now signals an
+      authority the content hasn't earned.</p>
+      <p style="margin-bottom:0"><strong>The fix, in one breath:</strong> <em>Fine-tuning changes
+      the model's prior, not its evidence. If you want a fact at inference time, the fact must be
+      in the context window at inference time. There is no third option.</em></p>
+    </div>
+    <p>The demo below (<em>the RAG-vs-fine-tune showdown</em>) lets you watch a LoRA'd Qwen3-8B
+      hallucinate a fact from your own document #147 in fluent prose, then watch RAG answer the
+      same question correctly <em>with a citation</em>. That one experiment is the cheapest
+      insurance you will ever buy.</p>
+
+    <!-- ===================== 4. COST ARITHMETIC (reason #6) ===================== -->
+    <h2>Reason #6, priced out: the prompt you re-read a million times</h2>
+    <p>Row 6 is real money, so let's make it a number. Suppose every request carries a
+      4,000-token system prompt (instructions, style guide, few-shot examples), and you serve
+      50,000 requests a month. Every one of those tokens is re-read from scratch on every call
+      during <em>prefill</em>.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked number — hours spent re-reading your own instructions</span>
+      <p style="margin-top:4px">Prefill tokens per month:</p>
+      $$4{,}000 \frac{\text{tok}}{\text{call}} \times 50{,}000 \frac{\text{calls}}{\text{mo}}
+        = 2\times10^{8}\ \frac{\text{tok}}{\text{mo}}$$
+      <p>Your box prefills Qwen3-8B-class models at about <strong>8,000 tok/s</strong>
+      (constants §6.7 <strong>[VP]</strong> — the measured Llama-3.1-8B figure is 7,991 tok/s;
+      prefill is compute-bound, so it is the same order for Qwen3-8B). So:</p>
+      $$\frac{2\times10^{8}\ \text{tok}}{8{,}000\ \text{tok/s}} = 25{,}000\ \text{s}
+        = \mathbf{6.9\ hours/month}$$
+      <p style="margin-bottom:0">Distill those 4,000 tokens down to a <strong>200-token</strong>
+      prompt by baking the instructions into a LoRA once, and the same month costs
+      $\tfrac{200\times50{,}000}{8{,}000} = 1{,}250\ \text{s} \approx \mathbf{20\ minutes}$ — a
+      <strong>20× cut</strong>, from about one hour of LoRA training. A strong reason to
+      fine-tune that has <em>nothing to do with knowledge</em>.</p>
+    </div>
+
+    <!-- ===================== DEMO 1: DECISION TREE ===================== -->
+    <h2>Demo 1 — walk the honest decision tree</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Answer the seven questions for a real situation of yours. The path lights up, and each
+      leaf tells you the lever, a rough cost, <em>and the counterfactual</em> — what the other
+      choice would have cost and the specific failure it would have produced. It can, and
+      often should, tell you to <strong>do nothing but fix the prompt</strong>.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Prompt · RAG · Fine-tune · Both — first "yes" wins <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="dtree-trail" id="dt-trail"></div>
+        <div class="dtree" id="dt-body"></div>
+        <p style="margin:12px 0 0"><button class="btn secondary" id="dt-reset">Start over</button></p>
+      </div>
+    </div>
+
+    <!-- ===================== 5. RAG PIPELINE ===================== -->
+    <h2>So you chose RAG — what is it, actually?</h2>
+    <p>RAG (Retrieval-Augmented Generation) is a search engine bolted to the front of the model.
+      Nothing about the weights changes. The whole system is a pipeline, and the parameters that
+      matter are boringly concrete (defaults from the field, brief §7):</p>
+    <ol>
+      <li><strong>Chunk</strong> — split documents into <strong>300–500 token</strong> passages
+        with <strong>10–15% overlap</strong> (so a fact straddling a boundary survives).</li>
+      <li><strong>Embed</strong> — map each chunk to a vector $e_c$ with a bidirectional encoder;
+        similarity is cosine. Embedding dimension $d$ is typically 384 / 768 / 1024 / 1536.</li>
+      <li><strong>Retrieve</strong> the top-$N$ (≈20) by cosine, and in parallel run
+        <strong>BM25</strong> (classic keyword scoring) over the same chunks.</li>
+      <li><strong>Fuse</strong> the two ranked lists with Reciprocal Rank Fusion (RRF).</li>
+      <li><strong>Rerank</strong> the survivors down to ~5 with a <em>cross-encoder</em> that
+        reads query and chunk <em>jointly</em>.</li>
+      <li><strong>Stuff</strong> 3–5 chunks into the prompt and let the model write the answer.</li>
+    </ol>
+
+    <h3>Cosine similarity — the retrieval score</h3>
+    <p>$$\text{sim}(e_q, e_c) = \cos\vartheta = \frac{e_q \cdot e_c}{\lVert e_q\rVert\,\lVert e_c\rVert}$$</p>
+    <table class="ledger">
+      <tbody>
+        <tr><td>$e_q$</td><td>query embedding</td><td>$(d,)$</td><td>encoder applied to the question</td></tr>
+        <tr><td>$e_c$</td><td>chunk embedding</td><td>$(d,)$</td><td>encoder applied to a stored passage</td></tr>
+        <tr><td>$e_q \cdot e_c$</td><td>the dot product — <em>the atom</em>, one more time</td><td>scalar</td><td>elementwise multiply-and-sum</td></tr>
+        <tr><td>$\vartheta$</td><td>angle between the two vectors (not $\theta$ — that's parameters)</td><td>radians</td><td>geometry</td></tr>
+      </tbody>
+    </table>
+    <p><span class="track-banner track-llm" style="display:inline-block;padding:2px 10px;margin:2px 0">Thread</span>
+      <strong>[THREAD:dot product]</strong> — retrieval is the dot product again. Same atom as
+      the neuron (p.3), the attention score (p.29), and $BA$ in LoRA: a similarity is
+      $e_q\cdot e_c$ with both sides normalized. What's new here is only that the two vectors are
+      an <em>encoded question</em> and an <em>encoded document</em>.</p>
+
+    <h3>BM25 — the keyword score dense retrieval keeps forgetting</h3>
+    <p>Cosine over learned embeddings is <em>semantic</em>: it finds passages that <em>mean</em>
+      something similar. It is terrible at exact strings — part numbers, error codes, rare names —
+      because those get averaged into a smooth vector. BM25 is the opposite: a bag-of-words score
+      that rewards rare query terms appearing in a chunk.</p>
+    <p>$$\text{BM25}(q, c) = \sum_{w\,\in\,q} \text{IDF}(w)\cdot
+        \frac{f(w,c)\,(k_1 + 1)}{f(w,c) + k_1\bigl(1 - b_{\text{BM25}} + b_{\text{BM25}}\tfrac{|c|}{\overline{|c|}}\bigr)},
+        \qquad \text{IDF}(w) = \ln\!\Bigl(1 + \tfrac{N - n_w + 0.5}{n_w + 0.5}\Bigr)$$</p>
+    <table class="ledger">
+      <tbody>
+        <tr><td>$w$</td><td>a query term (word)</td><td>—</td><td>the tokenized question</td></tr>
+        <tr><td>$f(w,c)$</td><td>count of $w$ in chunk $c$</td><td>integer</td><td>term frequency</td></tr>
+        <tr><td>$\text{IDF}(w)$</td><td>inverse document frequency — rare query words score high</td><td>scalar</td><td>$n_w$ = chunks with $w$, $N$ = total chunks</td></tr>
+        <tr><td>$k_1$</td><td>term-frequency saturation ($=1.2$)</td><td>scalar</td><td>BM25 constant</td></tr>
+        <tr><td>$b_{\text{BM25}}$</td><td>length-normalization ($=0.75$)</td><td>scalar</td><td>BM25 constant</td></tr>
+        <tr><td>$|c|,\ \overline{|c|}$</td><td>chunk length, and mean chunk length</td><td>tokens</td><td>the corpus</td></tr>
+      </tbody>
+    </table>
+    <div class="box warn"><span class="box-title">⚠️ Notation — these are BM25's constants, not the course's</span>
+      Papers write BM25's parameters as bare $k_1$ and $b$. In this course $k$ is the
+      <em>optimizer step</em> and $b$ is the <em>batch index</em>, so we write $k_1$ (fine — a
+      numeric subscript) and $b_{\text{BM25}}$. When you read the BM25 paper, its $b$ is our
+      $b_{\text{BM25}}$.
+    </div>
+
+    <h3>Reciprocal Rank Fusion — combining the two lists</h3>
+    <p>Dense and BM25 return two different orderings. RRF fuses them without needing their scores
+      to be on the same scale — it uses only <em>ranks</em>:</p>
+    <p>$$\text{RRF}(c) = \sum_{r\,\in\,\{\text{dense},\,\text{bm25}\}}
+        \frac{1}{k_{\text{RRF}} + \text{rank}_r(c)}, \qquad k_{\text{RRF}} = 60$$</p>
+    <table class="ledger">
+      <tbody>
+        <tr><td>$c$</td><td>a candidate chunk</td><td>—</td><td>appears in one or both lists</td></tr>
+        <tr><td>$r$</td><td>a ranked list (dense, or BM25)</td><td>—</td><td>the two retrievers</td></tr>
+        <tr><td>$\text{rank}_r(c)$</td><td>position of $c$ in list $r$ (1 = best)</td><td>integer</td><td>sort order</td></tr>
+        <tr><td>$k_{\text{RRF}}$</td><td>rank-smoothing constant ($=60$; <em>not</em> the optimizer step $k$)</td><td>scalar</td><td>RRF paper</td></tr>
+      </tbody>
+    </table>
+    <p>The retrieval itself is one matmul and a sort. The shape ribbon for the dense side:</p>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">shapes</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">E            (N=200, d=384)          <span class="tok-com"># the chunk embedding matrix, L2-normalized rows</span></span>
+<span class="line">e_q          (d=384,)                <span class="tok-com"># the query embedding, L2-normalized</span></span>
+<span class="line">scores = E @ e_q                     (N=200,)   <span class="tok-com"># one cosine per chunk — the whole search</span></span>
+<span class="line">top = argsort(scores)[::-1][:N_top]   (N_top,)   <span class="tok-com"># the ranked list</span></span></code></pre>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ Worked number — do you even need a vector database?</span>
+      <p style="margin-top:4px">The whole "vector DB" industry exists for scale you probably
+      don't have. Store 100,000 chunks of dimension 1024 in fp32:</p>
+      $$100{,}000 \times 1024 \times 4\ \text{B} = 409{,}600{,}000\ \text{B} = \mathbf{410\ MB}$$
+      <p style="margin-bottom:0">That is <strong>410 MB</strong> in fp32, <strong>205 MB</strong>
+      in fp16, and <strong>12.8 MB</strong> as 1-bit binary embeddings. All of it fits in a corner
+      of your box's memory, and the search is <code>E @ e_q</code> — one matmul.
+      <span class="track-banner track-llm" style="display:inline-block;padding:2px 10px;margin:0">Thread</span>
+      <strong>[THREAD:memory budget]</strong> — the same quantization ladder you used for weights
+      (p.41) applies to the embedding store; 410 MB → 12.8 MB is the same trick.</p>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 You do not need a vector DB under ~100k chunks</span>
+      <code>np.argsort(embeddings @ q)</code> is <em>exact</em>, instant, and zero-ops on the
+      Spark's GPU. Managed vector databases buy you approximate search and sharding for the
+      millions-of-chunks regime; below ~100k chunks they buy you a bill and a dependency.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ "Cosine similarity finds relevant chunks"</span>
+      It finds <em>similar</em> ones, which is not the same thing. Ask for <em>"the risks of
+      Project Titan"</em> and dense retrieval happily returns five chunks <em>about Titan</em> and
+      zero <em>about risks</em> — because "Titan" dominates the vector. The <strong>cross-encoder
+      reranker</strong>, which reads the query and each chunk <em>together</em> instead of comparing
+      two independent vectors, is what repairs relevance. That is why reranking is not optional —
+      and you can watch it happen in the sandbox below.
+    </div>
+
+    <!-- ===================== DEMO 2: RAG SANDBOX ===================== -->
+    <h2>Demo 2 — the retrieval sandbox</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Pick one of the ten canned queries — or type your own. Re-chunk the corpus with the
+      <strong>chunk size</strong> and <strong>overlap</strong> controls, then slide the
+      <strong>hybrid weight</strong> from pure dense (1.0) to pure BM25 (0.0) and watch which
+      chunks surface. Two of the queries <em>cannot be solved by either retriever alone</em> —
+      that is the entire argument for hybrid search, and it's invisible without the slider. Flip
+      <strong>rerank on</strong> and watch similar-but-irrelevant chunks get demoted. (Rerank is
+      grayed out for free-text queries — see the note in the panel for why.)
+    </div>
+    <div class="demo">
+      <div class="demo-head">Chunk retrieval · cosine + BM25 + RRF, computed live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p class="synthetic-note">Honesty note: the ~200-chunk corpus and its 384-dim embeddings
+          are a <strong>seeded synthetic stand-in</strong> for a real bi-encoder (an in-browser
+          page can't run a 384-dim sentence encoder), and the chunk-size / overlap controls
+          re-chunk and re-embed that corpus deterministically on the fly. The <strong>cosine,
+          BM25, and weighted-RRF math below are computed live and exact</strong> over the shipped
+          vectors; the cross-encoder reranker uses pre-computed relevance for the ten canned
+          queries only, which is why it is disabled for free text.</p>
+        <select class="qsel" id="rag-q"></select>
+        <div class="rag-freetext">
+          <input type="text" id="rag-free" placeholder="…or type your own query, then Search (rerank disabled for free text)" aria-label="free-text query">
+          <button id="rag-free-go" type="button">Search</button>
+          <button id="rag-free-clear" type="button" class="secondary">Use canned</button>
+        </div>
+        <div class="rag-mode" id="rag-mode"></div>
+        <div class="controls" id="rag-ctrls"></div>
+        <div class="rag-grid">
+          <div><canvas id="rag-canvas" height="320"></canvas></div>
+          <div class="rag-list" id="rag-list"></div>
+        </div>
+        <div class="readout" id="rag-out"></div>
+        <div class="aha-note" id="rag-aha"></div>
+      </div>
+    </div>
+
+    <!-- ===================== DEEPDIVE ===================== -->
+    <details class="deepdive"><summary>🔬 Deep dive: RAG is a search engine, not AI — the 80/20 rule</summary><div>
+      <p>Everything upstream of "stuff" in the pipeline is <strong>classical information
+        retrieval</strong> — chunking, embeddings, BM25, fusion, reranking. Only the last box is
+        generation. And here is the uncomfortable ratio: <strong>retrieval quality dominates
+        end-to-end quality</strong>. The language model can only answer from what you put in front
+        of it; if the right chunk never makes it into the context window, no amount of model
+        capability recovers it. Roughly 80% of your effort — and 80% of your wins — live in the
+        retrieval half, which contains no neural generation at all.</p>
+      <div class="pipe">
+        <div class="pipe-stage pipe-ir"><div class="ps-t">chunk</div><div class="ps-s">split docs</div></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-stage pipe-ir"><div class="ps-t">embed</div><div class="ps-s">encoder</div></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-stage pipe-ir"><div class="ps-t">index</div><div class="ps-s">store vectors</div></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-stage pipe-ir"><div class="ps-t">retrieve</div><div class="ps-s">cosine + BM25</div></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-stage pipe-ir"><div class="ps-t">rerank</div><div class="ps-s">cross-encoder</div></div>
+        <div class="pipe-arrow">→</div>
+        <div class="pipe-stage pipe-gen"><div class="ps-t">stuff → generate</div><div class="ps-s">the LLM</div></div>
+      </div>
+      <div class="pipe-legend">
+        <span><span class="pl-dot" style="background:var(--accent2)"></span>classical IR — no generation</span>
+        <span><span class="pl-dot" style="background:var(--accent)"></span>the only neural-generation step</span>
+      </div>
+      <p style="margin-bottom:0">This is why "the model hallucinated" is usually a retrieval bug in
+        disguise: you asked it to answer from context that didn't contain the answer, and a fluent
+        model did exactly what fluent models do. Fix retrieval first. (Note: the <em>decision rule</em>
+        at the top of this page is never a footnote — only this background depth is.)</p>
+    </div></details>
+
+    <!-- ===================== box try ===================== -->
+    <div class="box try"><span class="box-title">Try it — the inoculation ★★</span>
+      <code>code/06_rag_vs_finetune_showdown.ipynb</code>: take 200 of your own documents.
+      <strong>(a)</strong> LoRA-SFT an 8B on them, then ask a fact from document #147 — watch it
+      hallucinate fluently and confidently. <strong>(b)</strong> RAG the same corpus — correct
+      answer, with a citation. <strong>(c)</strong> Do both. One hour permanently prevents the
+      field's most expensive mistake. (~45 min.) Secondary:
+      <code>code/07_rag_pipeline.py</code> — chunk → embed → FAISS, with a NumPy baseline that
+      <em>beats</em> FAISS under 100k chunks, plus BM25 → RRF → rerank, and an ablation of
+      recall@5.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-47"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ================= DEMO 1: the honest decision tree ================= */
+  (function () {
+    const trail = document.getElementById("dt-trail");
+    const body = document.getElementById("dt-body");
+    const resetBtn = document.getElementById("dt-reset");
+
+    // Seven questions, asked in order; first "yes" resolves to a leaf.
+    const QS = [
+      { q: "Does a <b>better prompt</b> or a few worked examples fix it? (Have you actually tried?)",
+        leaf: {
+          rec: "Do nothing but improve the prompt.",
+          cls: "v-none",
+          cost: "Cost: minutes. GPU-hours: 0. Risk: 0.",
+          counter: "Counterfactual: fine-tuning here would spend ~1 GPU-hour and a week of dataset work to reach what a 5-line system prompt already does. This row resolves ~40% of real cases — never skip it." } },
+      { q: "Does the model simply <b>not know the fact</b> (it's your private / recent data)?",
+        leaf: {
+          rec: "RAG — retrieve the fact into the prompt.",
+          cls: "v-rag",
+          cost: "Cost: an embedding index (≈410 MB / 100k chunks) + a retriever. No training.",
+          counter: "Counterfactual: fine-tuning on the docs smears the fact across 8.19B params and yields fluent, confident WRONG answers. This is the PREDICT trap." } },
+      { q: "Must the answer <b>cite its source</b>?",
+        leaf: {
+          rec: "RAG — you can only cite what you retrieved.",
+          cls: "v-rag",
+          cost: "Cost: same retriever; attach the chunk's document ID to the answer.",
+          counter: "Counterfactual: a fine-tuned model has no source to point at — the fact is diffused into weights, uncitable by construction." } },
+      { q: "Does the knowledge <b>change often</b> (weekly / daily)?",
+        leaf: {
+          rec: "RAG — re-index a document, never re-train.",
+          cls: "v-rag",
+          cost: "Cost: re-embed changed docs (seconds–minutes). No retraining.",
+          counter: "Counterfactual: fine-tuning bakes today's facts into weights; next week you retrain the whole adapter. RAG updates by editing a file." } },
+      { q: "Is it about <b>form / style / schema / house idiom</b> (how it answers, not what it knows)?",
+        leaf: {
+          rec: "Fine-tune (LoRA) — behaviour lives in θ.",
+          cls: "v-ft",
+          cost: "Cost: ~50–1,000 curated examples + ~1 GPU-hour LoRA (fits your box, p.49).",
+          counter: "Counterfactual: RAG can't teach a consistent voice or output schema — you'd stuff the style guide into every prompt and pay for it on every call (see reason #6)." } },
+      { q: "Is a <b>4,000-token instruction prompt</b> too slow or too expensive per call?",
+        leaf: {
+          rec: "Fine-tune to distill the prompt into weights.",
+          cls: "v-ft",
+          cost: "Cost: ~1 GPU-hour LoRA. Payoff: 6.9 h/mo → 20 min/mo prefill (20×) at 50k calls.",
+          counter: "Counterfactual: keeping the long prompt is a recurring bill — you re-read your own instructions 2×10⁸ tokens/mo forever. This is knowledge-free fine-tuning, and it's legitimate." } },
+      { q: "Does RAG retrieve the right context but the model <b>won't use it</b> (ignores it, over-trusts its prior)?",
+        leaf: {
+          rec: "Both — RAG for facts, a little SFT for grounding behaviour.",
+          cls: "v-both",
+          cost: "Cost: the retriever PLUS a small SFT set teaching “answer from the provided context.”",
+          counter: "Counterfactual: fine-tuning alone still can't hold changing facts; RAG alone leaves the model ignoring them. The failure is behavioural, so you need the behavioural fix on top of retrieval." } }
+    ];
+    // Terminal leaf if every answer is "no".
+    const NOLEAF = {
+      rec: "Step back — your problem may not need an LLM change at all.",
+      cls: "v-none",
+      cost: "If none of the seven fired, re-read the task: often it's a data or product question.",
+      counter: "Neither RAG nor fine-tuning is indicated. Spending GPU-hours now is motion without direction." };
+
+    let idx = 0;
+
+    function crumb(qn, ans) {
+      const el = document.createElement("span");
+      el.className = "dtree-crumb";
+      el.innerHTML = `Q${qn}: <b>${ans}</b>`;
+      trail.appendChild(el);
+    }
+    function showResult(leaf) {
+      body.innerHTML =
+        `<div class="dtree-result">
+           <div class="rec ${leaf.cls}">${leaf.rec}</div>
+           <div class="cost">${leaf.cost}</div>
+           <div class="counter">${leaf.counter}</div>
+         </div>`;
+      if (window.renderMathInElement) renderMathInElement(body, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+    function ask() {
+      if (idx >= QS.length) { showResult(NOLEAF); return; }
+      const item = QS[idx];
+      body.innerHTML =
+        `<div class="dtree-step">Question ${idx + 1} of ${QS.length} — stop at the first “yes”</div>
+         <div class="dtree-q">${item.q}</div>
+         <div class="dtree-btns">
+           <button id="dt-yes">Yes</button>
+           <button id="dt-no">No</button>
+         </div>`;
+      if (window.renderMathInElement) renderMathInElement(body, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+      document.getElementById("dt-yes").addEventListener("click", () => { crumb(idx + 1, "yes"); showResult(item.leaf); idx = QS.length; });
+      document.getElementById("dt-no").addEventListener("click", () => { crumb(idx + 1, "no"); idx++; ask(); });
+    }
+    function reset() { idx = 0; trail.innerHTML = ""; ask(); }
+    resetBtn.addEventListener("click", reset);
+    reset();
+  })();
+
+  /* ================= DEMO 2: RAG retrieval sandbox ================= */
+  (function () {
+    // ---- seeded PRNG (mulberry32) so embeddings are reproducible ----
+    function mulberry32(a) {
+      return function () {
+        a |= 0; a = a + 0x6D2B79F5 | 0;
+        let t = Math.imul(a ^ a >>> 15, 1 | a);
+        t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+      };
+    }
+    const EMB_DIM = 384;
+
+    // ---- topic clusters: 2-D display centroid + a stable embedding seed ----
+    // Each chunk's embedding = its topic centroid vector (seeded per topic) + small
+    // per-chunk noise, then L2-normalized. Cosine over these is real. Chunks never
+    // cross a topic boundary, so topic purity (and the aha moments) survive re-chunking.
+    const TOPICS = {
+      titan:      { c: [4.8, 8.4], seed: 101 },  // Project Titan platform facts (holds "titan"/"project")
+      risk:       { c: [8.2, 7.0], seed: 202 },  // post-mortems: slippage/attrition/overrun — NO literal "fail"/"risk"
+      infra:      { c: [2.0, 8.6], seed: 303 },  // deployment / production
+      trouble:    { c: [2.2, 2.2], seed: 404 },  // error handling / troubleshooting (generic)
+      batch:      { c: [5.0, 2.0], seed: 505 },  // batch jobs / audit — holds the E-4471 chunk
+      finance:    { c: [8.4, 2.2], seed: 606 },  // budget / spend
+      team:       { c: [5.2, 5.0], seed: 707 },  // hiring / people
+      security:   { c: [1.6, 5.4], seed: 808 },  // auth / access
+      data:       { c: [8.6, 4.6], seed: 909 },  // schema / warehouse / ETL
+      perf:       { c: [3.4, 6.6], seed: 111 },  // latency / throughput
+      docs:       { c: [6.8, 6.2], seed: 222 },  // documentation
+      compliance: { c: [6.6, 3.6], seed: 333 },  // audit / retention / policy
+      support:    { c: [3.8, 3.8], seed: 444 },  // customer / tickets
+      release:    { c: [4.4, 9.4], seed: 555 }   // versioning / CI
+    };
+    function topicVec(seed) {
+      const r = mulberry32(seed); const v = new Float32Array(EMB_DIM);
+      let n = 0; for (let i = 0; i < EMB_DIM; i++) { const x = r() * 2 - 1; v[i] = x; n += x * x; }
+      n = Math.sqrt(n); for (let i = 0; i < EMB_DIM; i++) v[i] /= n; return v;
+    }
+    const TVEC = {}; for (const k in TOPICS) TVEC[k] = topicVec(TOPICS[k].seed);
+
+    // ---- tokenization (standard BM25 practice: drop stopwords) ----
+    const STOP = new Set(("a an the of to in on at for and or but is are was were be been being " +
+      "we you they it he she i do does did how what why when where which who whom this that these " +
+      "those with as by from into our your their its his her my me us them not no can could will " +
+      "would should may might must have has had").split(" "));
+    function tokenize(s) { return (s.toLowerCase().match(/[a-z0-9]+(?:-[a-z0-9]+)*/g) || []); }
+    function contentTokens(s) { return tokenize(s).filter(t => !STOP.has(t)); }
+
+    // ---- the corpus: ~200 topic-tagged sentences, built from hand-written anchors
+    // (the aha-critical ones) plus deterministic template fillers per topic. No
+    // sentence outside the "titan" topic contains "titan"/"project"; no sentence
+    // anywhere contains any "fail" stem or the word "risk" — that is what makes the
+    // three aha queries reproduce exactly. ----
+    function genTopic(seedBase, anchors, A, B, target) {
+      const out = anchors.slice();
+      const r = mulberry32(seedBase);
+      const seen = new Set(out.map(s => s.toLowerCase()));
+      let guard = 0;
+      while (out.length < target && guard < 4000) {
+        guard++;
+        const s = A[Math.floor(r() * A.length)] + " " + B[Math.floor(r() * B.length)] + ".";
+        if (!seen.has(s.toLowerCase())) { seen.add(s.toLowerCase()); out.push(s); }
+      }
+      return out.slice(0, target);
+    }
+    const TDEF = {
+      titan: { seed: 11, target: 15,
+        anchors: [
+          "Project Titan is our next-generation billing platform, replacing the legacy invoicing service.",
+          "The Project Titan steering committee meets every second Tuesday to review milestones.",
+          "Titan's data model unifies customers, subscriptions, and usage events in one schema.",
+          "Kickoff for Project Titan was held in the main auditorium with all stakeholders present."],
+        A: ["Project Titan", "The Titan platform", "Titan's rollout plan", "The Titan program office", "Project Titan's roadmap", "Titan's launch team", "The Titan initiative", "Project Titan documentation"],
+        B: ["spans three engineering pods", "targets a phased regional launch", "is tracked in the program dashboard", "reports to the executive sponsor monthly", "covers billing, metering, and invoicing", "was chartered at the start of the year", "consolidates four legacy systems", "is the flagship platform effort"] },
+      risk: { seed: 22, target: 15,
+        anchors: [
+          "The engineering timeline slipped by eleven weeks after the vendor missed two integration deadlines.",
+          "Rising engineer attrition on the platform team left three critical services without an owner.",
+          "A budget overrun of thirty percent forced a mid-year replan and a scope reduction.",
+          "Repeated outages during the migration eroded stakeholder confidence in the delivery date."],
+        A: ["The delivery schedule", "Vendor delays", "The staffing shortfall", "A mid-quarter replan", "The integration backlog", "Scope creep", "The migration window", "Chronic understaffing"],
+        B: ["pushed the launch back by a full quarter", "left two milestones without an owner", "forced a painful descoping decision", "compounded an already tight timeline", "eroded confidence among the sponsors", "triggered an emergency escalation", "stretched the team past its capacity", "added weeks of unplanned rework"] },
+      infra: { seed: 33, target: 15,
+        anchors: [
+          "Deployments to production go out through the blue-green pipeline every Thursday afternoon.",
+          "Rolling back a release is a single command; the previous image is kept warm for one hour.",
+          "Production traffic is routed through the regional load balancers with health checks every five seconds."],
+        A: ["Production deployments", "The blue-green pipeline", "A canary release", "The rollback procedure", "Traffic routing", "The staging environment", "Health checks", "The deployment gate"],
+        B: ["run every Thursday afternoon", "promote a build only after canary passes", "complete in under ten minutes", "keep the previous image warm for one hour", "are load balanced across three regions", "require a second approver to sign off", "run automatically on every merge to main", "fall back to the last good image on error"] },
+      trouble: { seed: 44, target: 15,
+        anchors: [
+          "When a service throws an unhandled exception, the on-call engineer gets paged within a minute.",
+          "To debug a broken request, start from the trace ID and follow it across service boundaries.",
+          "Most timeout errors trace back to a saturated connection pool rather than the downstream service.",
+          "Retry with exponential backoff before surfacing an error to the user-facing layer."],
+        A: ["An unhandled exception", "Most timeout errors", "A stack trace", "The error budget", "Retry logic", "A saturated connection pool", "The incident channel", "A latency spike"],
+        B: ["pages the on-call engineer within a minute", "usually points at the connection pool", "is captured with the request trace ID", "should back off exponentially before retrying", "surfaces in the dashboards within seconds", "is annotated with the offending trace", "gets escalated after two exhausted retries", "is triaged from the trace ID first"] },
+      batch: { seed: 55, target: 14,
+        anchors: [
+          "The nightly reconciliation job wrote 4,471 rows to the staging table; the run completed with status code E-4471 recorded for audit.",
+          "Batch jobs are scheduled through the orchestrator and log their row counts to the audit ledger.",
+          "The audit ledger retains every job's start time, row count, and completion status for seven years.",
+          "A checksum mismatch in the export batch triggers an automatic re-run before the morning cutoff."],
+        A: ["The nightly batch job", "The reconciliation run", "Each scheduled job", "The export batch", "The orchestrator", "A checksum mismatch", "The staging load", "The morning batch window"],
+        B: ["logs its row count to the audit ledger", "is scheduled through the orchestrator", "runs before the morning cutoff", "records a completion status for audit", "re-runs automatically on a mismatch", "writes to the staging table first", "reports duration and row counts", "is retained for seven years"] },
+      finance: { seed: 66, target: 14,
+        anchors: [
+          "Cloud spend is dominated by the analytics warehouse, which accounts for sixty percent of the monthly bill.",
+          "The finance team reviews committed-use discounts each quarter to reduce compute cost.",
+          "Storage costs grew after retention was extended, prompting a tiering policy for cold data."],
+        A: ["Cloud spend", "The monthly bill", "Committed-use discounts", "Storage cost", "The compute budget", "Egress charges", "The analytics warehouse", "Cost allocation"],
+        B: ["is dominated by the analytics warehouse", "is reviewed by finance each quarter", "grew after retention was extended", "is tagged back to each team", "fell after rightsizing the instances", "is the largest line item this quarter", "is capped by a monthly budget alert", "is trending down after the tiering policy"] },
+      team: { seed: 77, target: 14,
+        anchors: [
+          "We hired two senior backend engineers and one SRE to staff the on-call rotation.",
+          "Onboarding for new engineers pairs them with a mentor for their first six weeks."],
+        A: ["The platform team", "Two new backend engineers", "The hiring plan", "A new SRE", "Onboarding", "The mentorship program", "The on-call rotation", "Headcount"],
+        B: ["added three engineers this quarter", "pairs newcomers with a mentor", "is now staffed for twenty-four-seven coverage", "grew to twelve people", "filled two long-open positions", "rotates weekly across the team", "includes a two-week ramp plan", "is reviewed at every planning cycle"] },
+      security: { seed: 88, target: 14,
+        anchors: [
+          "Access to production is granted through short-lived roles that expire after twelve hours.",
+          "Service credentials rotate automatically every ninety days through the secrets manager."],
+        A: ["Access to production", "Service credentials", "The audit log", "Multi-factor authentication", "The secrets manager", "Least-privilege roles", "Session tokens", "The access review"],
+        B: ["is granted through short-lived roles", "rotate automatically every ninety days", "is required for every admin action", "records every privileged operation", "are stored in the secrets manager", "expire after twelve hours", "are scoped to a single service", "is reviewed quarterly by the owners"] },
+      data: { seed: 99, target: 14,
+        anchors: [
+          "The data warehouse is partitioned by ingestion date and feeds the analytics dashboards.",
+          "The event schema normalizes customers, subscriptions, and usage into one model."],
+        A: ["The data warehouse", "The event schema", "Each ingestion pipeline", "The customer table", "Nightly ETL", "The staging dataset", "Schema changes", "The lineage graph"],
+        B: ["is partitioned by ingestion date", "normalizes events into one model", "is validated against a contract", "backfills from the raw event stream", "is documented in the catalog", "runs on a two-hour cadence", "is versioned behind a migration", "feeds the analytics dashboards"] },
+      perf: { seed: 121, target: 14,
+        anchors: [
+          "Tail latency dropped once the cache was warmed and a read replica was added.",
+          "The p99 response time is dominated by a single slow query against the customer table."],
+        A: ["Tail latency", "Request throughput", "The p99 response time", "Cache hit rate", "Connection pooling", "Query latency", "The autoscaler", "Batch size tuning"],
+        B: ["improved after adding a read replica", "is dominated by a single slow query", "dropped once the cache was warmed", "scales with the number of workers", "is measured at the ninety-ninth percentile", "fell after the index was added", "is capped by the connection pool", "was halved by request coalescing"] },
+      docs: { seed: 131, target: 14,
+        anchors: [
+          "The runbook is kept next to the code and explains the on-call procedure step by step.",
+          "Each service README lists the supported endpoints and links to the relevant dashboards."],
+        A: ["The runbook", "Architecture documentation", "Each service README", "The onboarding guide", "The design record", "The API reference", "The team wiki", "Release notes"],
+        B: ["is kept next to the code", "is reviewed on every major change", "explains the on-call procedure", "links to the relevant dashboards", "captures the decision and its context", "is generated from the source", "lists the supported endpoints", "is updated before each release"] },
+      compliance: { seed: 141, target: 14,
+        anchors: [
+          "Data retention is enforced by an automated policy that keeps records for seven years.",
+          "Audit evidence is collected for the annual review and logged to an immutable store."],
+        A: ["Data retention", "The compliance review", "Audit evidence", "The retention policy", "Access certification", "The control catalog", "Every privileged change", "The quarterly audit"],
+        B: ["is enforced by an automated policy", "is collected for the annual audit", "retains records for seven years", "is signed off by the data owner", "maps to a documented control", "is sampled by the auditors", "is logged to an immutable store", "is reviewed each quarter"] },
+      support: { seed: 151, target: 14,
+        anchors: [
+          "Customer tickets are triaged within one business hour and routed against an SLA.",
+          "The support queue links customers to a known workaround from the knowledge base."],
+        A: ["Customer tickets", "The support queue", "A priority incident", "The escalation path", "First response time", "The knowledge base", "A recurring complaint", "The support rotation"],
+        B: ["are triaged within one business hour", "routes urgent cases to on-call", "is tracked against an SLA", "links customers to a known workaround", "is answered from the knowledge base", "is reviewed in the weekly sync", "feeds the product backlog", "is measured by resolution time"] },
+      release: { seed: 161, target: 14,
+        anchors: [
+          "Each release is cut every two weeks and must pass integration tests to merge.",
+          "The changelog documents every version bump, which is tagged and signed automatically."],
+        A: ["Each release", "The CI pipeline", "A version bump", "The changelog", "Feature flags", "The release train", "Semantic versioning", "The build"],
+        B: ["is cut every two weeks", "runs the full test suite on every push", "gates merges behind green checks", "is tagged and signed automatically", "ships behind a feature flag first", "is rolled out to a small cohort first", "is documented in the changelog", "must pass integration tests to merge"] }
+    };
+    // SENTS: topic -> ordered sentence list (the raw corpus, before chunking).
+    const SENTS = {};
+    for (const tp in TDEF) { const d = TDEF[tp]; SENTS[tp] = genTopic(d.seed, d.anchors, d.A, d.B, d.target); }
+    const TOTAL_SENTS = Object.values(SENTS).reduce((s, a) => s + a.length, 0); // = 200
+
+    // ---- sentence-level IDF + per-topic vocab, for embedding free-text queries.
+    // Independent of chunk size so a typed query behaves the same at every setting. ----
+    const senDf = {}; let senCount = 0;
+    const topicTokens = {};
+    for (const tp in SENTS) {
+      topicTokens[tp] = new Set();
+      for (const s of SENTS[tp]) {
+        senCount++;
+        const seen = new Set(contentTokens(s));
+        for (const t of seen) { senDf[t] = (senDf[t] || 0) + 1; topicTokens[tp].add(t); }
+      }
+    }
+    function senIdf(w) { const n = senDf[w] || 0; return Math.log(1 + (senCount - n + 0.5) / (n + 0.5)); }
+
+    // ---- the 5 discrete chunk-size sets: (token budget shown to the learner,
+    // synthetic sentences-per-chunk used to build it). Smaller size -> more chunks. ----
+    const SIZES = [
+      { tok: 100, sents: 1 },
+      { tok: 250, sents: 3 },
+      { tok: 500, sents: 5 },
+      { tok: 750, sents: 8 },
+      { tok: 1000, sents: 12 }
+    ];
+
+    // ---- build one chunk set for (sentsPerChunk, overlap%); re-embeds deterministically.
+    // Chunking stays inside a single topic, so every chunk is topic-pure at any size. ----
+    let CHUNKS = [], N = 0, avgdl = 0, df = {};
+    function buildCorpus(sentsPerChunk, overlapPct) {
+      const noiseR = mulberry32(9999);          // reset per build => identical settings, identical vectors
+      const chunks = [];
+      const ov = Math.min(sentsPerChunk - 1, Math.round(sentsPerChunk * overlapPct / 100));
+      const stride = Math.max(1, sentsPerChunk - ov);
+      for (const tp in SENTS) {
+        const arr = SENTS[tp];
+        for (let i = 0; i < arr.length; i += stride) {
+          const slice = arr.slice(i, i + sentsPerChunk);
+          const text = slice.join(" ");
+          const base = TVEC[tp]; const v = new Float32Array(EMB_DIM); let n = 0;
+          for (let j = 0; j < EMB_DIM; j++) { const x = base[j] + (noiseR() * 2 - 1) * 0.28; v[j] = x; n += x * x; }
+          n = Math.sqrt(n); for (let j = 0; j < EMB_DIM; j++) v[j] /= n;
+          const tc = TOPICS[tp].c;
+          const coord = [tc[0] + (noiseR() * 2 - 1) * 0.95, tc[1] + (noiseR() * 2 - 1) * 0.95];
+          const toks = tokenize(text); const tf = {};
+          for (const t of toks) tf[t] = (tf[t] || 0) + 1;
+          chunks.push({ id: chunks.length, topic: tp, text, v, coord, tf, len: toks.length });
+          if (i + sentsPerChunk >= arr.length) break;   // tail chunk already covers the remainder
+        }
+      }
+      CHUNKS = chunks; N = CHUNKS.length;
+      avgdl = CHUNKS.reduce((s, c) => s + c.len, 0) / N;
+      df = {}; for (const c of CHUNKS) for (const t in c.tf) df[t] = (df[t] || 0) + 1;
+    }
+    function idf(w) { const n = df[w] || 0; return Math.log(1 + (N - n + 0.5) / (n + 0.5)); }
+
+    // ---- canned queries: embedding blend + display coord + token bag + rerank affinity + aha.
+    // Rerank relevance is keyed by TOPIC (+ an optional signature token), so the pre-computed
+    // cross-encoder scores survive re-chunking; `sig` is a rare token the reranker recognizes. ----
+    function blend(parts) { // parts: [[topic,weight],...]
+      const v = new Float32Array(EMB_DIM); let n = 0;
+      for (let i = 0; i < EMB_DIM; i++) { let x = 0; for (const [tp, w] of parts) x += TVEC[tp][i] * w; v[i] = x; n += x * x; }
+      n = Math.sqrt(n); for (let i = 0; i < EMB_DIM; i++) v[i] /= n; return v;
+    }
+    const QUERIES = [
+      { label: "How do we deploy to production?", text: "how do we deploy to production",
+        topics: [["infra", 1]], coord: [2.0, 8.6], aff: { infra: 0.95, release: 0.4, trouble: 0.3 },
+        aha: "Baseline: dense and BM25 both point at the deployment chunks, and they agree. When one setting solves it you don't need hybrid — most queries are like this." },
+      { label: "error code E-4471", text: "error code E-4471",
+        topics: [["trouble", 1]], coord: [2.2, 2.2], sig: "e-4471", aff: { batch: 0.5, trouble: 0.35 },
+        aha: "Dense retrieval sits in the generic “error handling” cluster and never surfaces the one chunk that literally contains <code>E-4471</code> — that chunk is semantically about batch/audit jobs. Slide the hybrid weight toward <b>BM25 (0.0)</b> and the rare token <code>e-4471</code> (huge IDF, appears in exactly one chunk) snaps it to #1. This is why you keep a keyword retriever." },
+      { label: "why did the project fail?", text: "why did the project fail",
+        topics: [["risk", 1]], coord: [8.2, 7.0], aff: { risk: 0.92, titan: 0.2 },
+        aha: "<b>BM25 whiffs</b>: after stopwords, its only content word is “project” — “fail” appears in <em>no</em> chunk — so it returns Titan trivia (the platform, the kickoff), nothing about failure. Slide toward <b>dense (1.0)</b> and the actual post-mortems — slippage, attrition, budget overrun — surface, none of which contain the word “fail.” This is why you keep a semantic retriever." },
+      { label: "risks to Project Titan", text: "risks to project titan",
+        topics: [["titan", 0.72], ["risk", 0.28]], coord: [5.6, 7.9],
+        aff: { risk: 0.96, titan: 0.25, infra: 0.15, batch: 0.12, perf: 0.12 },
+        aha: "Pure <b>dense</b> returns chunks <em>about Titan</em> (kickoff, steering committee) because “Titan” dominates the vector — similar, not relevant. Turn <b>rerank on</b>: the cross-encoder reads query+chunk jointly and promotes the actual risk chunks (slippage, attrition, overrun) over the Titan trivia. Reranking is what converts similarity into relevance." },
+      { label: "What is Project Titan?", text: "what is project titan",
+        topics: [["titan", 1]], coord: [4.8, 8.4], aff: { titan: 0.95 },
+        aha: "Dense (semantic) and BM25 (the literal tokens “project”, “titan”) agree here — a clean, easy query. Rerank leaves the Titan chunks on top. Not every query needs hybrid or reranking; this is the common case." },
+      { label: "how do we roll back a bad release?", text: "how do we roll back a bad release",
+        topics: [["infra", 1]], coord: [2.0, 8.6], aff: { infra: 0.9, release: 0.6 },
+        aha: "Dense lands in the infra/deploy cluster; BM25 keys on “release” and “roll” to surface the rollback chunk. Hybrid keeps both, and the specific rollback chunk stays near the top." },
+      { label: "what drives our cloud cost?", text: "what drives our cloud cost",
+        topics: [["finance", 1]], coord: [8.4, 2.2], aff: { finance: 0.95, data: 0.3 },
+        aha: "Dense and BM25 agree: “cost”/“cloud” are strong lexical signals and the finance cluster is semantically close. Another easy one — hybrid and reranking change little." },
+      { label: "on-call paging and incidents", text: "on-call paging and incidents",
+        topics: [["trouble", 0.6], ["team", 0.4]], coord: [3.4, 3.4], aff: { trouble: 0.85, support: 0.5, team: 0.45 },
+        aha: "This straddles two topics — troubleshooting (paging) and team (the rotation). Dense blends them; BM25 fixes on the literal “on-call”. Watch the hybrid weight trade the two clusters against each other." },
+      { label: "recent engineering hires", text: "recent engineering hires",
+        topics: [["team", 1]], coord: [5.2, 5.0], aff: { team: 0.95 },
+        aha: "Dense finds the hiring/onboarding cluster; BM25 keys on “hires”/“engineers”. They agree — reranking keeps the team chunks on top." },
+      { label: "batch job audit ledger", text: "batch job audit ledger",
+        topics: [["batch", 1]], coord: [5.0, 2.0], aff: { batch: 0.95, compliance: 0.5 },
+        aha: "Every content word here (“batch”, “job”, “audit”, “ledger”) is literally in the batch chunks, so BM25 is strong — and dense agrees. Note this does <em>not</em> pull the E-4471 chunk to #1 the way the literal code query does; different words, different match." }
+    ];
+    QUERIES.forEach(q => { q.v = blend(q.topics); q.toks = contentTokens(q.text); });
+
+    // ---- retrieval math (all live) ----
+    function dot(a, b) { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; }
+    function denseScores(q) { return CHUNKS.map(c => ({ id: c.id, s: dot(q.v, c.v) })); }
+    function bm25Scores(q) {
+      const k1 = 1.2, bB = 0.75;
+      return CHUNKS.map(c => {
+        let s = 0;
+        for (const w of q.toks) {
+          const f = c.tf[w] || 0; if (f === 0) continue;
+          s += idf(w) * (f * (k1 + 1)) / (f + k1 * (1 - bB + bB * c.len / avgdl));
+        }
+        return { id: c.id, s };
+      });
+    }
+    function rankMap(scored) { // sort desc, return id -> rank(1-based)
+      const sorted = scored.slice().sort((a, b) => b.s - a.s);
+      const m = {}; sorted.forEach((e, i) => m[e.id] = i + 1); return m;
+    }
+    // Weighted Reciprocal Rank Fusion: hybrid weight w in [0,1].
+    //   w = 1  -> pure dense ranking;  w = 0 -> pure BM25 ranking;  w = 0.5 -> standard RRF.
+    // BM25's rank only counts for a chunk that actually matched a query term.
+    function fusedScores(q, w) {
+      const kR = 60;
+      const dm = rankMap(denseScores(q));
+      const bScored = bm25Scores(q), bm = rankMap(bScored);
+      const bHit = {}; bScored.forEach(e => { if (e.s > 1e-9) bHit[e.id] = true; });
+      return CHUNKS.map(c => {
+        let s = w * (1 / (kR + dm[c.id]));
+        if (bHit[c.id]) s += (1 - w) * (1 / (kR + bm[c.id]));
+        return { id: c.id, s };
+      });
+    }
+    // Synthetic cross-encoder relevance: query-topic affinity + a signature-token bonus.
+    // Keyed on topic so it is stable across chunk sizes; only defined for canned queries.
+    function rerankRel(q, chunk) {
+      let base = (q.aff && q.aff[chunk.topic] != null) ? q.aff[chunk.topic] : 0.08;
+      if (q.sig && chunk.tf[q.sig]) base = Math.max(base, 1.0);
+      return base;
+    }
+
+    // ---- free-text query -> synthetic dense embedding by lexical topic affinity ----
+    function freeQuery(str) {
+      const toks = contentTokens(str);
+      const w = {}; let tot = 0;
+      for (const tp in TVEC) {
+        let s = 0; for (const t of toks) if (topicTokens[tp].has(t)) s += senIdf(t);
+        w[tp] = s; tot += s;
+      }
+      const v = new Float32Array(EMB_DIM); let cx = 0, cy = 0, cw = 0;
+      if (tot <= 0) {                       // no lexical signal: neutral centroid
+        for (const tp in TVEC) { const t = TVEC[tp]; for (let i = 0; i < EMB_DIM; i++) v[i] += t[i]; cx += TOPICS[tp].c[0]; cy += TOPICS[tp].c[1]; cw++; }
+      } else {
+        for (const tp in TVEC) { const wt = w[tp]; if (wt <= 0) continue; const t = TVEC[tp]; for (let i = 0; i < EMB_DIM; i++) v[i] += t[i] * wt; cx += TOPICS[tp].c[0] * wt; cy += TOPICS[tp].c[1] * wt; cw += wt; }
+      }
+      let n = 0; for (let i = 0; i < EMB_DIM; i++) n += v[i] * v[i]; n = Math.sqrt(n) || 1;
+      for (let i = 0; i < EMB_DIM; i++) v[i] /= n;
+      return { label: str, text: str, v, toks, coord: [cx / cw, cy / cw], free: true };
+    }
+
+    // ---- UI state ----
+    const qSel = document.getElementById("rag-q");
+    QUERIES.forEach((q, i) => { const o = document.createElement("option"); o.value = i; o.textContent = q.label; qSel.appendChild(o); });
+    const ctrls = document.getElementById("rag-ctrls");
+    const sizeCtrl = makeCtrl(ctrls, { label: "chunk size (synthetic)", min: 0, max: 4, step: 1, value: 0,
+      fmt: v => { const s = SIZES[v]; return "~" + s.tok + " tok (" + s.sents + " sent" + (s.sents > 1 ? "s" : "") + "/chunk)"; } });
+    const overlap = makeCtrl(ctrls, { label: "chunk overlap", min: 0, max: 40, step: 5, value: 15, fmt: v => v.toFixed(0) + "%" });
+    const topN = makeCtrl(ctrls, { label: "top-N retrieved", min: 3, max: 15, step: 1, value: 6, fmt: v => v.toFixed(0) });
+    const hybrid = makeCtrl(ctrls, { label: "hybrid weight (0 = BM25 · 1 = dense)", min: 0, max: 1, step: 0.05, value: 0.5,
+      fmt: v => v <= 0.001 ? "0.00 · BM25 only" : v >= 0.999 ? "1.00 · dense only" : v.toFixed(2) });
+    const rerankCtrl = makeCtrl(ctrls, { label: "rerank (0 = off, 1 = on)", min: 0, max: 1, step: 1, value: 0, fmt: v => v > 0.5 ? "on" : "off" });
+
+    const freeInput = document.getElementById("rag-free");
+    const freeGo = document.getElementById("rag-free-go");
+    const freeClear = document.getElementById("rag-free-clear");
+    const modeEl = document.getElementById("rag-mode");
+    let freeQ = null;   // active free-text query object, or null when using a canned query
+
+    const canvas = document.getElementById("rag-canvas");
+    const listEl = document.getElementById("rag-list");
+    const out = document.getElementById("rag-out");
+    const ahaEl = document.getElementById("rag-aha");
+    const accent = () => cssVar("--accent", "#b48cff");
+    const accent2 = () => cssVar("--accent2", "#4fc3f7");
+
+    let lastSize = -1, lastOv = -1;
+    function ensureCorpus() {
+      const si = sizeCtrl.get() | 0, ov = overlap.get();
+      if (si !== lastSize || ov !== lastOv) { buildCorpus(SIZES[si].sents, ov); lastSize = si; lastOv = ov; }
+    }
+    function activeQuery() { return freeQ ? freeQ : QUERIES[+qSel.value]; }
+
+    function truncate(t) { return t.length > 150 ? t.slice(0, 148) + "…" : t; }
+
+    function draw() {
+      ensureCorpus();
+      const q = activeQuery();
+      const w = hybrid.get();
+      const scored = fusedScores(q, w);
+      const nTop = topN.get();
+      const rerankOn = !q.free && rerankCtrl.get() > 0.5;
+      const sortedAll = scored.slice().sort((a, b) => b.s - a.s);
+      let ranked;
+      if (rerankOn) {
+        // real pipeline: retrieve a WIDER candidate pool (spec: top-N≈20), then let the
+        // cross-encoder reorder it and keep the top-N. Reranking over only the displayed
+        // few can't promote a relevant-but-not-most-similar chunk that ranked just outside.
+        const POOL = 24;
+        const pool = sortedAll.slice(0, Math.max(nTop, POOL));
+        ranked = pool.map(e => ({ id: e.id, s: e.s, rel: rerankRel(q, CHUNKS[e.id]) }))
+                     .sort((a, b) => b.rel - a.rel).slice(0, nTop);
+      } else {
+        ranked = sortedAll.slice(0, nTop);
+      }
+      const topIds = new Set(ranked.map(e => e.id));
+
+      // ---- scatter ----
+      const p = new Plot(canvas, { xmin: 0, xmax: 10.5, ymin: 0, ymax: 10.5, xlabel: "semantic axis 1 (2-D projection)", ylabel: "semantic axis 2" });
+      p.clear(); p.grid();
+      const g = p.g;
+      for (const c of CHUNKS) {
+        const hit = topIds.has(c.id);
+        g.save();
+        g.fillStyle = hit ? accent2() : cssVar("--text-dim", "#8391ab");
+        g.globalAlpha = hit ? 1 : 0.4;
+        g.beginPath(); g.arc(p._tx(c.coord[0]), p._ty(c.coord[1]), hit ? 6 : 3, 0, 2 * Math.PI); g.fill();
+        g.restore();
+      }
+      g.save(); g.strokeStyle = accent2(); g.globalAlpha = 0.5; g.lineWidth = 1;
+      for (const e of ranked) { const c = CHUNKS[e.id]; g.beginPath(); g.moveTo(p._tx(q.coord[0]), p._ty(q.coord[1])); g.lineTo(p._tx(c.coord[0]), p._ty(c.coord[1])); g.stroke(); }
+      g.restore();
+      g.save(); g.fillStyle = accent();
+      const sx = p._tx(q.coord[0]), sy = p._ty(q.coord[1]);
+      g.beginPath();
+      for (let i = 0; i < 10; i++) { const ang = -Math.PI / 2 + i * Math.PI / 5; const rr = (i % 2 === 0) ? 9 : 4; const px = sx + Math.cos(ang) * rr, py = sy + Math.sin(ang) * rr; i === 0 ? g.moveTo(px, py) : g.lineTo(px, py); }
+      g.closePath(); g.fill();
+      g.fillStyle = cssVar("--text", "#dce3f0"); g.font = "11px system-ui"; g.fillText("query", sx + 11, sy + 4);
+      g.restore();
+
+      // ---- ranked list ----
+      let html = "";
+      ranked.forEach((e, i) => {
+        const c = CHUNKS[e.id];
+        const sv = rerankOn ? ("rel " + e.rel.toFixed(2)) : e.s.toFixed(4);
+        html += `<div class="rl-row hit"><span class="rl-rank">${i + 1}</span><span class="rl-txt">#${c.id} · ${truncate(c.text)}</span><span class="rl-score">${sv}</span></div>`;
+      });
+      listEl.innerHTML = html || `<div class="rl-row"><span class="rl-txt">No chunk scored above zero — try the hybrid slider or a different query.</span></div>`;
+
+      // ---- readout ----
+      const dTop = denseScores(q).slice().sort((a, b) => b.s - a.s)[0];
+      const bTop = bm25Scores(q).slice().sort((a, b) => b.s - a.s)[0];
+      const bAny = bTop && bTop.s > 1e-9;
+      const wlabel = w <= 0.001 ? "BM25 only" : w >= 0.999 ? "dense only" : "RRF-fused w=" + w.toFixed(2);
+      out.innerHTML =
+        `corpus: <b>${N}</b> chunks · dense top: <b>#${dTop.id}</b> (cos = ${dTop.s.toFixed(3)}) · ` +
+        `BM25 top: <b>${bAny ? "#" + bTop.id + " (score " + bTop.s.toFixed(2) + ")" : "— no term matched (score 0)"}</b> · ` +
+        `showing <b>${wlabel}</b>${rerankOn ? " + rerank" : ""}, top ${ranked.length}.`;
+      ahaEl.innerHTML = q.free
+        ? "Free-text query: BM25 runs live over the real token counts, and dense uses a synthetic embedding inferred from which topics your words overlap. Reranking is off — the shipped cross-encoder scores are pre-computed for the ten canned queries only, and a static page can't run a real cross-encoder on novel text."
+        : q.aha;
+      if (window.renderMathInElement) renderMathInElement(ahaEl, { delimiters: [{ left: "$", right: "$", display: false }], throwOnError: false });
+    }
+
+    function setFreeMode(on) {
+      const wrap = rerankCtrl.input.closest(".ctrl");
+      if (on) {
+        if (wrap) wrap.classList.add("ctrl-disabled");
+        rerankCtrl.input.disabled = true;
+        qSel.disabled = true;
+        modeEl.innerHTML = `Free-text query: <b>${freeQ.label.replace(/[<>&]/g, "")}</b> — rerank disabled (no pre-computed cross-encoder scores for typed queries).`;
+      } else {
+        if (wrap) wrap.classList.remove("ctrl-disabled");
+        rerankCtrl.input.disabled = false;
+        qSel.disabled = false;
+        modeEl.innerHTML = "Using a canned query. Rerank is available; type your own above to run BM25 + synthetic-dense on novel text.";
+      }
+    }
+    function runFree() {
+      const s = freeInput.value.trim();
+      if (!s) { return; }
+      freeQ = freeQuery(s); setFreeMode(true); draw();
+    }
+    function clearFree() { freeQ = null; freeInput.value = ""; setFreeMode(false); draw(); }
+
+    qSel.addEventListener("change", () => { freeQ = null; setFreeMode(false); draw(); });
+    freeGo.addEventListener("click", runFree);
+    freeInput.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); runFree(); } });
+    freeClear.addEventListener("click", clearFree);
+    sizeCtrl.onInput(draw); overlap.onInput(draw); topN.onInput(draw); hybrid.onInput(draw); rerankCtrl.onInput(draw);
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    setFreeMode(false);
+    draw();
+  })();
+
+  /* ================= QUIZ ================= */
+  renderQuiz("quiz-47", [
+    {
+      q: "You want your model to reliably answer questions about your own 200 internal documents. The correct first move is:",
+      opts: ["Fine-tune (LoRA) it on the 200 documents so it learns them",
+             "Use RAG — retrieve the relevant document into the prompt at inference time",
+             "Pretrain a new model from scratch on the documents",
+             "Nothing can help; the facts aren't in the base model"],
+      a: 1,
+      why: "RAG. Fine-tuning on documents optimizes $-\\log p_\\theta(\\text{doc tokens})$ — it smears facts across 8.19B params and produces fluent, confident WRONG answers. Facts must be in the context window at inference time; that's what RAG does. This is THE misconception the page corrects."
+    },
+    {
+      q: "Fine-tuning is the right lever when the problem is about:",
+      opts: ["Facts the model doesn't know", "Form, style, schema, or house idiom", "Knowledge that changes weekly", "Citing sources"],
+      a: 1,
+      why: "FORM lives in $\\theta$. Facts (options 1, 3, 4) all point to RAG — you change the input, not the weights."
+    },
+    {
+      q: "Your assistant must attach a source citation to every answer. This forces:",
+      opts: ["Fine-tuning, so the model memorizes sources", "RAG, because you can only cite what you retrieved", "A bigger base model", "Higher temperature"],
+      a: 1,
+      why: "A fine-tuned model diffuses facts into weights with no source to point at. Only retrieval gives you a document ID to cite."
+    },
+    {
+      q: "Store 100,000 chunks of dimension 1024 as fp32 embeddings. How many megabytes? (100000 × 1024 × 4 bytes, MB = 10⁶ B)",
+      num: 410, tol: 20, unit: "MB",
+      why: "$100{,}000 \\times 1024 \\times 4 = 409{,}600{,}000$ B $= 410$ MB (fp32). 205 MB in fp16, 12.8 MB as 1-bit binary. It fits in a corner of your box — under ~100k chunks you don't need a vector DB, just $\\texttt{argsort(E @ q)}$."
+    },
+    {
+      q: "A cross-encoder reranker exists to fix what cosine similarity gets wrong, namely:",
+      opts: ["Speed — it retrieves faster than a dot product",
+             "Relevance vs. mere similarity — it reads query and chunk jointly, so “risks of Titan” stops returning Titan-but-not-risk chunks",
+             "Storage — it compresses the embeddings",
+             "It removes the need for BM25"],
+      a: 1,
+      why: "Cosine finds SIMILAR chunks, not RELEVANT ones (“Titan” dominates the vector). The cross-encoder reads query+chunk together and repairs relevance — which is why reranking is not optional."
+    },
+    {
+      q: "You have 40,000 chunks and want exact nearest-neighbour search. The right tool is:",
+      opts: ["A managed vector database with approximate search", "A NumPy dot product: argsort(embeddings @ q)", "Fine-tune the model on the chunks", "BM25 only"],
+      a: 1,
+      why: "Under ~100k chunks, $\\texttt{np.argsort(embeddings @ q)}$ is exact, instant, and zero-ops on the Spark's GPU. Vector DBs buy approximate search + sharding for the millions regime — below that they're a bill and a dependency."
+    },
+    {
+      q: "A 4,000-token prompt is sent on 50,000 calls/month; prefill runs at ~8,000 tok/s. Roughly how many hours/month are spent re-reading that prompt?",
+      num: 6.9, tol: 1, unit: "hours",
+      why: "$4000 \\times 50{,}000 = 2\\times10^8$ tokens; $2\\times10^8 / 8000 = 25{,}000$ s $= 6.9$ h/mo. Distilling to 200 tokens via one LoRA drops it to ~20 min — a 20× cut, and a legitimate reason to fine-tune that has nothing to do with knowledge (framework row 6)."
+    }
+  ], "Prompt vs RAG vs Fine-Tune — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>viz.js — visual test page</title>
+<link rel="stylesheet" href="course.css">
+<style>
+  /* this page has no #sidebar (buildNav needs COURSE_MAP/#layout, which we
+     deliberately don't wire up here) — give #content full width instead */
+  #content { padding: 24px 28px 90px; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+  @media (max-width: 900px) { .grid2 { grid-template-columns: 1fr; } }
+  .case { border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-panel); padding: 12px 14px; margin: 0 0 18px; }
+  .case h3 { margin: 0 0 4px; font-size: .95rem; }
+  .case .note { color: var(--text-dim); font-size: .82rem; margin: 0 0 8px; }
+  .case canvas { width: 100%; height: auto; display: block; background: var(--bg-canvas); border-radius: 6px; border: 1px solid var(--border); }
+  .pass { color: var(--good); font-weight: 700; }
+  .fail { color: var(--bad); font-weight: 700; }
+  #log { font-family: var(--mono); font-size: .8rem; white-space: pre-wrap; background: var(--bg-code); border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; }
+</style>
+</head>
+<body>
+<div id="layout"><main id="content"><div class="inner" style="max-width:1400px">
+
+  <h1>viz.js — visual test page</h1>
+  <p class="subtitle">Every primitive, exercised against normal input and edge cases (empty / single-element / all-equal / NaN / huge / negative / mismatched shapes). Toggle theme and re-check both.</p>
+  <p><button class="btn" id="theme-btn" style="margin-right:8px;">Toggle theme</button><span id="theme-state" style="color:var(--text-dim)"></span></p>
+
+  <h2 id="results-h">Self-check results</h2>
+  <div id="log">running…</div>
+
+  <h2>1. Heatmap</h2>
+  <div class="grid2">
+    <div class="case"><h3>1a. Attention weights (sequential, real softmax via NN.attention)</h3>
+      <p class="note">8 tokens, causal off. Row/col labels, cell text, colorbar, hover.</p>
+      <canvas id="hm-attn" height="260"></canvas></div>
+    <div class="case"><h3>1b. Weight matrix (diverging, signed)</h3>
+      <p class="note">Random signed weights, He-scaled. Negative → warm/bad, positive → accent.</p>
+      <canvas id="hm-w" height="260"></canvas></div>
+    <div class="case"><h3>1c. Edge: empty data <code>[]</code></h3>
+      <canvas id="hm-empty" height="140"></canvas></div>
+    <div class="case"><h3>1d. Edge: single element <code>[[0.42]]</code></h3>
+      <canvas id="hm-single" height="140"></canvas></div>
+    <div class="case"><h3>1e. Edge: all-equal (constant matrix)</h3>
+      <canvas id="hm-const" height="180"></canvas></div>
+    <div class="case"><h3>1f. Edge: NaN-laced + huge + negative-huge</h3>
+      <p class="note">One cell is a literal NaN, one is 1e9, one is -1e9. Must not blank out or crash.</p>
+      <canvas id="hm-nan" height="200"></canvas></div>
+  </div>
+
+  <h2>2. NetGraph</h2>
+  <div class="grid2">
+    <div class="case"><h3>2a. The §5.4 worked 2-2-1 network (real values via NN.worked221)</h3>
+      <p class="note"><button class="btn secondary" id="ng-fwd">Animate forward →</button> <button class="btn secondary" id="ng-bwd">Animate backward ←</button></p>
+      <canvas id="ng-221" height="260"></canvas></div>
+    <div class="case"><h3>2b. Degrade: a wide net [30, 40, 12, 3]</h3>
+      <p class="note">Beyond maxNodes per layer — must compress, not choke or render solid black.</p>
+      <canvas id="ng-wide" height="260"></canvas></div>
+    <div class="case"><h3>2c. Edge: single node, single layer <code>[1]</code></h3>
+      <canvas id="ng-single" height="140"></canvas></div>
+    <div class="case"><h3>2d. Edge: NaN/undefined activations &amp; weights mixed in</h3>
+      <canvas id="ng-nan" height="200"></canvas></div>
+  </div>
+
+  <h2>3. Surface3D</h2>
+  <div class="grid2">
+    <div class="case"><h3>3a. Contour (default) — ill-conditioned ravine + live SGD trajectory</h3>
+      <p class="note">$L=\tfrac12(w_1^2+20w_2^2)$, &eta;=0.08. Click the contour to set a new start point and re-run.</p>
+      <canvas id="s3-contour" height="300"></canvas></div>
+    <div class="case"><h3>3b. Wireframe mode — same ravine, drag to rotate</h3>
+      <canvas id="s3-wire" height="300"></canvas></div>
+    <div class="case"><h3>3c. Edge: constant function (flat, zero-range)</h3>
+      <canvas id="s3-flat" height="180"></canvas></div>
+    <div class="case"><h3>3d. Edge: fn returns NaN over part of the domain</h3>
+      <p class="note"><code>1/(x*y)</code> — undefined near the axes.</p>
+      <canvas id="s3-nan" height="220"></canvas></div>
+  </div>
+
+  <h2>4. TensorViz</h2>
+  <div class="grid2">
+    <div class="case"><h3>4a. Matmul, animated: (4×5) @ (5×3)</h3>
+      <p class="note"><button class="btn secondary" id="tv-run">Animate matmul</button></p>
+      <canvas id="tv-mm" height="240"></canvas></div>
+    <div class="case"><h3>4b. Shape mismatch: (3×4) @ (5×2)</h3>
+      <canvas id="tv-mismatch" height="220"></canvas></div>
+    <div class="case"><h3>4c. Shape-chain mode: transformer tensor shapes</h3>
+      <p class="note">(batch, seq, d_model) → Q/K/V → attention scores</p>
+      <canvas id="tv-shapes" height="220"></canvas></div>
+    <div class="case"><h3>4d. Edge: 1×1 "matrices" (scalars)</h3>
+      <canvas id="tv-scalar" height="180"></canvas></div>
+  </div>
+
+  <h2>5. Timeline</h2>
+  <div class="grid2">
+    <div class="case"><h3>5a. Live training loss (real Adam run on XOR via NN.Trainer)</h3>
+      <p class="note"><button class="btn secondary" id="tl-run">Train 400 steps</button></p>
+      <canvas id="tl-loss" height="200"></canvas></div>
+    <div class="case"><h3>5b. Edge: no data pushed yet</h3>
+      <canvas id="tl-empty" height="140"></canvas></div>
+  </div>
+
+  <h2>6. hl() syntax highlighter</h2>
+  <div class="grid2">
+    <div id="hl-js"></div>
+    <div id="hl-py"></div>
+  </div>
+
+</div></main></div>
+
+<script src="course.js"></script>
+<script src="nn.js"></script>
+<script src="viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+  const { Value, MLP, RNG, Mat, attention, worked221, Trainer, Adam, xorData, softmax } = NN;
+  const results = [];
+  function check(name, cond) { results.push({ name, ok: !!cond }); }
+
+  /* theme toggle (buildNav isn't wired on this page — no #sidebar/#layout nav) */
+  const themeBtn = document.getElementById("theme-btn");
+  const themeState = document.getElementById("theme-state");
+  function paintThemeState() { themeState.textContent = "current: " + (document.documentElement.dataset.theme === "light" ? "light" : "dark"); }
+  themeBtn.addEventListener("click", () => { applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light"); paintThemeState(); });
+  paintThemeState();
+
+  /* ============================ 1. Heatmap ============================ */
+  (function () {
+    const tokens = "The animal didnt cross street because tired".split(" ");
+    const rng = new RNG(7);
+    const d = 8, n = tokens.length;
+    const X = Mat.randn(n, d, rng, 1);
+    const Wq = Mat.randn(d, d, rng, 1 / Math.sqrt(d)), Wk = Mat.randn(d, d, rng, 1 / Math.sqrt(d)), Wv = Mat.randn(d, d, rng, 1 / Math.sqrt(d));
+    const Q = X.matmul(Wq), K = X.matmul(Wk), V = X.matmul(Wv);
+    const res = attention(Q, K, V, { causal: false });
+    const A = res.A.toArray();
+    const hmAttn = new Heatmap(document.getElementById("hm-attn"), {
+      data: A, rowLabels: tokens, colLabels: tokens, colormap: "sequential",
+      cellText: false, colorbar: true, title: "A = softmax(QKᵀ/τ)",
+      onHover: (i, j, v) => { if (i != null) document.title = `[${i},${j}]=${v.toFixed(3)}`; }
+    });
+    check("Heatmap attention rows sum to 1 (spot-check row 0)", Math.abs(A[0].reduce((a, b) => a + b, 0) - 1) < 1e-6);
+
+    const rng2 = new RNG(3);
+    const W = []; for (let i = 0; i < 8; i++) { const row = []; for (let j = 0; j < 10; j++) row.push(rng2.normal(0, 0.6)); W.push(row); }
+    new Heatmap(document.getElementById("hm-w"), { data: W, colormap: "diverging", cellText: true, title: "W (signed)" });
+
+    new Heatmap(document.getElementById("hm-empty"), { data: [], colorbar: true, title: "empty []" });
+    new Heatmap(document.getElementById("hm-single"), { data: [[0.42]], cellText: true, colormap: "diverging", title: "single cell" });
+    new Heatmap(document.getElementById("hm-const"), { data: [[3, 3, 3], [3, 3, 3], [3, 3, 3]], cellText: true, title: "all-equal = 3" });
+    new Heatmap(document.getElementById("hm-nan"), {
+      data: [[0.1, NaN, 0.4], [1e9, 0.2, -1e9], [Infinity, -0.3, 0.0]],
+      cellText: true, colormap: "diverging", title: "NaN / huge / -huge / Infinity"
+    });
+    check("Heatmap survives empty/single/const/NaN without throwing", true);
+  })();
+
+  /* ============================ 2. NetGraph ============================ */
+  (function () {
+    const w = worked221();
+    // worked221().P is the {name: Value} object (worked221().params is the
+    // flat array in `order`) — build weights[] as (out x in) rows to match
+    // NetGraph's row-major "weights[l][outIdx][inIdx]" contract.
+    const P = w.P;
+    const W1 = [[P.W1_11.data, P.W1_12.data], [P.W1_21.data, P.W1_22.data]];
+    const W2 = [[P.W2_1.data, P.W2_2.data]];
+    const x = [0.60, -0.20];
+    const a1 = [w.forward.a1[0], w.forward.a1[1]];
+    const yhat = [w.forward.yhat];
+    const activations = [x, a1, yhat];
+    const grads = [x.map(() => 0), [w.grads.b1_1, w.grads.b1_2], [w.grads.b2]];
+
+    const ng = new NetGraph(document.getElementById("ng-221"), {
+      layers: [2, 2, 1], weights: [W1, W2], activations,
+      labels: [["x1", "x2"], ["a1", "a2"], ["ŷ"]],
+    });
+    document.getElementById("ng-fwd").addEventListener("click", () => ng.animateForward(activations, { duration: 1200 }));
+    document.getElementById("ng-bwd").addEventListener("click", () => ng.animateBackward(grads, { duration: 1200 }));
+    check("NetGraph worked221 L matches §5.4 (0.453048)", Math.abs(w.loss - 0.453048) < 1e-5);
+
+    const rngW = new RNG(11);
+    const sizes = [30, 40, 12, 3];
+    const bigW = [];
+    for (let l = 0; l < sizes.length - 1; l++) {
+      const M = []; for (let o = 0; o < sizes[l + 1]; o++) { const row = []; for (let i = 0; i < sizes[l]; i++) row.push(rngW.normal(0, 1)); M.push(row); } bigW.push(M);
+    }
+    const bigActs = sizes.map(n => Array.from({ length: n }, () => rngW.uniform(-1, 1)));
+    new NetGraph(document.getElementById("ng-wide"), { layers: sizes, weights: bigW, activations: bigActs, maxNodes: 16 });
+
+    new NetGraph(document.getElementById("ng-single"), { layers: [1], activations: [[0.7]] });
+
+    new NetGraph(document.getElementById("ng-nan"), {
+      layers: [2, 3, 1],
+      weights: [[[1, NaN], [0.5, -0.5], [Infinity, 0.1]], [[NaN, 0.2, -0.9]]],
+      activations: [[0.5, NaN], [1, -1, 0], [NaN]],
+    });
+    check("NetGraph survives NaN/Infinity weights+activations without throwing", true);
+  })();
+
+  /* ============================ 3. Surface3D ============================ */
+  (function () {
+    const L = (w1, w2) => 0.5 * (w1 * w1 + 20 * w2 * w2);
+    const grad = (w1, w2) => [w1, 20 * w2];
+    const s3 = new Surface3D(document.getElementById("s3-contour"), {
+      fn: L, xmin: -3, xmax: 3, ymin: -3, ymax: 3, levels: 10,
+      onClick: (x, y) => runGD(x, y),
+    });
+    function runGD(w1_0, w2_0) {
+      let w1 = w1_0, w2 = w2_0; const eta = 0.08;
+      const pts = [[w1, w2]];
+      for (let i = 0; i < 40; i++) { const [g1, g2] = grad(w1, w2); w1 -= eta * g1; w2 -= eta * g2; pts.push([w1, w2]); }
+      s3.setTrajectory(pts);
+    }
+    runGD(2.5, 2.5);
+    check("Surface3D contour trajectory descends (loss decreases)", L(...s3.trajectory[0]) > L(...s3.trajectory[s3.trajectory.length - 1]));
+
+    const s3w = new Surface3D(document.getElementById("s3-wire"), { fn: L, xmin: -3, xmax: 3, ymin: -3, ymax: 3, mode: "wireframe" });
+    s3w.setTrajectory([[2.5, 2.5], [2.3, 1.6], [2.0, 0.8], [1.6, 0.2], [1.0, -0.05], [0.4, 0.0]]);
+
+    new Surface3D(document.getElementById("s3-flat"), { fn: () => 5, xmin: -1, xmax: 1, ymin: -1, ymax: 1 });
+
+    new Surface3D(document.getElementById("s3-nan"), { fn: (x, y) => 1 / (x * y), xmin: -2, xmax: 2, ymin: -2, ymax: 2, levels: 8 });
+    check("Surface3D survives constant fn and fn returning Infinity/NaN", true);
+  })();
+
+  /* ============================ 4. TensorViz ============================ */
+  (function () {
+    const rngT = new RNG(4);
+    const mkMat = (r, c) => ({ shape: [r, c] });
+    const tv = new TensorViz(document.getElementById("tv-mm"), { A: { shape: [4, 5], label: "X" }, B: { shape: [5, 3], label: "W" }, labels: { C: "Y" } });
+    document.getElementById("tv-run").addEventListener("click", () => tv.animateMatmul({ A: { shape: [4, 5], label: "X" }, B: { shape: [5, 3], label: "W" } }));
+
+    new TensorViz(document.getElementById("tv-mismatch"), { A: { shape: [3, 4], label: "A" }, B: { shape: [5, 2], label: "B" } });
+
+    new TensorViz(document.getElementById("tv-shapes"), {
+      mode: "shape",
+      shapes: [
+        { shape: [8, 10, 64], label: "X", note: "batch,seq,d" },
+        { shape: [8, 10, 64], label: "Q" },
+        { shape: [10, 10], label: "scores", note: "Qᵀ x per-batch" },
+      ]
+    });
+
+    new TensorViz(document.getElementById("tv-scalar"), { A: { shape: [1, 1], label: "a" }, B: { shape: [1, 1], label: "b" } });
+    check("TensorViz renders mismatched shapes without throwing", true);
+  })();
+
+  /* ============================ 5. Timeline ============================ */
+  (function () {
+    const tl = new Timeline(document.getElementById("tl-loss"), { xlabel: "step", ylabel: "loss (log)", ylog: true });
+    document.getElementById("tl-run").addEventListener("click", () => {
+      const { X, y } = xorData();
+      const rngN = new RNG(2024);
+      const model = new MLP([2, 8, 1], { act: "relu", outAct: "identity", rng: rngN });
+      const trainer = new Trainer({ model, X, y, loss: "bce", opt: new Adam(model.parameters(), { lr: 0.05 }), rng: rngN });
+      tl.reset();
+      let step = 0;
+      const tick = () => {
+        const l = trainer.step(); step++;
+        tl.push(step, l);
+        if (step === 100) tl.addMarker(step, "lr note");
+        if (step < 400) requestAnimationFrame(tick);
+      };
+      tick();
+    });
+    new Timeline(document.getElementById("tl-empty"), {});
+    check("Timeline renders with zero pushed points", true);
+
+    // regression check for a real bug this test page caught: Timeline.draw()
+    // used to read `window.Plot`, which is always undefined (course.js's
+    // `class Plot` is a global LEXICAL binding, not a window property) — the
+    // guard silently no-op'd and every Timeline canvas stayed blank.
+    const tlProbe = document.createElement("canvas"); tlProbe.height = 100;
+    const tl2 = new Timeline(tlProbe, {});
+    tl2.push(1, 0.5); tl2.push(2, 0.3);
+    const pctx = tlProbe.getContext("2d");
+    const px = pctx.getImageData(0, 0, tlProbe.width, tlProbe.height).data;
+    let drawn = false; for (let i = 3; i < px.length; i += 4) if (px[i] !== 0) { drawn = true; break; }
+    check("Timeline actually draws to its canvas (regression: window.Plot bug)", drawn);
+
+    // regression check for fmtNum: the old fixed-2-decimal rounding turned
+    // any value under ~0.005 into "0" (a silent lie on a log-scale loss axis)
+    check("vizUtils.fmtNum(0.0014) is not silently rounded to \"0\"", vizUtils.fmtNum(0.0014) === "0.0014");
+    check("vizUtils.fmtNum(0.1) reads as plain decimal, not eng notation", vizUtils.fmtNum(0.1) === "0.1");
+  })();
+
+  /* ============================ 6. hl() ============================ */
+  (function () {
+    const jsSrc = `// tiny MLP forward pass
+function forward(x, W1, b1, W2, b2) {
+  const z1 = W1.map((row, i) => row.reduce((s, w, j) => s + w * x[j], b1[i]));
+  const a1 = z1.map(Math.tanh);
+  return dot(W2, a1) + b2;  // scalar output
+}`;
+    const pySrc = `import torch
+
+def train_step(model, x, y, opt):
+    """One optimizer step. Nothing hidden."""
+    opt.zero_grad()
+    loss = torch.nn.functional.mse_loss(model(x), y)
+    loss.backward()
+    opt.step()
+    return loss.item()  # 0.4530 -> 0.3402 after one step`;
+    document.getElementById("hl-js").innerHTML = hl.block(jsSrc, "js", { highlight: [3] });
+    document.getElementById("hl-py").innerHTML = hl.block(pySrc, "python", { highlight: [5, 6] });
+    wireCodeblocks(); // these were inserted after course.js's own DOMContentLoaded wiring pass
+    check("hl() output contains expected token spans", /tok-kw/.test(document.getElementById("hl-js").innerHTML) && /tok-str/.test(document.getElementById("hl-py").innerHTML));
+  })();
+
+  /* ============================ report ============================ */
+  const log = document.getElementById("log");
+  const lines = results.map(r => (r.ok ? "PASS " : "FAIL ") + r.name);
+  const allPass = results.every(r => r.ok);
+  log.innerHTML = `<span class="${allPass ? 'pass' : 'fail'}">${allPass ? 'ALL CHECKS PASSED' : 'SOME CHECKS FAILED'}</span> (${results.filter(r=>r.ok).length}/${results.length})\n\n` + lines.join("\n");
+  window.__vizTestDone = true;
+  window.__vizTestPass = allPass;
+});
+</script>
+</body>
+</html>

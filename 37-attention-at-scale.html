@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>37. Attention at Scale — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: the three-cost demo legend + a compact controls grid. Everything
+     uses the shared CSS custom properties so it stays theme-aware for free. */
+  .legend-row { display: flex; gap: 18px; flex-wrap: wrap; margin: 10px 0 2px; font-size: .84rem; color: var(--text-dim); }
+  .legend-dot { display: inline-block; width: 11px; height: 11px; border-radius: 3px; margin-right: 6px; vertical-align: middle; }
+  .legend-dot.dash { border-radius: 0; height: 0; width: 16px; border-top: 2px dashed currentColor; }
+  .ctrl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 22px; }
+  @media (max-width: 620px) { .ctrl-grid { grid-template-columns: 1fr; } }
+  .seg-row { display: flex; gap: 8px; margin: 6px 0 2px; flex-wrap: wrap; align-items: center; }
+  .seg-row .seg-label { font-size: .82rem; color: var(--text-dim); margin-right: 4px; }
+  .seg-row button {
+    padding: 5px 13px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .82rem;
+    font-family: var(--font);
+  }
+  .seg-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+</style>
+</head>
+<body data-page="37-attention-at-scale.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III — Architecture</span>
+    <h1>Attention at Scale: $O(S^2)$, FlashAttention &amp; the KV Cache</h1>
+    <p class="subtitle">Three different costs hide inside one <code>softmax(QKᵀ/√d)V</code>,
+      and they have three different fixes. Conflate them and you will optimize the wrong one.
+      This is the last page of the trunk before Adaptation — and the final beat of the
+      memory-budget thread.</p>
+
+    <p>You have the transformer block assembled (page 35) and counted to the byte on
+      Qwen3-8B (page 36). One question is left before we leave architecture behind: what
+      does attention <em>cost</em> when the sequence gets long? The famous answer — "it's
+      $O(S^2)$" — is true, incomplete, and usually points at the wrong bottleneck. There
+      are really <strong>three</strong> costs stacked inside the same formula, and untangling
+      them is the whole page.</p>
+
+    <div class="box predict"><span class="box-title">🔮 Predict, before you scroll</span>
+      Qwen3-8B advertises a <strong>40,960-token</strong> context. Its <em>single-layer</em>
+      attention score matrix at that length, in fp32, is about — <strong>200&nbsp;MB, 2&nbsp;GB,
+      or 200&nbsp;GB?</strong> Commit to one. (There is a real GPU on your desk with 128&nbsp;GB
+      of unified memory; does your answer fit in it?)
+    </div>
+
+    <p><em>Translation note (notation §3.2):</em> this course writes $S$ for sequence length
+      and $i,j$ for positions. Papers and configs write $T$, $L$, $N$, $n$, <code>seq_len</code>,
+      or <code>max_length</code> for $S$, and $t$, $i$, $n$, or $j$ for position — four rival
+      letters for the one thing. $H$ is the number of query heads; $H_{kv}$ is the number of
+      key/value heads (<code>num_key_value_heads</code>), and the distinction is about to earn
+      its keep.</p>
+
+    <h2>The three costs, stated separately</h2>
+    <p>Take one attention layer of Qwen3-8B and push it to its own advertised context,
+      $S = 40{,}960$ (<code>max_position_embeddings</code> <strong>[VP, constants §1.1]</strong>).
+      Three quantities scale very differently:</p>
+
+    <table class="ledger">
+      <thead><tr><th>Cost</th><th>Formula</th><th>Value @ $S=40{,}960$</th><th>Its fix</th></tr></thead>
+      <tbody>
+        <tr>
+          <td>Score-matrix <b>memory</b> (naive)</td>
+          <td>$H\,S^2\,b$</td>
+          <td><b>214.7 GB</b> per layer, fp32 <b>[DER, §5]</b></td>
+          <td>FlashAttention</td>
+        </tr>
+        <tr>
+          <td>Attention <b>FLOPs</b></td>
+          <td>$\approx 4\,S^2 d$</td>
+          <td><b>27.5 TFLOP</b> per layer <b>[DER, §5]</b></td>
+          <td>(intrinsic — stays $O(S^2)$)</td>
+        </tr>
+        <tr>
+          <td>FFN <b>FLOPs</b></td>
+          <td>$\approx 6\,S\,d\,d_{\text{ff}}$</td>
+          <td><b>12.4 TFLOP</b> per layer <b>[DER, §5]</b></td>
+          <td>(dominates below 18k tokens)</td>
+        </tr>
+        <tr>
+          <td>KV <b>cache</b> (decode)</td>
+          <td>$2\,S\,L\,H_{kv}\,d_{\text{head}}\,b$</td>
+          <td><b>5.625 GiB</b>, bf16 <b>[DER, §4]</b></td>
+          <td>GQA / MQA / MLA</td>
+        </tr>
+      </tbody>
+    </table>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value (Qwen3-8B)</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$S$</td><td>sequence length / context</td><td>up to 40,960</td><td>config, constants §1.1 [VP]</td></tr>
+        <tr><td>$H$</td><td>query heads</td><td>32</td><td>config [VP]</td></tr>
+        <tr><td>$H_{kv}$</td><td>key/value heads — <b>not</b> $H$</td><td>8</td><td>config [VP]</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head width</td><td>128</td><td>config [VP]</td></tr>
+        <tr><td>$d$</td><td>residual-stream width $d_{\text{model}}$</td><td>4096</td><td>config [VP]</td></tr>
+        <tr><td>$d_{\text{ff}}$</td><td>FFN inner width ($=3d$)</td><td>12288</td><td>config [VP]</td></tr>
+        <tr><td>$L$</td><td>layers</td><td>36</td><td>config [VP]</td></tr>
+        <tr><td>$b$</td><td>bytes per stored number</td><td>4 (fp32) / 2 (bf16)</td><td>precision choice</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ The 214.7 GB — resolving the predict</span>
+      The score matrix $S = QK^\top$ is $(S, S)$ per head, and there are $H$ heads:
+      $$H\,S^2\,b = 32 \times 40{,}960^2 \times 4\ \text{B} = \mathbf{214.7\ GB}\ \text{per layer, fp32.}$$
+      So the answer was <strong>200 GB</strong> — and it is <em>per layer</em>, of which there
+      are 36. A single layer's score matrix at the model's own advertised context does not fit
+      in any GPU ever made. <strong>And yet the model runs.</strong> Hold that paradox; it is
+      what FlashAttention exists to dissolve, two sections down.
+    </div>
+
+    <p>The attention and FFN FLOP counts come from the matmul rule $2mnp$ for an $(m,n)\!\times\!(n,p)$
+      product (multiply and add counted separately, as vendors do — constants §5). Attention is
+      two matmuls per head, $QK^\top$ and $AV$, each $2S^2 d_{\text{head}}$ summed over heads
+      $\Rightarrow 4S^2 d$. The FFN is three matrices (gate, up, down), each $2S\,d\,d_{\text{ff}}
+      \Rightarrow 6S\,d\,d_{\text{ff}}$.</p>
+
+    <h2>The crossover: when is $O(S^2)$ actually your problem?</h2>
+    <p>Attention FLOPs grow with $S^2$; FFN FLOPs grow with $S$. So there is a crossover length
+      below which the FFN — not attention — dominates compute. Set them equal:</p>
+    <p>$$4S^2 d > 6S\,d\,d_{\text{ff}} \quad\Longleftrightarrow\quad S > \tfrac{3}{2}\,d_{\text{ff}}
+       = 1.5 \times 12{,}288 = \mathbf{18{,}432}\ \text{tokens.}$$</p>
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Below <strong>18,432 tokens</strong>, the FFN dominates attention in FLOPs. At ordinary chat
+      lengths, "it's $O(S^2)$" is the <em>wrong</em> bottleneck — attention isn't where your compute
+      goes. The $d$ cancels: the crossover depends only on the FFN expansion ratio, which is why
+      it's $\tfrac{3}{2}d_{\text{ff}}$ and nothing else.
+    </div>
+
+    <h2>Mitigation 1 — FlashAttention: fix the memory, not the FLOPs</h2>
+    <p>The 214.7 GB never actually gets allocated. Naive attention materializes the full $(S,S)$
+      score matrix in HBM before the softmax touches it. FlashAttention never does. It tiles $Q$,
+      $K$, $V$ into blocks that fit in on-chip SRAM, and carries a <strong>running maximum</strong>
+      and a <strong>running normalizer</strong> so the softmax corrects itself as blocks stream in —
+      the online-softmax (streaming log-sum-exp) identity, which is algebra, not approximation.</p>
+
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon — what FlashAttention refuses to build</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">X            (B, S, d=4096)                      # residual stream in</span>
+<span class="line">W_q          (H*d_head=4096, d=4096)             # (out, in) — ALWAYS</span>
+<span class="line">W_k, W_v     (H_kv*d_head=1024, d=4096)          # (out, in) — note H_kv, not H</span>
+<span class="line">Q = X @ W_q.T   -> reshape/transpose             (B, H=32,    S, d_head=128)</span>
+<span class="line">K = X @ W_k.T   -> reshape/transpose             (B, H_kv=8,  S, d_head=128)   # 8 KV heads shared by 32 Q heads</span>
+<span class="line">V = X @ W_v.T   -> reshape/transpose             (B, H_kv=8,  S, d_head=128)</span>
+<span class="line hl">scores = Q @ K.T / sqrt(d_head)                  (B, H=32, S, S)   <-  the (S,S) monster: 214.7 GB/layer @ S=40960</span>
+<span class="line">A = softmax(scores + M, axis=-1)                 (B, H, S, S)      # rows sum to 1, columns do not</span>
+<span class="line">out = A @ V                                       (B, H, S, d_head)</span>
+<span class="line">                                                 FlashAttention computes `out` WITHOUT ever storing `scores`.</span></code></pre>
+    </div>
+
+    <p>Memory drops from $O(S^2)$ to $O(S)$; the FLOP count stays the same, or rises slightly
+      (the backward pass recomputes tiles instead of storing them). It is faster anyway, because
+      attention is <strong>memory-bandwidth-bound</strong>, not compute-bound — the GPU spends its
+      time moving that giant matrix, not multiplying it.</p>
+    <div class="box key"><span class="box-title">🔑 The sentence to keep</span>
+      FlashAttention made attention faster by making it do <em>more</em> arithmetic. That is only
+      paradoxical if you think the GPU's problem is arithmetic. Its problem is <strong>memory</strong>.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: FlashAttention-4 and Blackwell's asymmetry (2026)</summary><div>
+      <p>FlashAttention-4 (paper released 5 March 2026; <code>flash-attn-4</code> on PyPI) targets
+        Blackwell — including the GB10 in your DGX Spark. Blackwell scaled its tensor cores hard
+        but did <em>not</em> scale the special-function unit (SFU) that computes <code>exp()</code>
+        at the same rate. So the exponential inside the softmax became a relative bottleneck. FA4's
+        answer is a co-design move you can appreciate directly: it computes <code>exp()</code> with
+        a polynomial evaluated on the ordinary FMA (fused multiply-add) units instead of waiting on
+        the SFU, keeping the tensor cores fed. The lesson generalizes past this one kernel — <em>the
+        fast path is whichever unit isn't the bottleneck</em>, and which unit that is changes with
+        every hardware generation. This is the same "measure your own box" discipline the roofline
+        page (43) turns into an exercise. (Vendor throughput multipliers here are reported figures,
+        not something this course freezes as fact.)</p>
+    </div></details>
+
+    <h2>Mitigation 2 — GQA: fix the KV cache, not the score matrix</h2>
+    <p>FlashAttention fixes the training/prefill activation memory. It does <em>nothing</em> for
+      the other memory cost — the <strong>KV cache</strong> at decode time. These are orthogonal,
+      and both ship in every 2026 model. The cache exists at all only because causal masking
+      (page 32) freezes each position's past $K,V$: once computed, they never change, so you keep
+      them instead of recomputing. Here we count the bytes.
+      <code>[THREAD:memory-budget beat — the KV cache]</code></p>
+
+    <p>$$\text{KV bytes} = 2 \cdot S \cdot L \cdot H_{kv} \cdot d_{\text{head}} \cdot b$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / value</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$2$</td><td>one $K$ tensor <b>and</b> one $V$ tensor</td><td>—</td><td>the cache stores both</td></tr>
+        <tr><td>$S$</td><td>tokens cached so far</td><td>up to 40,960</td><td>the running context</td></tr>
+        <tr><td>$L$</td><td>layers — the cache is per-layer</td><td>36</td><td>config [VP]</td></tr>
+        <tr><td>$H_{kv}$</td><td><b>key/value heads, not $H$</b></td><td>8</td><td>config [VP] — §4 calls this the field's #1 error</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head width</td><td>128</td><td>config [VP]</td></tr>
+        <tr><td>$b$</td><td>bytes per cached number</td><td>2 (bf16)</td><td>KV is kept in bf16</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ Worked — the cache, byte by byte [DER, constants §4]</span>
+      Per token, per layer: $2 \times 8 \times 128 \times 2 = \mathbf{4{,}096\ B = 4\ KiB}$.<br>
+      Per token, all 36 layers: $4{,}096 \times 36 = 147{,}456\ \text{B} = \mathbf{144\ KiB/token}$.<br>
+      At full context $S = 40{,}960$: $147{,}456 \times 40{,}960 = 6{,}039{,}797{,}760\ \text{B}
+      = \mathbf{5.625\ GiB}$.<br>
+      <strong>The counterfactual that shows why GQA is universal:</strong> if this were plain
+      multi-head attention ($H_{kv} = H = 32$), the per-token cost would be $576\ \text{KiB}$ and
+      the full-context cache would be $\mathbf{22.50\ GiB}$. GQA's ratio $H/H_{kv} = 32/8 = 4$ saves
+      exactly <strong>4×</strong> and recovers <strong>16.88 GiB</strong>.
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 Why 4× matters, in GiB</span>
+      Qwen3-8B's bf16 weights are <strong>15.26 GiB</strong> (16.38 GB — constants §1.1, §4).
+      The MHA counterfactual cache, <strong>22.50 GiB</strong>, would <em>exceed the entire model</em>
+      at full context. With GQA it is <strong>5.625 GiB</strong> — a third of the weights. That gap
+      is why 8 KV heads shared by 32 query heads is universal in 2026: without it, the thing you
+      keep around to avoid recompute would outweigh the thing you are running. (Comparison done in
+      GiB throughout — never mix GiB against GB when sizing to the box; constants §0.)
+    </div>
+
+    <p>Mechanically: $H = 32$ query heads share $H_{kv} = 8$ key/value heads — four query heads per
+      KV head. MHA is $H_{kv} = H$; MQA (multi-query) is $H_{kv} = 1$; GQA interpolates, and
+      GQA-8 is the sweet spot Qwen3 ships. <code>[THREAD:Qwen3-8B]</code> — the same fourteen numbers
+      ($H_{kv}=8$, $L=36$, $d_{\text{head}}=128$) you have been carrying since page 25.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: mitigations 3–5 — MLA, sliding-window/hybrid, FlexAttention</summary><div>
+      <p><strong>MLA (multi-head latent attention).</strong> The DeepSeek lineage (and, as of 2026,
+        Kimi K2 / GLM-5 / Ling 2.5) caches a single low-rank <em>latent</em> per token and
+        decompresses $K,V$ on the fly. It trades compute for memory — the opposite direction from
+        GQA. Learn the idea, not the projection equations: shrink what you store, pay a little
+        arithmetic to reconstitute it.</p>
+      <p><strong>Sliding-window / hybrid.</strong> Most layers attend only to a local window (e.g.
+        SWA-4096), a few attend globally, commonly in a 3:1 local:global ratio; recurrent-style
+        linear-attention hybrids (Qwen3-Coder-Next's Gated DeltaNet, 262k context) push this
+        further. The cache stops growing with $S$ on the windowed layers.</p>
+      <p><strong>FlexAttention (PyTorch 2.5+).</strong> Write your mask/score modification as a
+        Python <code>score_mod</code>/<code>mask_mod</code> and let <code>torch.compile</code> fuse
+        it into a FlashAttention-style kernel. Honest caveats: the kernel options are not yet a
+        public API, there are documented numerical discrepancies vs SDPA, and it can silently fall
+        back to a dense path — profile to confirm. <strong>Do not build a core code path on it.</strong>
+        Default to <code>F.scaled_dot_product_attention</code> (stable, dispatches to a FlashAttention
+        backend); show the naive implementation first for understanding; keep FlexAttention as the
+        escape hatch.</p>
+    </div></details>
+
+    <div class="box warn"><span class="box-title">⚠️ Four things people get wrong about "attention is expensive"</span>
+      <b>(a) "FlashAttention is an approximation / a kind of linear attention."</b> No — it is
+      numerically exact (up to floating-point reassociation). It changes <em>where data lives</em>,
+      not <em>what is computed</em>; the online-softmax identity is algebraic, not a truncation.<br>
+      <b>(b) "FlashAttention makes attention $O(S)$."</b> It makes the <em>memory</em> $O(S)$. The
+      <em>FLOPs stay $O(S^2)$</em> — which is exactly why 128k context is <em>possible</em> but still
+      <em>expensive</em>.<br>
+      <b>(c) "GQA is a quality-hurting approximation."</b> It is an architectural choice made
+      <em>before</em> pretraining: the model is trained with 8 KV heads and never had 32, so nothing
+      is being approximated away. (Uptraining an existing MHA model down to GQA after the fact is a
+      different operation and does cost a little quality — but that is not what Qwen3 did.)<br>
+      <b>(d) "$O(S^2)$ is why long context is hard."</b> Below 18,432 tokens the FFN dominates FLOPs,
+      and at decode the binding constraint is KV-cache memory and bandwidth, not attention FLOPs.
+      "It's $S^2$" is usually the wrong bottleneck.
+    </div>
+
+    <h2>Demo — the three costs, side by side</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Every trace below is the live formula, recomputed on each tick — nothing is pre-baked.
+      Sweep <em>sequence length</em> and watch: (1) below the <b>18,432</b> detent, the FFN-FLOP
+      trace sits <em>above</em> attention; (2) flip $H_{kv}$ from 8 to 32 and the KV-cache trace
+      jumps and crosses the weight line; (3) at full context the score-matrix trace blows past any
+      real GPU memory — and yet the model runs, because FlashAttention never builds that matrix.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Attention costs vs sequence length <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-cost" height="330"></canvas>
+        <div class="legend-row" id="d-cost-legend"></div>
+        <div class="seg-row" id="d-prec-seg">
+          <span class="seg-label">score-matrix precision</span>
+          <button data-b="4" class="active" type="button">fp32</button>
+          <button data-b="2" type="button">bf16</button>
+        </div>
+        <div class="seg-row" id="d-hkv-seg">
+          <span class="seg-label">KV heads $H_{kv}$</span>
+          <button data-h="1" type="button">1 · MQA</button>
+          <button data-h="8" class="active" type="button">8 · GQA</button>
+          <button data-h="32" type="button">32 · MHA</button>
+        </div>
+        <div class="controls ctrl-grid" id="d-cost-ctrls"></div>
+        <div class="readout" id="d-cost-out"></div>
+      </div>
+    </div>
+    <p style="color:var(--text-dim);font-size:.85rem">The vertical axis deliberately places two
+      <em>FLOP</em> traces (attention, FFN) and three <em>byte</em> quantities (score-matrix memory,
+      KV cache, and the weight-size line) on one log scale — the point is the <strong>slope</strong>
+      ($S^2$ vs $S$), which is unit-free. Only compare like with like: FLOP-vs-FLOP for the 18k
+      crossover, byte-vs-byte for the KV-crosses-weights moment.</p>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/kv_cache_ledger.py</code>
+      From a config dict, compute 144 KiB/token, the 5.625 GiB full-context cache, and the 22.50 GiB
+      MHA counterfactual — then measure a <em>real</em> KV allocation on your box with
+      <code>torch.cuda.memory_allocated()</code> before and after a <code>generate()</code> call and
+      reconcile it against the arithmetic. Ties into <code>measure_your_box.py</code> (page 43). ~3 min.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-com"># The KV-cache ledger, self-contained — the arithmetic the demo draws.</span></span>
+<span class="line">cfg = <span class="tok-fn">dict</span>(L=<span class="tok-num">36</span>, H=<span class="tok-num">32</span>, H_kv=<span class="tok-num">8</span>, d_head=<span class="tok-num">128</span>, b=<span class="tok-num">2</span>, S=<span class="tok-num">40960</span>)  <span class="tok-com"># Qwen3-8B, bf16 KV</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">kv_bytes</span>(L, H_kv, d_head, b, S):</span>
+<span class="line">    <span class="tok-kw">return</span> <span class="tok-num">2</span> * S * L * H_kv * d_head * b        <span class="tok-com"># 2 = K and V</span></span>
+<span class="line"></span>
+<span class="line">per_tok_layer = <span class="tok-fn">kv_bytes</span>(<span class="tok-num">1</span>, cfg[<span class="tok-str">"H_kv"</span>], cfg[<span class="tok-str">"d_head"</span>], cfg[<span class="tok-str">"b"</span>], <span class="tok-num">1</span>)</span>
+<span class="line">per_tok_all   = <span class="tok-fn">kv_bytes</span>(cfg[<span class="tok-str">"L"</span>], cfg[<span class="tok-str">"H_kv"</span>], cfg[<span class="tok-str">"d_head"</span>], cfg[<span class="tok-str">"b"</span>], <span class="tok-num">1</span>)</span>
+<span class="line">full          = <span class="tok-fn">kv_bytes</span>(cfg[<span class="tok-str">"L"</span>], cfg[<span class="tok-str">"H_kv"</span>], cfg[<span class="tok-str">"d_head"</span>], cfg[<span class="tok-str">"b"</span>], cfg[<span class="tok-str">"S"</span>])</span>
+<span class="line">mha           = <span class="tok-fn">kv_bytes</span>(cfg[<span class="tok-str">"L"</span>], cfg[<span class="tok-str">"H"</span>],    cfg[<span class="tok-str">"d_head"</span>], cfg[<span class="tok-str">"b"</span>], cfg[<span class="tok-str">"S"</span>])</span>
+<span class="line"></span>
+<span class="line"><span class="tok-fn">print</span>(per_tok_layer, <span class="tok-str">"B/token/layer   ->"</span>, per_tok_layer // <span class="tok-num">1024</span>, <span class="tok-str">"KiB"</span>)   <span class="tok-com"># 4096 -> 4 KiB</span></span>
+<span class="line"><span class="tok-fn">print</span>(per_tok_all // <span class="tok-num">1024</span>, <span class="tok-str">"KiB/token (all layers)"</span>)                    <span class="tok-com"># 144 KiB</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-fn">round</span>(full / <span class="tok-num">2</span>**<span class="tok-num">30</span>, <span class="tok-num">3</span>), <span class="tok-str">"GiB (GQA)  vs "</span>, <span class="tok-fn">round</span>(mha / <span class="tok-num">2</span>**<span class="tok-num">30</span>, <span class="tok-num">2</span>), <span class="tok-str">"GiB (MHA)"</span>)  <span class="tok-com"># 5.625 vs 22.5</span></span></code></pre>
+    </div>
+
+    <h2>Where this hands off</h2>
+    <p>This closes Part III. The three costs — and their three fixes — are the last of the
+      <strong>memory-budget thread</strong> before Adaptation:
+      <code>[THREAD:memory-budget — final trunk beat]</code>. Reopen the chain: 16 B/param on the
+      full-fine-tune ledger (page 18) → the 16P ledger measured against your box (page 36) →
+      <em>now</em> the KV cache, the thing causal masking (page 32) let you keep at all. It pays off
+      at the <strong>roofline</strong> (page 43), where decode's batch-1 arithmetic intensity of 1
+      makes the Spark bandwidth-bound — the same RNN-decode economics you met on page 28, now with a
+      number attached. Part IV (Adaptation, pages 38–43) picks it up from here.</p>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-attn-scale"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — the three attention costs vs S, computed live. No pre-baked arrays:
+     every trace is the closed-form cost sampled across S on each redraw.
+       score-matrix memory = H * S^2 * b_score      (bytes)   ~ S^2
+       attention FLOPs      = 4 * S^2 * d            (FLOP)    ~ S^2
+       FFN FLOPs            = 6 * S * d * d_ff        (FLOP)    ~ S
+       KV cache             = 2 * S * L * H_kv * d_head * b_kv (bytes) ~ S
+     Weight-size reference line at 16.38 GB (15.26 GiB) of bf16 weights.
+     Detents at the FFN/attention crossover (18432) and Qwen3's context (40960).
+     ========================================================================== */
+  (function () {
+    // Frozen Qwen3-8B numbers (constants §1.1 [VP]).
+    const H = 32, d = 4096, d_ff = 12288, L = 36, d_head = 128, b_kv = 2;
+    const S_MIN = 128, S_MAX = 131072;
+    const WEIGHT_BYTES = 16381470720; // 16.38 GB bf16 weights (= 15.26 GiB), constants §1.1/§4
+
+    let b_score = 4;   // fp32 score matrix by default
+    let H_kv = 8;      // GQA-8 by default
+
+    // cost formulas (all in base units: bytes or FLOP)
+    const scoreMem = (S) => H * S * S * b_score;
+    const attnFlop = (S) => 4 * S * S * d;
+    const ffnFlop  = (S) => 6 * S * d * d_ff;
+    const kvBytes  = (S) => 2 * S * L * H_kv * d_head * b_kv;
+
+    const canvas = document.getElementById("d-cost");
+    const out = document.getElementById("d-cost-out");
+    const legendEl = document.getElementById("d-cost-legend");
+
+    const cScore = () => cssVar("--warn", "#ff6b6b");
+    const cAttn  = () => cssVar("--accent", "#b48cff");
+    const cFfn   = () => cssVar("--accent2", "#45e0b8");
+    const cKv    = () => cssVar("--track-llm", "#62c3ff");
+    const cWeight= () => cssVar("--text-dim", "#8391ab");
+
+    // Snap to the two frozen detents when within 2%, so the readout lands EXACTLY
+    // on 5.625 GiB @ 40,960 and on the crossover @ 18,432 (sig-fig policy #4).
+    const DETENTS = [18432, 40960];
+    function snap(S) {
+      for (const d of DETENTS) if (Math.abs(S - d) / d < 0.02) return d;
+      return S;
+    }
+    const Sctrl = makeCtrl(document.getElementById("d-cost-ctrls"), {
+      label: "sequence length S", min: 7, max: 17, step: 0.05, value: Math.log2(40960),
+      fmt: v => snap(Math.round(Math.pow(2, v))).toLocaleString(), unit: "tok"
+    });
+    const S_of = () => snap(Math.round(Math.pow(2, Sctrl.get())));
+
+    // sample a formula across the log-S range
+    function sample(fn) {
+      const xs = [], ys = [];
+      for (let e = Math.log2(S_MIN); e <= Math.log2(S_MAX) + 1e-9; e += 0.04) {
+        const S = Math.pow(2, e);
+        xs.push(S); ys.push(fn(S));
+      }
+      return { xs, ys };
+    }
+
+    function fmtGiB(bytes) { return (bytes / (1024 ** 3)).toFixed(3); }
+    function fmtGB(bytes)  { return (bytes / 1e9).toFixed(1); }
+
+    function draw() {
+      const p = new Plot(canvas, {
+        xmin: S_MIN, xmax: S_MAX, ymin: 1e5, ymax: 1e15,
+        xlog: true, ylog: true, xlabel: "sequence length S (tokens)", ylabel: "bytes  or  FLOP  (log)"
+      });
+      p.clear(); p.grid();
+
+      const sM = sample(scoreMem), aF = sample(attnFlop), fF = sample(ffnFlop), kv = sample(kvBytes);
+      p.trace(sM.xs, sM.ys, cScore(), 2.5);
+      p.trace(aF.xs, aF.ys, cAttn(), 2.5);
+      p.trace(fF.xs, fF.ys, cFfn(), 2.5);
+      p.trace(kv.xs, kv.ys, cKv(), 2.5);
+
+      p.hline(WEIGHT_BYTES, cWeight(), [5, 4]);                 // weight-size reference
+      p.vline(18432, cssVar("--border", "#3b4a6b"), [3, 3]);    // FFN/attn crossover
+      p.vline(40960, cssVar("--border", "#3b4a6b"), [3, 3]);    // Qwen3 context
+      p.vline(S_of(), cAttn(), [6, 4]);                         // current S marker
+
+      legendEl.innerHTML =
+        `<span style="color:${cScore()}"><span class="legend-dot" style="background:${cScore()}"></span>score-matrix memory · Hs²b</span>` +
+        `<span style="color:${cAttn()}"><span class="legend-dot" style="background:${cAttn()}"></span>attention FLOP · 4S²d</span>` +
+        `<span style="color:${cFfn()}"><span class="legend-dot" style="background:${cFfn()}"></span>FFN FLOP · 6Sd·d_ff</span>` +
+        `<span style="color:${cKv()}"><span class="legend-dot" style="background:${cKv()}"></span>KV cache · 2SLH_kv·d_head·b</span>` +
+        `<span style="color:${cWeight()}"><span class="legend-dot dash"></span>bf16 weights = 15.26 GiB</span>`;
+
+      const S = S_of();
+      const sm = scoreMem(S), af = attnFlop(S), ff = ffnFlop(S), kvb = kvBytes(S);
+      const dominant = af > ff ? "attention" : "FFN";
+      const kvVsW = kvb > WEIGHT_BYTES ? "exceeds the model" : "under the model";
+      out.innerHTML =
+        `at S = <b>${S.toLocaleString()}</b> tokens · score matrix <b>${fmtGB(sm)} GB</b>/layer (${b_score===4?"fp32":"bf16"}) · ` +
+        `attention <b>${eng(af, "FLOP")}</b>/layer · FFN <b>${eng(ff, "FLOP")}</b>/layer → <b>${dominant}</b> dominates compute · ` +
+        `KV cache (H_kv=${H_kv}) <b>${fmtGiB(kvb)} GiB</b> — ${kvVsW} (weights 15.26 GiB). ` +
+        (S >= 18432
+          ? `Past the 18,432 detent, attention FLOPs have overtaken the FFN.`
+          : `Below the 18,432 detent, the FFN still out-costs attention.`);
+    }
+
+    // precision toggle (score-matrix bytes only)
+    document.getElementById("d-prec-seg").querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        b_score = parseInt(btn.dataset.b, 10);
+        document.getElementById("d-prec-seg").querySelectorAll("button").forEach(x => x.classList.toggle("active", x === btn));
+        draw();
+      });
+    });
+    // H_kv toggle (KV cache only)
+    document.getElementById("d-hkv-seg").querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        H_kv = parseInt(btn.dataset.h, 10);
+        document.getElementById("d-hkv-seg").querySelectorAll("button").forEach(x => x.classList.toggle("active", x === btn));
+        draw();
+      });
+    });
+    Sctrl.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ — 7 questions. Answers/tolerances per spec; every distractor traces to
+     a named misconception (a)–(d) in the warning box above.
+     ========================================================================== */
+  renderQuiz("quiz-attn-scale", [
+    {
+      q: "Qwen3-8B's KV cache per token, summed over all 36 layers, in bf16. How many KiB?",
+      num: 144, tol: 1, unit: "KiB",
+      why: "$2\\times H_{kv}\\times d_{head}\\times b = 2\\times8\\times128\\times2 = 4{,}096$ B $= 4$ KiB per layer; $\\times 36 = 147{,}456$ B $= 144$ KiB/token [DER, constants §4]. Note it is $H_{kv}=8$, not $H=32$."
+    },
+    {
+      q: "At full context $S = 40{,}960$, the total KV cache (GQA, bf16) is how many GiB?",
+      num: 5.625, tol: 0.05, unit: "GiB",
+      why: "$144\\text{ KiB/token} \\times 40{,}960 = 147{,}456\\times40{,}960 = 6{,}039{,}797{,}760$ B $= 5.625$ GiB [DER, constants §4]. The MHA counterfactual would be 22.50 GiB — a 4× difference."
+    },
+    {
+      q: "For Qwen3-8B, above what sequence length do attention FLOPs finally exceed FFN FLOPs?",
+      num: 18432, tol: 0, unit: "tokens",
+      why: "$4S^2 d > 6S\\,d\\,d_{ff} \\Leftrightarrow S > 1.5\\,d_{ff} = 1.5\\times12{,}288 = 18{,}432$ [DER, constants §5]. Below this length the FFN dominates compute — misconception (d): \"$O(S^2)$ is why long context is hard\" is usually the wrong bottleneck."
+    },
+    {
+      q: "What does FlashAttention actually change?",
+      opts: [
+        "It approximates attention with a cheaper linear-attention kernel",
+        "It cuts the FLOP count from $O(S^2)$ to $O(S)$",
+        "It cuts the memory from $O(S^2)$ to $O(S)$ while the FLOPs stay $O(S^2)$ — and it's numerically exact",
+        "It reduces the KV cache size at decode time"
+      ],
+      a: 2,
+      why: "FlashAttention never materializes the $(S,S)$ score matrix, so memory drops to $O(S)$; the FLOPs are unchanged (slightly higher on the backward pass). It is exact up to floating-point reassociation. Option 1 is misconception (a), option 2 is misconception (b), and option 4 confuses it with GQA (which is a separate, orthogonal fix)."
+    },
+    {
+      q: "GQA (8 KV heads) versus plain MHA (32 KV heads) primarily saves you:",
+      opts: [
+        "4× on attention FLOPs",
+        "4× on the KV cache — 5.625 GiB instead of 22.50 GiB at full context",
+        "4× on the model's parameter count",
+        "Nothing measurable; it only hurts quality"
+      ],
+      a: 1,
+      why: "The KV cache scales with $H_{kv}$, so $32/8 = 4\\times$ smaller cache (16.88 GiB recovered) [DER, constants §4]. It does not change attention FLOPs (they depend on $H$ and $S$, not $H_{kv}$) — that's the distractor's misconception. Option 4 is misconception (c): GQA is trained-in, not an approximation."
+    },
+    {
+      q: "At decode time (generating one token at a time), the binding constraint on a Qwen3-class model is usually:",
+      opts: [
+        "Attention FLOPs — the $O(S^2)$ term",
+        "KV-cache memory and the bandwidth to stream weights + cache",
+        "The score-matrix allocation FlashAttention builds",
+        "FFN parameter count"
+      ],
+      a: 1,
+      why: "Batch-1 decode has arithmetic intensity ≈ 1 (constants §6.5): it is bandwidth-bound, and the bytes it must move are the weights plus the growing KV cache. FlashAttention (option 3) never builds a big matrix at decode. This is the RNN-decode economics from page 28, sized on the roofline page 43 — misconception (d) again."
+    },
+    {
+      q: "You wrote attention from scratch and it OOMs building the score matrix at 64k context. The right fix is to:",
+      opts: [
+        "Switch to bf16 for the score matrix and hope it fits",
+        "Call `F.scaled_dot_product_attention`, which dispatches to a FlashAttention backend and never materializes the $(S,S)$ matrix",
+        "Reduce the number of KV heads with GQA",
+        "Enable a linear-attention approximation to change the complexity"
+      ],
+      a: 1,
+      why: "The OOM is the materialized $(S,S)$ score matrix — 214.7 GB/layer at 40,960 in fp32. `scaled_dot_product_attention` tiles and streams it (memory $O(S)$), exactly, no approximation. bf16 only halves an already-impossible number; GQA fixes the decode KV cache, a different cost; a linear-attention swap (option 4) changes what's computed — misconception (a)."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

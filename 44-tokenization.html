@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>44. Tokenization — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions — token-chip rendering and the two small custom
+     controls (corpus toggle, text box) the shared stylesheet has no opinion
+     about. Everything here uses the shared CSS custom properties so it stays
+     theme-aware for free. */
+  .tok-wrap {
+    display: flex; flex-wrap: wrap; gap: 3px; padding: 14px;
+    background: var(--bg-code); border: 1px solid var(--border);
+    border-radius: var(--radius); font-family: var(--mono); font-size: .92rem;
+    line-height: 1.5; margin: 10px 0; min-height: 48px;
+  }
+  .tok-chip { position: relative; padding: 3px 6px 17px; border-radius: 4px; white-space: pre; }
+  .tok-chip .tid { position: absolute; left: 4px; bottom: 1px; font-size: .6rem; opacity: .8; font-weight: 600; }
+  .tok-chip.even { background: color-mix(in srgb, var(--accent) 24%, transparent); }
+  .tok-chip.odd  { background: color-mix(in srgb, var(--accent2) 24%, transparent); }
+  .bpe-input {
+    width: 100%; box-sizing: border-box; font-family: var(--mono); font-size: .95rem;
+    padding: 9px 11px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-code); color: var(--text); resize: vertical; min-height: 44px;
+  }
+  .toggle-row { display: flex; gap: 8px; margin: 4px 0 10px; flex-wrap: wrap; }
+  .toggle-row button {
+    padding: 7px 15px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .85rem;
+    font-family: var(--font);
+  }
+  .toggle-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .legend-row { display: flex; gap: 20px; flex-wrap: wrap; margin: 8px 0 4px; font-size: .85rem; color: var(--text-dim); }
+  .legend-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .field-label { display: block; font-size: .82rem; color: var(--text-dim); margin: 12px 0 4px; }
+</style>
+</head>
+<body data-page="44-tokenization.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Tokenization</h1>
+    <p class="subtitle">The model never sees letters. It sees integers drawn from a fixed
+      dictionary of word-fragments, and that dictionary was built by a greedy compression
+      algorithm — not a linguist.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+    <p>Everything from here to page 52 belongs to the LLM track — how Qwen3-8B reads text in,
+      generates text out, and gets fine-tuned. Page 44 is the very first thing that happens to
+      a prompt, before a single weight matrix runs.</p>
+
+    <!-- on-page-resolution rule: this PREDICT is answered below, in the gray note
+         right after the live BPE demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you read on</span>
+      Type <code>strawberry</code>. How many pieces do you think Qwen3's tokenizer splits it
+      into — <strong>1, 3, or 10</strong>? And why can a model that writes flawless essays not
+      count the r's?
+    </div>
+
+    <h2>The one-sentence frame</h2>
+    <p>Hold onto this sentence; the rest of the page just unpacks it:</p>
+    <blockquote>The model sees integers drawn from a fixed dictionary of about 150,000
+      word-fragments, itself learned by a greedy compression algorithm run once over
+      uncurated text.</blockquote>
+    <p>For Qwen3-8B that dictionary has exactly $V = 151{,}936$ entries <strong>[VP, constants
+      §1.1]</strong> — one of the fourteen reflex numbers you'll meet again and again in this
+      track. Nothing about the number is arbitrary in the sense of "someone typed it in";
+      it's a design choice with a real cost, which the last section of this page prices out.</p>
+
+    <h2>The BPE mechanism</h2>
+    <p>A tokenizer is a function $\tau$ that turns a string of raw bytes into a sequence of
+      integer IDs:</p>
+    <p>$$\tau : \Sigma^{*} \to \{0, \dots, V-1\}^{*}, \qquad |\Sigma| = 256$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\tau$</td><td>the trained tokenizer's encode function</td><td>string → sequence of IDs</td><td>the object this page defines</td></tr>
+        <tr><td>$\Sigma$</td><td>the byte alphabet</td><td>$|\Sigma| = 256$ — every possible byte value</td><td>fixed, not learned</td></tr>
+        <tr><td>$V$</td><td>vocabulary size</td><td>151,936 for Qwen3-8B</td><td>constants §1.1 [VP]</td></tr>
+      </tbody>
+    </table>
+    <p>$\tau$ itself is learned by <strong>Byte-Pair Encoding</strong>, a four-step loop that
+      never looks at grammar or meaning — only frequency:</p>
+    <ol>
+      <li><strong>Count.</strong> Over the whole training corpus, count how often every
+        adjacent pair of symbols occurs.</li>
+      <li><strong>Merge.</strong> Take the single most frequent pair and fuse it into one
+        new symbol.</li>
+      <li><strong>Record.</strong> Append that pair, in order, to a growing <em>ordered merge
+        list</em>.</li>
+      <li><strong>Repeat</strong> until the vocabulary reaches $V$ entries.</li>
+    </ol>
+    <div class="box rule"><span class="box-title">📐 The under-taught point</span>
+      Encoding a new sentence is <strong>not</strong> a search for the best possible split of
+      that sentence. It is a mechanical <em>replay</em> of the merge list, in the exact order
+      it was learned, on data the tokenizer has never seen. Whichever merge sits earliest in
+      the list always wins, whether or not a "better" split exists downstream. Two tokenizers
+      trained on different corpora will chop the same sentence differently, and neither is
+      more correct — they just learned different schedules.
+    </div>
+
+    <h2>Compression ratio, and the worked number</h2>
+    <p>Call $\rho$ the characters-per-token compression ratio. For English prose,
+      $\rho \approx 4$ <strong>[EST, constants §9.5]</strong> — an estimate, not a measured
+      constant, and the page says so every time it uses it. For code and non-Latin scripts,
+      $\rho$ drops to roughly 1.5–2.5 <strong>[EST, constants §9.5]</strong>: the same amount of
+      information costs more tokens.</p>
+    <div class="box worked"><span class="box-title">✍️ Worked example — [EST], built on ρ≈4</span>
+      An average English word runs about 5.2 characters including its trailing space. A
+      500-word document is then about $500 \times 5.2 = 2{,}600$ characters, and at
+      $\rho \approx 4$ chars/token that's
+      $$2{,}600 / 4 = \mathbf{650}\ \text{tokens}.$$
+      That's roughly <strong>1.3 tokens per word</strong> — the rate the quiz below asks you
+      to reuse. Because $\rho$ itself is an estimate, so is 650; the label travels with the
+      number.
+    </div>
+    <p>Byte-level BPE (the Qwen/GPT lineage) differs from the older SentencePiece-style
+      word-vocabularies in a way that matters more than it sounds: because every one of the
+      256 possible bytes is already a valid starting symbol, a byte-level tokenizer
+      <strong>can never emit an <code>&lt;UNK&gt;</code> token</strong>. Any input, in any
+      language, in any encoding, always has a valid byte-level encoding. The older
+      word-vocabulary approach had to reserve a special "unknown" symbol for anything outside
+      its fixed word list, and silently threw information away whenever a rare word appeared.</p>
+    <p>A second, quieter fact: whitespace is <strong>not</strong> stripped before tokenization.
+      A leading space lives <em>inside</em> the token that follows it, so <code>" the"</code>
+      and <code>"the"</code> are different byte sequences and — almost always — different
+      tokens with different IDs. This single fact causes a large fraction of the chat-template
+      bugs you'll meet on page 48; the demo below makes it visible by rendering every space as
+      a middle-dot.</p>
+
+    <h2>Why $V$ matters downstream</h2>
+    <p>The vocabulary size isn't free. Every one of Qwen3-8B's $V$ token IDs needs a row in the
+      input embedding table <em>and</em>, since Qwen3 does not tie its embeddings, a separate
+      row in the output <code>lm_head</code>. Both are $V \times d$ matrices, $d = 4096$ being
+      the residual-stream width you already own from the trunk:</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shapes</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">embed_tokens          (V=151936, d=4096)     # lookup table, input side</span>
+<span class="line">lm_head.weight        (V=151936, d=4096)     # untied — Qwen3 does NOT tie weights</span>
+<span class="line">151936 * 4096 = 622,329,856                  # exact, each — constants §1.2 [DER]</span>
+<span class="line">2 * 622,329,856 = 1,244,659,712 = 15.20% of P   # constants §1.3 [DER]</span></code></pre>
+    </div>
+    <p><code>[THREAD:Qwen3-8B beat: tokenizer]</code> — this is the first appearance of $V$ in
+      the LLM track. It recurs as the exact output dimension of the cross-entropy loss on
+      page 45, and as the 622 MB logits tensor you'll meet again on pages 46 and 49. <strong>
+      Trunk callback:</strong> the softmax-over-classes math itself is not new — it's the same
+      cross-entropy you derived on the trunk's logs/softmax/cross-entropy page, just with
+      $V = 151{,}936$ classes instead of a handful.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ "Tokens are words"</span>
+      They're word-<em>fragments</em>. Sometimes a token is a whole common word
+      (<code>" the"</code>); often it's less (<code>"straw"</code> + <code>"berry"</code>);
+      occasionally, for a frequent phrase, it's more than one English word. Whitespace and
+      case matter: <code>"The"</code>, <code>" The"</code>, and <code>"the"</code> can all be
+      three different tokens.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "I can just add tokens to the vocab"</span>
+      You can — <code>resize_token_embeddings()</code> is one line. But the new rows are
+      <strong>randomly initialized and completely untrained</strong>. Naively extending the
+      vocabulary degrades the model until you actually train those new embeddings; it is not
+      a free lunch, and it is not something a LoRA on the existing weights will fix for you.
+    </div>
+
+    <p><em>Translation note:</em> this course writes $V$ for vocabulary size. Papers and
+      config files write <code>vocab_size</code>, and occasionally $K$; they mean the same
+      integer (notation §3.2).</p>
+
+    <h2>Demo — train a real BPE tokenizer, live, in your browser</h2>
+    <p>Everything below is <strong>real BPE</strong> run on a small bundled corpus — not a
+      lookup table, not a canned animation. The trainer counts byte pairs, merges the
+      most frequent one, and repeats, exactly as described above; it's deterministic, so
+      reloading the page reproduces the identical merge list every time.</p>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag <em>merges learned</em> from 0 up. Watch <code>strawberry</code> collapse from nine
+      single-byte tokens down to a handful as the merge list grows. Then switch the training
+      corpus to <em>English-only</em> and back to <em>Mixed</em> and compare the Devanagari
+      line at the same merge count.
+    </div>
+    <div class="demo track-llm">
+      <div class="demo-head">Live BPE trainer <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <span class="field-label">Training corpus (retrains the merge list from scratch)</span>
+        <div class="toggle-row" id="corpus-toggle">
+          <button data-mode="english" class="active" type="button">English-only</button>
+          <button data-mode="mixed" type="button">Mixed (English + Python + Devanagari)</button>
+        </div>
+        <div class="controls" id="bpe-ctrls"></div>
+
+        <span class="field-label">Text to tokenize (edit me)</span>
+        <textarea id="bpe-input" class="bpe-input" rows="2">strawberry</textarea>
+        <div class="tok-wrap" id="bpe-tokens"></div>
+        <div class="readout" id="bpe-live-out"></div>
+
+        <canvas id="bpe-plot" height="300"></canvas>
+        <div class="legend-row" id="bpe-legend"></div>
+        <div class="readout" id="bpe-plot-out"></div>
+      </div>
+    </div>
+    <p style="color:var(--text-dim);font-size:.85rem">This toy tokenizer trains on a few
+      thousand words of bundled text, so its own merge list is tiny next to Qwen3's real
+      151,936-entry vocabulary — <code>strawberry</code> here will <strong>not</strong> match
+      Qwen3's real split. The mechanism is identical; the scale is not. The box below points at
+      the real tokenizer.</p>
+    <p><strong>The predict answer:</strong> the real Qwen3 tokenizer splits <code>strawberry</code>
+      into exactly <strong>3</strong> tokens — not 1, not 10. <code>code/01_tokenizer_lab.ipynb</code>,
+      linked below, loads the actual Hugging Face tokenizer and reproduces that 3-piece split
+      directly, which is also why the model can't reliably count the r's: it never sees individual
+      letters, only these three fragment IDs.</p>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/01_tokenizer_lab.ipynb</code>
+      Load the <strong>real</strong> Qwen3 tokenizer from Hugging Face. Reproduce the true
+      3-piece split of <code>strawberry</code>. Measure $\rho$ on your own corpus — English,
+      code, and your own jargon — and print your corpus's total token count; that number
+      feeds page 49's wall-clock estimate. ~2 minutes.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-tokenization"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — a real, from-scratch byte-level BPE trainer + encoder.
+     No lookup tables, no pre-baked curves: trainBPE() actually counts byte
+     pairs and merges the argmax, exactly as described in "The BPE mechanism"
+     above. Fully deterministic (no RNG anywhere), so a reload reproduces the
+     identical merge list every time — the reproducibility bar the spec sets.
+     ========================================================================== */
+  (function () {
+
+    /* ---------- bundled training corpora (original text, authored for this
+       page) ---------------------------------------------------------------- */
+
+    // Original English prose (~750 words), repeated to give it realistic
+    // weight against the smaller Python/Devanagari corpora below. Repetition
+    // does NOT change which pairs BPE merges first (word-frequency counting
+    // already captures repetition within one pass) — it only changes the
+    // relative BYTE MASS between languages when corpora are mixed, which is
+    // exactly the effect the demo is built to show.
+    const EN_BASE = `Every large language model begins its life reading raw bytes, not
+letters and not words. Before a single weight matrix multiplies anything, a separate and
+much simpler algorithm decides how the incoming text will be cut into pieces. This algorithm
+is not part of the neural network at all. It runs once, ahead of time, over a huge pile of
+ordinary text, and it produces a fixed dictionary of word fragments. From that moment forward
+the network never sees a letter again. It only ever sees integers, each one an index into
+that dictionary, and the dictionary itself was built by a greedy compression routine that
+nobody hand designed.
+
+The routine is almost embarrassingly simple. Start with every byte as its own symbol. Count
+how often each adjacent pair of symbols appears across the whole training corpus. Merge the
+single most frequent pair into one new symbol. Repeat. Do this tens of thousands of times and
+the common patterns of the language slowly crystallize out of raw bytes: first frequent
+letter pairs, then frequent syllables, then whole common words, then frequent multi word
+phrases. Nothing about the process understands grammar or meaning. It only understands
+frequency, and frequency turns out to be a surprisingly good proxy for structure in language.
+
+Once the merge list has been learned, the same list is replayed, in the same order, on any
+new piece of text the model is asked to read. The word is broken into its raw bytes and the
+merges are applied one at a time, always preferring whichever merge appears earliest in the
+learned list. This is the detail almost every newcomer misses: encoding a sentence is not a
+search for the best possible split of that sentence. It is a mechanical replay of a schedule
+that was frozen during training, long before the sentence existed. Two different tokenizers
+trained on different corpora will chop the exact same sentence into different pieces, and
+neither one is more correct than the other; they simply learned different merge schedules
+from different data.
+
+A modern tokenizer works directly on bytes rather than on unicode characters, and this
+choice matters more than it first appears. Because every possible byte is already a valid
+starting symbol, a byte level tokenizer can never encounter a character it has never seen
+before. There is no unknown token, ever, for any input, in any language, no matter how
+strange the input looks. Contrast this with an older word level vocabulary, which had to
+reserve a special unknown symbol for anything outside its fixed list of whole words, and
+which would silently throw away information whenever a rare word appeared.
+
+One quiet but consequential fact about byte level merging is that whitespace is not stripped
+away before tokenization; it lives inside the tokens themselves. The word that begins a
+sentence and the same word appearing after a space are, from the tokenizer's point of view,
+two entirely different strings of bytes, and so they usually end up as two entirely different
+tokens with two entirely different integer identifiers. A learner who has never looked
+closely at a tokenizer's output tends to assume that the model somehow normalizes away the
+leading space, the way a human reader effortlessly does. It does not. This single fact
+quietly causes a large fraction of the strange bugs that show up when someone hand writes a
+chat template instead of using the library's own template renderer.
+
+The size of the learned dictionary is itself a real design decision with real costs. A
+bigger dictionary means shorter sequences for the same piece of text, because more of the
+text's common patterns get their own single token; but it also means a bigger embedding
+table and a bigger final output layer, since every token id needs its own row of learned
+numbers going in and its own row of learned numbers going out. Somewhere in the tens of
+thousands to a few hundred thousand entries is the sweet spot that most modern tokenizers
+converge toward, balancing sequence length against the fixed cost of the lookup tables at
+both ends of the network.
+
+None of this machinery knows anything about counting letters, and that is exactly why a
+model that can write a flawless paragraph can still fail to count the letters inside one of
+its own words. The model was never shown individual letters during training. It was shown a
+sequence of dictionary indices, and whichever fragment happened to contain three copies of a
+particular letter was, to the network, simply one indivisible symbol among a hundred and
+fifty thousand others, no more decomposable into letters than a single word is decomposable
+into letters for someone who has only ever heard the word spoken aloud and never seen it
+spelled.`;
+    const EN_TRAIN = (EN_BASE + "\n\n" + EN_BASE + "\n\n" + EN_BASE).slice(0, 20000);
+
+    // Original Python (a naive BPE trainer, written for this page — thematically
+    // apt, and gives the corpus real code diversity: classes, f-strings, type
+    // hints, comments, loops).
+    const PY_BASE = `"""A small, self-contained byte level BPE trainer, written for teaching.
+
+This module is intentionally naive. It recomputes pair frequencies from scratch
+after every merge instead of maintaining an incremental count table, because the
+goal here is to make the four step loop legible, not to make it fast.
+"""
+
+from collections import Counter
+from dataclasses import dataclass, field
+
+
+@dataclass
+class Vocabulary:
+    """Holds the growing table of symbol ids and the ordered merge list."""
+
+    next_id: int = 256
+    merges: list = field(default_factory=list)
+    id_to_bytes: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        for byte_value in range(256):
+            self.id_to_bytes[byte_value] = bytes([byte_value])
+
+    def record_merge(self, left, right):
+        new_id = self.next_id
+        self.next_id += 1
+        self.merges.append((left, right, new_id))
+        self.id_to_bytes[new_id] = self.id_to_bytes[left] + self.id_to_bytes[right]
+        return new_id
+
+
+def word_frequencies(corpus):
+    """Split on whitespace, keeping a leading space attached to each word."""
+    words = []
+    pending_space = ""
+    token = ""
+    for char in corpus:
+        if char.isspace():
+            if token:
+                words.append(pending_space + token)
+                token = ""
+            pending_space += char
+        else:
+            token += char
+    if token:
+        words.append(pending_space + token)
+    return Counter(words)
+
+
+def count_pairs(sequences, freqs):
+    pair_counts = Counter()
+    for word, ids in sequences.items():
+        weight = freqs[word]
+        for left, right in zip(ids, ids[1:]):
+            pair_counts[(left, right)] += weight
+    return pair_counts
+
+
+def apply_merge(ids, left, right, new_id):
+    merged = []
+    i = 0
+    while i < len(ids):
+        if i + 1 < len(ids) and ids[i] == left and ids[i + 1] == right:
+            merged.append(new_id)
+            i += 2
+        else:
+            merged.append(ids[i])
+            i += 1
+    return merged
+
+
+def train_bpe(corpus, target_merges):
+    vocab = Vocabulary()
+    freqs = word_frequencies(corpus)
+    sequences = {word: list(word.encode("utf-8")) for word in freqs}
+
+    for step in range(target_merges):
+        pair_counts = count_pairs(sequences, freqs)
+        if not pair_counts:
+            break
+        (left, right), count = pair_counts.most_common(1)[0]
+        if count < 2:
+            break
+        new_id = vocab.record_merge(left, right)
+        sequences = {
+            word: apply_merge(ids, left, right, new_id)
+            for word, ids in sequences.items()
+        }
+        if step % 100 == 0:
+            print(f"merge {step}: {left},{right} -> {new_id} (seen {count} times)")
+
+    return vocab
+
+
+def encode(text, vocab):
+    rank = {(l, r): i for i, (l, r, _) in enumerate(vocab.merges)}
+    new_id_of = {(l, r): new for l, r, new in vocab.merges}
+    out = []
+    for word in word_frequencies(text):
+        ids = list(word.encode("utf-8"))
+        while True:
+            candidates = [
+                (rank[(a, b)], i)
+                for i, (a, b) in enumerate(zip(ids, ids[1:]))
+                if (a, b) in rank
+            ]
+            if not candidates:
+                break
+            _, position = min(candidates)
+            a, b = ids[position], ids[position + 1]
+            ids = ids[:position] + [new_id_of[(a, b)]] + ids[position + 2:]
+        out.extend(ids)
+    return out
+
+
+if __name__ == "__main__":
+    sample = "the quick brown fox jumps over the lazy dog, again and again"
+    trained = train_bpe(sample * 40, target_merges=64)
+    print(f"learned {len(trained.merges)} merges, {trained.next_id} symbols total")
+    print(encode("the quick fox", trained))
+`;
+    const PY_TRAIN = (PY_BASE + "\n" + PY_BASE).slice(0, 9000);
+
+    // Original Devanagari (Hindi) prose, ~400 words, on the same topic —
+    // deliberately kept as the minority corpus so the mixed-training mode
+    // reproduces the real-world data-imbalance effect honestly.
+    const DEV_TRAIN = `हर बड़ा भाषा मॉडल पहले कच्चे अक्षरों को नहीं, बल्कि संख्याओं को देखता है। पाठ को
+पहले छोटे टुकड़ों में तोड़ा जाता है, और हर टुकड़े को एक संख्या दी जाती है। यह प्रक्रिया
+प्रशिक्षण से पहले ही तय हो जाती है और बाद में कभी नहीं बदलती।
+
+टोकनाइज़र एक सरल नियम से बनता है: सबसे अधिक बार आने वाले जोड़े को एक नए टुकड़े में मिला
+दो, और यह काम बार-बार दोहराओ। इस तरह आम शब्द धीरे-धीरे अपने आप उभर आते हैं, बिना किसी
+को व्याकरण सिखाए।
+
+अंग्रेज़ी पाठ पर सीखा गया टोकनाइज़र हिंदी पाठ पर उतना अच्छा काम नहीं करता, क्योंकि उसने
+हिंदी के आम शब्दों को कभी देखा ही नहीं। इसलिए एक ही वाक्य को तोड़ने के लिए अंग्रेज़ी में
+कम टुकड़ों की और हिंदी में ज़्यादा टुकड़ों की ज़रूरत पड़ती है।
+
+यह कोई भाषा का दोष नहीं है, यह केवल प्रशिक्षण आँकड़ों में असंतुलन का परिणाम है। जिस भाषा
+का पाठ जितना अधिक होगा, उस भाषा के उतने ही अधिक और उतने ही बड़े टुकड़े शब्दकोश में जगह
+पाएँगे।
+
+नेटवर्क खुद अक्षर नहीं गिनता, वह केवल टुकड़ों की संख्याएँ देखता है। इसलिए वह एक शब्द के
+भीतर के अक्षर सही से नहीं गिन पाता, भले ही वह एक सुंदर वाक्य बहुत आसानी से लिख दे।
+
+कंप्यूटर के लिए हर अक्षर पहले बाइट्स में बदला जाता है, और बाइट-स्तर पर काम करने वाला
+टोकनाइज़र किसी भी भाषा के किसी भी अक्षर को संभाल सकता है, चाहे वह अक्षर पहले कभी देखा
+गया हो या नहीं। इस वजह से अनजान चिन्ह की समस्या कभी नहीं आती।
+
+शब्दकोश का आकार भी एक महत्वपूर्ण निर्णय है। बड़ा शब्दकोश छोटे वाक्यों को कम टुकड़ों में
+तोड़ता है, लेकिन उसके साथ बड़ी तालिका भी संभालनी पड़ती है। इसलिए हर मॉडल एक संतुलन खोजने
+की कोशिश करता है।`;
+
+    // Small held-out evaluation snippets — distinct wording from the training
+    // corpora above — used to MEASURE tokens-per-100-chars at every merge
+    // count, for all three languages, regardless of which corpus trained the
+    // merges.
+    const EVAL_EN = `A tokenizer never reads letters. It reads bytes, merges them by
+frequency, and hands the network a short list of integers. The network answers fluently in
+words it never actually learned to spell.`;
+    const EVAL_PY = `def greet(name):
+    """Return a friendly greeting for the given name."""
+    if not name:
+        return "Hello, stranger!"
+    return f"Hello, {name}! Welcome to the tokenizer lab."
+
+
+for person in ["Ada", "Grace", "Alan"]:
+    print(greet(person))`;
+    const EVAL_DEV = `टोकनाइज़र अक्षर नहीं पढ़ता, वह बाइट्स पढ़ता है और उन्हें बार-बार जोड़कर एक छोटी
+सूची बनाता है। नेटवर्क को यही सूची दी जाती है, अक्षर कभी नहीं।`;
+
+    /* ---------- pretokenize: split on whitespace, folding each leading
+       whitespace run into the FOLLOWING word (GPT-2/Qwen convention — this is
+       the mechanism behind the " the" vs "the" fact above). --------------- */
+    function pretokenize(text) {
+      const parts = text.match(/\s+|\S+/g) || [];
+      const words = [];
+      let pendingSpace = "";
+      for (const p of parts) {
+        if (/^\s/.test(p)) pendingSpace += p;
+        else { words.push(pendingSpace + p); pendingSpace = ""; }
+      }
+      if (pendingSpace) words.push(pendingSpace);
+      return words;
+    }
+
+    const PACK = 1000000; // pair-packing base; nextId never exceeds a few
+                           // thousand, so a*PACK+b is always a safe integer.
+    function concatBytes(a, b) {
+      const out = new Uint8Array(a.length + b.length);
+      out.set(a, 0); out.set(b, a.length);
+      return out;
+    }
+
+    /* ---------- REAL BPE training: count → argmax merge → record → repeat,
+       exactly the four-step loop described in prose above. --------------- */
+    function trainBPE(corpusText, maxMerges) {
+      const enc = new TextEncoder();
+      const words = pretokenize(corpusText);
+      const freq = new Map();
+      for (const w of words) freq.set(w, (freq.get(w) || 0) + 1);
+      const seqs = [];
+      for (const [w, f] of freq) seqs.push({ ids: Array.from(enc.encode(w)), freq: f });
+
+      const idBytes = new Map();
+      for (let b = 0; b < 256; b++) idBytes.set(b, Uint8Array.of(b));
+
+      const merges = [];
+      let nextId = 256;
+
+      for (let step = 0; step < maxMerges; step++) {
+        const counts = new Map();
+        for (const s of seqs) {
+          const ids = s.ids;
+          for (let i = 0; i < ids.length - 1; i++) {
+            const key = ids[i] * PACK + ids[i + 1];
+            counts.set(key, (counts.get(key) || 0) + s.freq);
+          }
+        }
+        if (counts.size === 0) break;
+        let bestKey = -1, bestCount = -1;
+        for (const [k, c] of counts) if (c > bestCount) { bestCount = c; bestKey = k; }
+        if (bestCount < 2) break; // no pair repeats — nothing left worth merging
+        const a = Math.floor(bestKey / PACK), b = bestKey % PACK;
+        const newId = nextId++;
+        merges.push([a, b, newId]);
+        idBytes.set(newId, concatBytes(idBytes.get(a), idBytes.get(b)));
+        for (const s of seqs) {
+          const ids = s.ids;
+          let changed = false;
+          const out = [];
+          let i = 0;
+          while (i < ids.length) {
+            if (i < ids.length - 1 && ids[i] === a && ids[i + 1] === b) { out.push(newId); i += 2; changed = true; }
+            else { out.push(ids[i]); i++; }
+          }
+          if (changed) s.ids = out;
+        }
+      }
+      return { merges, idBytes, uniqueWords: seqs.length };
+    }
+
+    /* ---------- REAL encode: replay the merge list in RANK order (lowest
+       rank = learned earliest = wins), exactly the "replay, not search"
+       rule from the box above. ------------------------------------------- */
+    function encodeWithMerges(text, merges) {
+      const rank = new Map(), newIdOf = new Map();
+      merges.forEach((m, i) => { const key = m[0] * PACK + m[1]; rank.set(key, i); newIdOf.set(key, m[2]); });
+      const enc = new TextEncoder();
+      const words = pretokenize(text);
+      const perWord = [];
+      let total = 0;
+      for (const w of words) {
+        let ids = Array.from(enc.encode(w));
+        while (ids.length > 1) {
+          let bestRank = Infinity, bestPos = -1;
+          for (let i = 0; i < ids.length - 1; i++) {
+            const key = ids[i] * PACK + ids[i + 1];
+            if (rank.has(key)) { const r = rank.get(key); if (r < bestRank) { bestRank = r; bestPos = i; } }
+          }
+          if (bestPos === -1) break;
+          const key = ids[bestPos] * PACK + ids[bestPos + 1];
+          const nid = newIdOf.get(key);
+          ids = ids.slice(0, bestPos).concat([nid], ids.slice(bestPos + 2));
+        }
+        perWord.push(ids);
+        total += ids.length;
+      }
+      return { perWord, total };
+    }
+
+    function computeCurve(merges, evalText) {
+      const xs = [], ys = [];
+      const chars = Array.from(evalText).length;
+      for (let m = 0; m <= 3000; m += 50) {
+        const sub = merges.slice(0, Math.min(m, merges.length));
+        const { total } = encodeWithMerges(evalText, sub);
+        xs.push(m);
+        ys.push(total * 100 / chars);
+      }
+      return { xs, ys };
+    }
+
+    /* ---------- state, trained once per corpus-mode toggle, memoized ----- */
+    const trained = {};   // mode -> {merges, idBytes, uniqueWords, ms}
+    const curves = {};    // mode -> {en:{xs,ys}, py:{xs,ys}, dev:{xs,ys}}
+    let mode = "english";
+
+    function ensureTrained(m) {
+      if (trained[m]) return trained[m];
+      const t0 = performance.now();
+      const corpus = m === "english" ? EN_TRAIN : (EN_TRAIN + "\n\n" + PY_TRAIN + "\n\n" + DEV_TRAIN);
+      const res = trainBPE(corpus, 3000);
+      res.ms = performance.now() - t0;
+      trained[m] = res;
+      curves[m] = {
+        en: computeCurve(res.merges, EVAL_EN),
+        py: computeCurve(res.merges, EVAL_PY),
+        dev: computeCurve(res.merges, EVAL_DEV),
+      };
+      return res;
+    }
+
+    /* ---------- DOM wiring ------------------------------------------------ */
+    const ctrlsEl = document.getElementById("bpe-ctrls");
+    const inputEl = document.getElementById("bpe-input");
+    const tokensEl = document.getElementById("bpe-tokens");
+    const liveOut = document.getElementById("bpe-live-out");
+    const plotCanvas = document.getElementById("bpe-plot");
+    const plotOut = document.getElementById("bpe-plot-out");
+    const legendEl = document.getElementById("bpe-legend");
+    const toggleEl = document.getElementById("corpus-toggle");
+
+    const mergesCtrl = makeCtrl(ctrlsEl, {
+      label: "merges learned", min: 0, max: 3000, step: 50, value: 300,
+      fmt: v => v.toFixed(0)
+    });
+
+    const colorEN = () => cssVar("--accent2", "#45e0b8");
+    const colorPY = () => cssVar("--track-llm", "#62c3ff");
+    const colorDEV = () => cssVar("--deep", "#ff8fc4");
+
+    function renderTokens() {
+      const t = ensureTrained(mode);
+      const n = Math.min(mergesCtrl.get(), t.merges.length);
+      const sub = t.merges.slice(0, n);
+      const { perWord, total } = encodeWithMerges(inputEl.value, sub);
+      const dec = new TextDecoder("utf-8", { fatal: false });
+      tokensEl.innerHTML = "";
+      let flat = 0;
+      perWord.forEach(ids => {
+        ids.forEach(id => {
+          const span = document.createElement("span");
+          span.className = "tok-chip " + (flat % 2 === 0 ? "even" : "odd");
+          const bytes = t.idBytes.get(id) || Uint8Array.of(id % 256);
+          let text = dec.decode(bytes);
+          const disp = document.createElement("span");
+          disp.textContent = text.replace(/ /g, "·"); // reveal the leading space
+          const tid = document.createElement("span");
+          tid.className = "tid"; tid.textContent = id;
+          span.appendChild(disp); span.appendChild(tid);
+          tokensEl.appendChild(span);
+          flat++;
+        });
+      });
+      const chars = Array.from(inputEl.value).length || 1;
+      liveOut.innerHTML = `<b>${total}</b> token${total === 1 ? "" : "s"} for ${chars}
+        character${chars === 1 ? "" : "s"} (${(total * 100 / chars).toFixed(1)} tokens/100 chars)
+        · using <b>${n}</b> of ${t.merges.length} trained merges`;
+    }
+
+    function drawPlot() {
+      const c = curves[mode];
+      const allY = [].concat(c.en.ys, c.py.ys, c.dev.ys);
+      const ymax = Math.max(1, ...allY) * 1.1;
+      const p = new Plot(plotCanvas, {
+        xmin: 0, xmax: 3000, ymin: 0, ymax,
+        xlabel: "merges learned", ylabel: "tokens per 100 chars"
+      });
+      p.clear(); p.grid();
+      p.trace(c.en.xs, c.en.ys, colorEN(), 2.5);
+      p.trace(c.py.xs, c.py.ys, colorPY(), 2.5);
+      p.trace(c.dev.xs, c.dev.ys, colorDEV(), 2.5);
+      p.vline(mergesCtrl.get(), cssVar("--text-dim", "#8391ab"), [4, 4]);
+
+      legendEl.innerHTML = `
+        <span><span class="legend-dot" style="background:${colorEN()}"></span>English</span>
+        <span><span class="legend-dot" style="background:${colorPY()}"></span>Python</span>
+        <span><span class="legend-dot" style="background:${colorDEV()}"></span>Devanagari</span>`;
+
+      // Live-measured ratio at the current merge count — a measured line, not a claim.
+      const idx = Math.min(Math.round(mergesCtrl.get() / 50), c.en.ys.length - 1);
+      const en = c.en.ys[idx], py = c.py.ys[idx], dev = c.dev.ys[idx];
+      const t = trained[mode];
+      plotOut.innerHTML = `at ${mergesCtrl.get()} merges: English <b>${en.toFixed(1)}</b> ·
+        Python <b>${py.toFixed(1)}</b> · Devanagari <b>${dev.toFixed(1)}</b> tokens/100 chars —
+        Devanagari costs <b>${(dev / en).toFixed(1)}×</b> as many tokens as English right now.
+        (Trained ${t.merges.length} real merges from ${t.uniqueWords} unique word-forms in
+        ${t.ms.toFixed(0)} ms.)`;
+    }
+
+    function redrawAll() { renderTokens(); drawPlot(); }
+
+    mergesCtrl.onInput(redrawAll);
+    inputEl.addEventListener("input", renderTokens);
+    toggleEl.querySelectorAll("button").forEach(btn => {
+      btn.addEventListener("click", () => {
+        mode = btn.dataset.mode;
+        toggleEl.querySelectorAll("button").forEach(b => b.classList.toggle("active", b === btn));
+        redrawAll();
+      });
+    });
+
+    ensureTrained("english"); // pre-train the default so first paint has data
+    redrawAll();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(redrawAll, 0));
+  })();
+
+  /* ==========================================================================
+     QUIZ
+     ========================================================================== */
+  renderQuiz("quiz-tokenization", [
+    {
+      q: "What is a “token,” really?",
+      opts: [
+        "A whole word",
+        "A word-fragment: a chunk of bytes the merge algorithm decided to keep together",
+        "A single character",
+        "A sentence"
+      ],
+      a: 1,
+      why: "Tokens are word-fragments produced by the merge algorithm — sometimes a whole word, often less, occasionally more than a word. Treating a token as always “a word” is the misconception the first warning box on this page corrects."
+    },
+    {
+      q: "When Qwen3's tokenizer encodes a brand-new sentence, what is it actually doing?",
+      opts: [
+        "Searching for the shortest possible sequence of tokens for that exact sentence",
+        "Replaying the fixed merge schedule learned once during training, in the same fixed order every time",
+        "Asking the neural network which split it prefers",
+        "Splitting on whitespace and punctuation only"
+      ],
+      a: 1,
+      why: "Encoding replays a frozen, ordered merge list — it is not an optimization search over segmentations. Whichever merge sits earliest in the list wins whenever its pair is present, regardless of what a “better” split might look like downstream."
+    },
+    {
+      q: "A 2,000-word English document, at the course's rule of thumb (~1.3 tokens/word — the same rate that turns 500 words into about 650 tokens), is roughly how many tokens?",
+      num: 2600, tol: 300, unit: "tokens",
+      why: "$2{,}000 \\times 1.3 \\approx 2{,}600$ tokens. The 1.3 tokens/word rate comes from $\\rho\\approx4$ chars/token [EST, constants §9.5] applied to an average English word length of about 5.2 characters including its trailing space."
+    },
+    {
+      q: "Why does the same sentence typically need 2–3× more tokens in Devanagari than in English, from the exact same tokenizer?",
+      opts: [
+        "The tokenizer's merge list was learned mostly from English/code text, so it has far fewer useful merges for Devanagari byte patterns",
+        "The model is worse at understanding other languages",
+        "Devanagari has more letters than the Latin alphabet",
+        "Non-English text is always longer to begin with"
+      ],
+      a: 0,
+      why: "Merges are learned from training data. A merge list dominated by English and code text simply never sees enough repeated Devanagari byte-pairs to earn dedicated merges — a data-imbalance effect, not a difference in comprehension or alphabet size. The demo above measures this live."
+    },
+    {
+      q: "In a byte-level tokenizer, $\\text{“ the”}$ (leading space) and $\\text{“the”}$ (no leading space) are:",
+      opts: [
+        "Always the same token, since the tokenizer strips whitespace first",
+        "Two different byte sequences, and almost always two different tokens with two different IDs",
+        "Merged into one token only at the start of a sentence",
+        "Not valid tokenizer input"
+      ],
+      a: 1,
+      why: "Byte-level BPE never strips whitespace before tokenizing — the leading space is part of the byte sequence the merges operate on, so it is baked into the token itself. This is the exact mechanism behind a large fraction of the chat-template bugs on page 48."
+    },
+    {
+      q: "Qwen3-8B's embedding table (or, separately, its untied <code>lm_head</code>) has shape $V \\times d = 151{,}936 \\times 4096$. How many parameters is that, exactly?",
+      num: 622329856, tol: 0, unit: "parameters",
+      why: "$151{,}936 \\times 4096 = 622{,}329{,}856$ [DER, constants §1.2] — exact, not approximate. The embedding table and the untied <code>lm_head</code> are each this size; together they are 15.20% of Qwen3-8B's $8{,}190{,}735{,}360$ total parameters [DER, constants §1.3]."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,611 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>24. Your First Real Fine-Tune — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped, same pattern as page 17's race-grid / page 21's sched-grid. */
+@media (max-width: 900px) {
+  .d24-grid, .d24-grid2 { grid-template-columns: 1fr !important; }
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* Dim lines the assembled loop inherits from earlier pages; class="line hl"
+   (already in course.css) highlights the three lines pages 19/21/22 add. */
+.codeblock .line.dim { opacity: .5; }
+.d24-break-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 10px 0 0; }
+.d24-break-row select { background: var(--bg-panel2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; font-family: var(--font); font-size: .88em; }
+</style>
+</head>
+<body data-page="24-first-real-finetune.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Your First Real Fine-Tune — and the Twelve Ways Training Fails</h1>
+    <p class="subtitle">Pages 12–23 handed you a loss, a backward pass, an optimizer, a schedule, and a
+      regularization toolkit as separate topics. This page assembles all of it into one loop you can read line
+      by line, runs it for real, and hands you the diagnostic checklist that turns training from magic into
+      engineering — the exact skill that separates "it's not working" from "line 6 is doing X, and X is wrong."</p>
+
+    <div class="box key"><span class="box-title">🧵 Four threads converge here</span>
+      <b>[THREAD:TN1]</b> the object you keep training is still the same kind of network TN-1 was.
+      <b>[THREAD:MEM]</b> the instrumentation panel below adds a VRAM predict-then-measure step, cashing page 18's
+      ledger for real. <b>[THREAD:CHAIN]</b> <code>loss.backward()</code> is one line in the loop below — pages
+      14–15 are why it works. <b>[THREAD:QWEN]</b> the code artifact runs on Qwen3-0.6B, the anchor model's
+      smoke-test sibling (<code>constants.md</code> §1.4), and the trainable-parameter count it prints is the same
+      diagnostic the LLM track reads off Qwen3-8B later. This is the halfway milestone: before the LLM/diffusion
+      fork, you should be able to say <b>"I fine-tuned a model"</b> and mean it.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You are about to start a real fine-tune. Before you touch a single hyperparameter: what is the <b>one
+      60-second test</b> that tells you whether your forward pass, loss, backward pass, and optimizer are wired
+      correctly — before you've spent a minute tuning anything? Write down the test, not the answer to "does it
+      work."
+    </div>
+
+    <!-- ===================== THE LOOP ===================== -->
+    <h2>The training loop, grown by accretion</h2>
+    <p>Every line below traces to a page you've already read. Nothing here is new machinery — it's the same nine
+      objects, assembled. The three highlighted lines are the ones the last three pages (19, 21, 22) bolted on;
+      everything dimmed is load-bearing but old news.</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line dim">model.<span class="tok-fn">train</span>()</span>
+<span class="line dim"><span class="tok-kw">for</span> epoch <span class="tok-kw">in</span> <span class="tok-fn">range</span>(N_EPOCHS):                              <span class="tok-com"># p.16: epochs over mini-batches, not one big batch</span></span>
+<span class="line dim">    <span class="tok-kw">for</span> xb, yb <span class="tok-kw">in</span> train_loader:                          <span class="tok-com"># p.16: mini-batch, sampled fresh each step</span></span>
+<span class="line dim">        opt.<span class="tok-fn">zero_grad</span>()                                     <span class="tok-com"># p.15: skip this and grads ACCUMULATE</span></span>
+<span class="line dim">        logits = model(xb)                                       <span class="tok-com"># forward pass — TN-1's shape, p.6</span></span>
+<span class="line dim">        loss = loss_fn(logits, yb)                                <span class="tok-com"># p.12: NLL — cross-entropy or MSE</span></span>
+<span class="line dim">        loss.<span class="tok-fn">backward</span>()                                      <span class="tok-com"># pp.14-15: reverse-mode autograd fills .grad</span></span>
+<span class="line hl">        torch.nn.utils.<span class="tok-fn">clip_grad_norm_</span>(model.<span class="tok-fn">parameters</span>(), <span class="tok-num">1.0</span>)  <span class="tok-com"># p.19: cap rare spikes, AFTER backward, BEFORE step</span></span>
+<span class="line dim">        opt.<span class="tok-fn">step</span>()                                            <span class="tok-com"># p.17: SGD → AdamW, the actual parameter update</span></span>
+<span class="line hl">        scheduler.<span class="tok-fn">step</span>()                                       <span class="tok-com"># p.21: η_k is a function of the step, not a constant</span></span>
+<span class="line dim">    model.<span class="tok-fn">eval</span>()</span>
+<span class="line hl">    val_loss = evaluate(model, val_loader)                       <span class="tok-com"># p.22: watch BOTH curves, not just train</span></span>
+<span class="line hl">    <span class="tok-kw">if</span> val_loss &lt; best_val:                                     <span class="tok-com"># p.22: keep the BEST checkpoint, not the last one</span></span>
+<span class="line hl">        best_val, best_state = val_loss, model.<span class="tok-fn">state_dict</span>()</span>
+<span class="line dim">    model.<span class="tok-fn">train</span>()</span></code></pre>
+    </div>
+
+    <p><b>Resolving the predict:</b> the 60-second test is <b>overfit one batch of 8 examples to ~0 loss</b>,
+      dropout and weight decay off, before you touch <code>N_EPOCHS</code>, <code>η</code>, or anything else in
+      the loop above. If it collapses toward zero, every line you just read is wired correctly and any remaining
+      problem is about data or generalization. If it doesn't, you have a <b>bug</b> — and no amount of learning-rate
+      tuning will fix a bug. This bisects the entire space of training failures in one run, which is why it comes
+      before anything else on this page.</p>
+
+    <div class="box key"><span class="box-title">🔑 The universal first move</span>
+      Overfit 8 examples, dropout / augmentation / weight decay off, ~200 steps. <b>Loss → 0</b>: wiring is
+      correct, your problem is data or generalization, not the loop. <b>Loss ↛ 0</b>: a bug — checking
+      <code>zero_grad()</code>, the loss function, and the label alignment costs less than one wasted training run.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Three things people believe about training that aren't true</span>
+      <ul style="margin:.4em 0 0 1.1em">
+        <li><b>"Training failures are mysterious."</b> There are about twelve, each with a distinct signature —
+          the three tables below are the field guide.</li>
+        <li><b>"If the loss is going down, it's working."</b> Catastrophic forgetting and data leakage both hide
+          behind a perfectly healthy task-loss curve (see §14.3 below).</li>
+        <li><b>"Tune the LR first."</b> Overfit one batch first — LR tuning cannot fix a wiring bug, and tuning
+          on top of a bug just wastes runs while looking productive.</li>
+      </ul>
+    </div>
+
+    <!-- ===================== NaN TABLE ===================== -->
+    <h2>Failure mode 1 — "Loss is NaN"</h2>
+    <div class="box warn"><span class="box-title">⚠️ NaN diagnostic table (training §14.1)</span>
+      <table class="ledger">
+        <thead><tr><th>Cause</th><th>Signature</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>LR too high (#1 cause)</td><td>loss <em>rises</em>, then NaN; grad norm exploded first</td><td>÷10, then re-check</td></tr>
+          <tr><td><code>log(0)</code> in hand-rolled CE</td><td>−∞ almost immediately</td><td>use the fused loss (p.12) — never form the probability and then log it</td></tr>
+          <tr><td>Division by zero</td><td>NaN from step 1</td><td>add $\varepsilon$ to the denominator</td></tr>
+          <tr><td>fp16 overflow</td><td>fine, then NaN once a value exceeds 65,504</td><td>use bf16 — the Spark should never see fp16 (constants.md §9.3, [VP])</td></tr>
+          <tr><td>Bad data (a corrupt/NaN input row)</td><td>NaN at the <b>same step, every run</b>, fixed seed</td><td>determinism is the tell — §14.5 below</td></tr>
+          <tr><td>Missing <code>zero_grad()</code></td><td>slow blow-up over tens of steps, not instant</td><td>p.15</td></tr>
+          <tr><td>Mis-ordered clipping</td><td>clip appears to do nothing</td><td>clip <b>after</b> <code>backward()</code>, <b>before</b> <code>step()</code> — p.19</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">Tool: <code>torch.autograd.set_detect_anomaly(True)</code> names the exact op that
+        first produced the NaN, instead of you tracing it backward by hand.</p>
+    </div>
+
+    <!-- ===================== WON'T GO DOWN TABLE ===================== -->
+    <h2>Failure mode 2 — "Loss won't go down"</h2>
+    <div class="box warn"><span class="box-title">⚠️ Flat-loss diagnostic table (training §14.2)</span>
+      <table class="ledger">
+        <thead><tr><th>Cause</th><th>Signature</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>LR too low</td><td>smooth, nearly flat descent</td><td>×10; run an LR range test</td></tr>
+          <tr><td>Forgot <code>opt.step()</code></td><td>loss <b>exactly</b> constant, bit for bit</td><td>check the call is actually there</td></tr>
+          <tr><td>Wrong parameter group</td><td>trainable count is wrong</td><td>print it — for Qwen3-8B LoRA r=16 all-linear it should read <b>43,646,976</b>, never 8,190,735,360 and never 0 (constants.md §3, [DER]) <b>[THREAD:MEM]</b></td></tr>
+          <tr><td>Labels shuffled / no signal</td><td>loss pins <b>exactly</b> at $\ln V$</td><td>plot $\ln V$ as a horizontal line on every curve — the cleanest diagnostic on this page</td></tr>
+          <tr><td>Data not normalized</td><td>noisy, doesn't trend either way</td><td>normalize inputs</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">For this page's toy 2-class demo below, $V=2$ and the pin value is
+        $\ln 2 = \mathbf{0.6931}$ nats (constants.md §9.1, the coin-flip loss anchor). For Qwen3-8B's 151,936-token
+        vocabulary the pin value is $\ln V = \mathbf{11.93}$ nats (constants.md §9.1) — same diagnostic, same
+        formula, different $V$.</p>
+    </div>
+
+    <!-- ===================== OVERFITS INSTANTLY TABLE ===================== -->
+    <h2>Failure mode 3 — "Overfits instantly" (his failure mode)</h2>
+    <div class="box warn"><span class="box-title">⚠️ Instant-overfit diagnostic table (training §14.3)</span>
+      <table class="ledger">
+        <thead><tr><th>Cause</th><th>Signature</th><th>Fix</th></tr></thead>
+        <tbody>
+          <tr><td>$P \gg N$ — too much capacity for too little data</td><td>train loss → 0 in a handful of steps; val loss rises immediately</td><td>lower the LoRA rank (p.23 already foreshadowed rank as this exact knob)</td></tr>
+          <tr><td>Too many epochs</td><td>val curve turns up after epoch 1–3</td><td><b>1–3 epochs, not 50</b>, for fine-tuning a pretrained model</td></tr>
+          <tr><td>LR too high for fine-tuning</td><td>train loss oscillates near 0; val erratic</td><td>fine-tuning LR ≠ pretraining LR (constants.md §9.4)</td></tr>
+          <tr><td>No early stopping</td><td>the best checkpoint gets overwritten by a worse one</td><td>keep-best on val — p.22</td></tr>
+          <tr><td>Bad train/val split (leakage)</td><td>val looks implausibly good</td><td>check the split is disjoint</td></tr>
+          <tr><td><b>Catastrophic forgetting</b> (LLM-specific)</td><td>task train/val curves look <b>perfectly healthy</b> while the model quietly gets worse at everything else — <b>does not show on the two-curve plot</b></td><td>hold out a general-capability probe, not just the task's own val set</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ===================== INSTRUMENTATION PANEL ===================== -->
+    <h2>The instrumentation panel — log every run, always</h2>
+    <div class="box rule"><span class="box-title">📐 Log these eight things, every training run (training §14.4)</span>
+      <ol style="margin:.4em 0 0 1.2em">
+        <li>train + val loss, with the $\ln V$ baseline drawn on the same axes</li>
+        <li><b>gradient global norm — grad norm leads loss.</b> A spike shows up here one or two steps before it
+          shows up in the loss curve.</li>
+        <li>the <em>actual</em> LR read back from the scheduler (not the config value) — catches the
+          "scheduled-by-epoch-not-step" bug (p.21)</li>
+        <li><b>update ratio</b> $\|\Delta\theta\|/\|\theta\| \approx 10^{-3}$ ([EST], a rule of thumb —
+          Karpathy's CS231n notes, never formally validated, constants.md §9.3)</li>
+        <li>dead-unit fraction</li>
+        <li>VRAM high-water mark (<code>torch.cuda.max_memory_allocated()</code>) — <b>predict from page 18's
+          ledger, then measure</b> <b>[THREAD:MEM]</b></li>
+        <li>throughput (steps/s)</li>
+        <li>wall-clock per step</li>
+      </ol>
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\|\mathbf g\|_2$</td><td>gradient global norm — every parameter's gradient, flattened into one vector, then L2-normed</td><td>scalar</td><td>computed fresh each step, after <code>backward()</code></td></tr>
+        <tr><td>$c$</td><td>the clip threshold</td><td>scalar, dimensionless</td><td>constants.md §9.3 — near-universal value <b>1.0</b>, [VP]</td></tr>
+        <tr><td>$\eta_k$</td><td>the scheduled learning rate at step $k$</td><td>scalar</td><td>p.21's warmup-cosine schedule</td></tr>
+        <tr><td>$\theta_k$</td><td>the full trainable-parameter vector after step $k$</td><td>vector, one entry per trainable parameter</td><td>optimizer state</td></tr>
+        <tr><td>$\Delta\theta_k = \theta_k - \theta_{k-1}$</td><td>the step the optimizer actually took</td><td>same shape as $\theta$</td><td>two consecutive parameter snapshots</td></tr>
+        <tr><td>$\|\Delta\theta_k\|/\|\theta_k\|$</td><td>the update ratio</td><td>scalar, dimensionless</td><td>constants.md §9.3, [EST] — the panel's item 4</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — reading the update ratio</span>
+      Suppose at some step the flattened trainable-parameter vector has norm $\|\theta_k\| = 812.4$, and that
+      step's update moved it by $\|\Delta\theta_k\| = 0.81$. The update ratio is
+      $$\frac{\|\Delta\theta_k\|}{\|\theta_k\|} = \frac{0.81}{812.4} = \mathbf{0.000997} \approx 1.0\times10^{-3}.$$
+      Squarely on the healthy rule of thumb. If that ratio read $10^{-1}$ instead, the LR is roughly
+      100× too high; if it read $10^{-6}$, roughly 1000× too low (constants.md §9.3, [EST]).
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The determinism trick (training §14.5)</span>
+      A failure at the <b>same step, every run, with a fixed seed</b> is a <b>data</b> problem — some specific
+      example is poison. A failure at a <b>different step each run</b> is <b>numerics or a race</b> — an
+      overflow that depends on which random draw happened to line up badly. One bisection, and you know which
+      half of the codebase to read. Saves hours.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Demo — a real fine-tune, instrumented, in your browser</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      A tiny MLP trains on a real 2-D spiral below — same loop as the code block above, same instrumentation
+      panel, every readout computed live from actual backward passes. <b>Overfit one batch</b> first and watch
+      the wiring check pass. Then <b>Train</b> a full run. Then hit <b>Break it</b> and watch the panel react in
+      real time to whichever failure you pick.
+    </div>
+    <div class="demo">
+      <div class="demo-head">MLP[2,8,8,1] · ReLU · spiral, 300 pts <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1.3fr 1fr;gap:16px" class="d24-grid">
+          <div><canvas id="d24-loss" height="260"></canvas></div>
+          <div><canvas id="d24-net" height="260"></canvas></div>
+        </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:14px" class="d24-grid2">
+          <div><canvas id="d24-gnorm" height="170"></canvas></div>
+          <div><canvas id="d24-lr" height="170"></canvas></div>
+        </div>
+        <p style="margin:10px 0 0;font-size:.9em;color:var(--text-dim)">Every run clips the global gradient norm
+          at 1.0 (p.19's near-universal value) — on a network this small the raw norm rarely reaches it, which is
+          itself the point: clipping is a safety net for rare spikes, not the mechanism that would save you from
+          the LR itself being wrong.</p>
+        <div class="d24-break-row">
+          <button class="btn" id="d24-overfit">Overfit one batch (8 pts)</button>
+          <button class="btn" id="d24-train">Train</button>
+          <select id="d24-break-select">
+            <option value="break-lr">Break: LR × 50</option>
+            <option value="break-labels">Break: shuffle/randomize labels</option>
+          </select>
+          <button class="btn secondary" id="d24-break">💥 Break it</button>
+          <button class="btn secondary" id="d24-reset">Reset</button>
+        </div>
+        <div class="readout" id="d24-out">Ready.</div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <h2>The milestone deliverable — a real fine-tune on your box</h2>
+    <p>The browser demo proves the loop; it cannot prove the machine, because a toy MLP with 100-odd parameters
+      doesn't touch a GPU. The script below does — it fine-tunes <b>Qwen3-0.6B</b>, the anchor model's
+      smoke-test sibling (constants.md §1.4), with a real <code>peft</code> LoRA adapter, and the arithmetic
+      transfers to the Qwen3-8B anchor by swapping four config numbers: model name, nothing about $r$ or
+      <code>target_modules</code> changes. It runs the overfit-one-batch check first, prints the trainable-param
+      count, logs the instrumentation panel, and predicts peak VRAM from the page-18 ledger formula before
+      measuring it with <code>max_memory_allocated()</code> — write your own guess down before you run it; the
+      gap between your guess and the measured number (activations, allocator overhead) is the point, not a
+      failure of the formula (constants.md §2.2 makes the same disclaimer about the frozen 122.05 GiB figure).</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The fp32-default trap (constants.md §7.3, [VP])</span>
+      <code>SFTTrainer</code> still defaults to fp32 when <code>model</code> is passed as a string, even though
+      <code>from_pretrained</code> would have inferred bf16 from the checkpoint. Two libraries, one script,
+      opposite defaults. The script below always passes
+      <code>model_init_kwargs={"dtype": torch.bfloat16}</code> explicitly — do the same in anything you write
+      yourself.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it — <code>code/24_first_finetune.py</code></span>
+      Runs in the <b>fresh venv</b> the Part III setup page installs — never ComfyUI's venv
+      (<code>hardware-ground-truth.md</code> §3). Pin <code>trl&gt;=1.8,&lt;2</code> and <code>peft==0.19.1</code>
+      (constants.md §7.2). ~3–8 minutes on Qwen3-0.6B.
+      <div class="codeblock" data-lang="bash" style="margin-top:.8em">
+        <div class="codeblock-head"><span class="lang-tag">Shell</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line"><span class="tok-com"># fresh venv — NOT ComfyUI's (hardware-ground-truth.md §3)</span></span>
+<span class="line">python -m venv ~/finetune-venv &amp;&amp; source ~/finetune-venv/bin/activate</span>
+<span class="line">pip install <span class="tok-str">"trl>=1.8,<2"</span> peft==<span class="tok-num">0.19.1</span> accelerate bitsandbytes transformers</span>
+<span class="line">python code/24_first_finetune.py --model Qwen/Qwen3-0.6B --data tiny_instructions.jsonl</span></code></pre>
+      </div>
+    </div>
+
+    <div class="milestone" data-progress="37">
+      <span class="milestone-flag">Milestone</span>
+      You can now read a training loop and know what every line does — and you just fine-tuned a model.
+      <span class="milestone-pct">37%</span> of the course.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The fork ahead</span>
+      Next: the same machine, pointed at two targets. Predict the next token → an LLM. Predict the noise that
+      was added → a diffusion model. <b>The machine won't change. The target will.</b>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-24"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  (function () {
+    const { MLP, Adam, Trainer, RNG, makeDataset, trainTestSplit, vsum, bceWithLogits } = NN;
+    const LN2 = Math.log(2);
+
+    // ---- fixed dataset, seeded, split once — same data every reload ----
+    const rngData = new RNG(24);
+    const full = makeDataset("spiral", 300, { rng: rngData, noise: 0.15 });
+    const split = trainTestSplit(full, 0.7, new RNG(7));
+    const trainSet = split.train, valSet = split.test;
+
+    // ---- warmup-cosine schedule, same formula as page 21 ----
+    function etaAt(k, etaMax, Twarm, Ttotal, etaMin) {
+      if (Twarm > 0 && k <= Twarm) return etaMax * (k / Twarm);
+      const span = Math.max(Ttotal - Twarm, 1);
+      const frac = Math.min(Math.max((k - Twarm) / span, 0), 1);
+      return etaMin + 0.5 * (etaMax - etaMin) * (1 + Math.cos(Math.PI * frac));
+    }
+
+    const accent = () => vizUtils.cssVar("--accent", "#b48cff");     // train loss
+    const accent2 = () => vizUtils.cssVar("--accent2", "#45e0b8");   // val loss
+    const dimC = () => vizUtils.cssVar("--text-dim", "#9a90b5");     // baseline
+    const badC = () => vizUtils.cssVar("--bad", "#ff6b6b");          // clip/NaN
+
+    let model, opt, trainer, netGraph;
+    let mode = "idle";
+    let seed = 24;
+    let k = 0, Ttotal = 500, Twarm = 50, lrPeak = 0.03, etaMinLocal = 0.003;
+    let breakLabelsY = null;
+    let trainableCount = 0;
+    let raf = null;
+    let stepsHistory = [], trainHist = [], valSteps = [], valHist = [];
+    let gnormTL = null, lrTL = null;
+    let deadPct = 0;
+
+    function layerWeights() {
+      return model.layers.map(L => L.neurons.map(nr => nr.w.map(wv => wv.data)));
+    }
+    function activationsFor(x) {
+      const layers = [x.slice()];
+      let h = x;
+      for (const L of model.layers) { const o = L.forward(h); layers.push(o.map(v => v.data)); h = o; }
+      return layers;
+    }
+    function evalLoss(X, y) {
+      let s = 0;
+      for (let i = 0; i < X.length; i++) s += bceWithLogits(model.forward(X[i]), [y[i]]).data;
+      return s / X.length;
+    }
+    function deadFraction() {
+      const nLayers = model.layers.length - 1; // hidden layers only, skip the output layer
+      if (nLayers <= 0) return 0;
+      const layerActs = [];
+      for (let li = 0; li < nLayers; li++) layerActs.push([]);
+      for (const x of valSet.X) {
+        let h = x;
+        for (let li = 0; li < nLayers; li++) {
+          const out = model.layers[li].forward(h).map(v => v.data);
+          layerActs[li].push(out);
+          h = out;
+        }
+      }
+      let total = 0, dead = 0;
+      for (let li = 0; li < nLayers; li++) {
+        const nUnits = layerActs[li][0].length;
+        for (let u = 0; u < nUnits; u++) {
+          total++;
+          let allZero = true;
+          for (let i = 0; i < layerActs[li].length; i++) { if (layerActs[li][i][u] !== 0) { allZero = false; break; } }
+          if (allZero) dead++;
+        }
+      }
+      return total ? dead / total : 0;
+    }
+
+    function build(newMode) {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      mode = newMode;
+      const rng = new RNG(seed);
+      model = new MLP([2, 8, 8, 1], { act: "relu", rng });
+      trainableCount = model.parameters().length;
+
+      lrPeak = mode === "break-lr" ? 0.03 * 50 : 0.03;
+      etaMinLocal = lrPeak / 10;
+      opt = new Adam(model.parameters(), { lr: lrPeak, beta1: 0.9, beta2: 0.999 });
+      const batchSize = mode === "overfit" ? 8 : 16;
+      trainer = new Trainer({ model, X: trainSet.X, y: trainSet.y, loss: "bce", opt, batchSize, rng: new RNG(seed + 1) });
+
+      k = 0;
+      Ttotal = mode === "overfit" ? 200 : mode === "break-lr" ? 150 : mode === "break-labels" ? 300 : mode === "train" ? 500 : 1;
+      Twarm = mode === "overfit" || mode === "idle" ? 0 : Math.round(Ttotal * 0.1);
+
+      breakLabelsY = null;
+      if (mode === "break-labels") {
+        const rr = new RNG(seed + 99);
+        breakLabelsY = trainSet.y.map(() => (rr.random() < 0.5 ? 1 : 0));
+      }
+
+      stepsHistory = []; trainHist = []; valSteps = []; valHist = [];
+      deadPct = deadFraction() * 100;
+
+      if (!netGraph) {
+        netGraph = new NetGraph(document.getElementById("d24-net"), {
+          layers: [2, 8, 8, 1], weights: layerWeights(), activations: activationsFor(trainSet.X[0]),
+          labels: [["x₁", "x₂"], null, null, ["ŷ"]],
+        });
+      } else {
+        netGraph.setWeights(layerWeights());
+        netGraph.setActivations(activationsFor(trainSet.X[0]));
+      }
+      if (!gnormTL) gnormTL = new Timeline(document.getElementById("d24-gnorm"), { ylog: true, ylabel: "‖g‖₂ (grad norm)", xlabel: "step" });
+      else gnormTL.reset();
+      if (!lrTL) lrTL = new Timeline(document.getElementById("d24-lr"), { ylabel: "η_k (LR)", xlabel: "step" });
+      else lrTL.reset();
+
+      drawLoss();
+      updateOut(null, 0);
+    }
+
+    function trainStep() {
+      const idx = mode === "overfit" ? [0, 1, 2, 3, 4, 5, 6, 7] : trainer._batch();
+      const yUsed = mode === "break-labels" ? breakLabelsY : trainSet.y;
+      opt.zeroGrad();
+      const terms = idx.map(i => bceWithLogits(model.forward(trainSet.X[i]), [yUsed[i]]));
+      const L = vsum(terms).div(terms.length);
+      L.backward();
+
+      const params = model.parameters();
+      let gsq = 0; for (const p of params) gsq += p.grad * p.grad;
+      const gnorm = Math.sqrt(gsq);
+      let clipped = false;
+      if (isFinite(gnorm) && gnorm > 1.0) { const f = 1.0 / gnorm; for (const p of params) p.grad *= f; clipped = true; }
+
+      let psq = 0; for (const p of params) psq += p.data * p.data;
+      const thetaNorm = Math.sqrt(psq);
+      const dataBefore = params.map(p => p.data);
+
+      opt.lr = mode === "overfit" ? 0.05 : etaAt(k, lrPeak, Twarm, Ttotal, etaMinLocal);
+      opt.step();
+
+      let dsq = 0; for (let i = 0; i < params.length; i++) { const d = params[i].data - dataBefore[i]; dsq += d * d; }
+      const dnorm = Math.sqrt(dsq);
+      const updateRatio = thetaNorm > 1e-12 ? dnorm / thetaNorm : 0;
+      k++;
+      return { loss: L.data, gnorm, clipped, lr: opt.lr, updateRatio };
+    }
+
+    function drawLoss() {
+      const canvas = document.getElementById("d24-loss");
+      const finiteTrain = trainHist.filter(isFinite);
+      const finiteVal = valHist.filter(isFinite);
+      const ymax = Math.max(LN2 * 1.35, 0.1, ...(finiteTrain.length ? finiteTrain : [0]), ...(finiteVal.length ? finiteVal : [0]));
+      const xmax = Math.max(stepsHistory.length ? stepsHistory[stepsHistory.length - 1] : 1, Ttotal * 0.05, 5);
+      const p = new Plot(canvas, { xmin: 0, xmax, ymin: 0, ymax: ymax * 1.08, xlabel: "step", ylabel: "loss (nats)" });
+      p.clear(); p.grid();
+      p.hline(LN2, dimC(), [4, 3]);
+      p.label(xmax * 0.02, Math.min(LN2 * 1.05, ymax * 1.02), "ln 2 = 0.6931 — no signal", dimC());
+      if (stepsHistory.length) p.trace(stepsHistory, trainHist, accent(), 2.2);
+      if (valSteps.length) p.trace(valSteps, valHist, accent2(), 2.2);
+    }
+
+    function fmtLoss(v) { return !isFinite(v) || Number.isNaN(v) ? "NaN" : v.toFixed(4); }
+
+    function diagnose(last) {
+      if (!last) return "";
+      if (Number.isNaN(last.loss) || !isFinite(last.loss)) {
+        return "NaN reached — exactly what “LR too high” produces (§14.1). Check the grad-norm panel: it spiked before the loss did.";
+      }
+      if (mode === "overfit") {
+        return last.loss < 0.05
+          ? "WIRING OK — loss collapsed toward 0. Forward / loss / backward / optimizer are correctly wired."
+          : "Loss did not collapse on 8 memorizable points — that is a real bug, not a hyperparameter problem.";
+      }
+      if (mode === "break-labels") {
+        return "labels carry no signal, so the best any model can do is guess — loss sits near ln 2 = 0.6931 instead of falling (§14.2).";
+      }
+      if (mode === "break-lr") {
+        return "LR × 50: loss refuses to fall and won't settle, even though clipping is on — clipping caps the SIZE of a rare spike, not the fact that η_k itself moves every parameter this far, every step (p.19's exact point). This small bounded network (ReLU + a saturating BCE loss) mostly won't crash all the way to literal NaN the way an unbounded loss or fp16 range would at production scale — but the failure is the same one, and it is not learning.";
+      }
+      return "training in progress — watch train loss fall away from the ln 2 baseline.";
+    }
+
+    function updateOut(last, throughput) {
+      const out = document.getElementById("d24-out");
+      if (!last) {
+        out.innerHTML = `Ready · model has <b>${trainableCount}</b> trainable parameters · dead units <b>${deadPct.toFixed(0)}%</b>`;
+        return;
+      }
+      const valLast = valHist.length ? valHist[valHist.length - 1] : NaN;
+      out.innerHTML =
+        `step <b>${k}</b>/${Ttotal} · train loss <b>${fmtLoss(last.loss)}</b> · val loss <b>${fmtLoss(valLast)}</b> ` +
+        `(ln 2 baseline 0.6931) · ‖g‖₂ <b>${isFinite(last.gnorm) ? last.gnorm.toFixed(3) : "NaN"}</b>` +
+        `${last.clipped ? ` <span style="color:${badC()}">clipped→1.0</span>` : ""} · ` +
+        `η_k <b>${last.lr.toExponential(2)}</b> · update ratio <b>${isFinite(last.updateRatio) ? last.updateRatio.toExponential(2) : "—"}</b> · ` +
+        `dead units <b>${deadPct.toFixed(0)}%</b> · params <b>${trainableCount}</b> · <b>${throughput ? throughput.toFixed(0) : 0}</b> steps/s<br>` +
+        `<span style="opacity:.88">${diagnose(last)}</span>`;
+    }
+
+    function run() {
+      document.querySelectorAll(".d24-break-row .btn").forEach(b => b.disabled = true);
+      const t0 = performance.now();
+      let stepsDone = 0;
+      const stepsPerFrame = 2;
+      function loop() {
+        let last = null, blew = false;
+        for (let i = 0; i < stepsPerFrame && k < Ttotal; i++) {
+          last = trainStep();
+          stepsDone++;
+          stepsHistory.push(k);
+          trainHist.push(last.loss);
+          if (gnormTL) gnormTL.push(k, last.gnorm);
+          if (lrTL) lrTL.push(k, last.lr);
+          if (!isFinite(last.loss) || Number.isNaN(last.loss)) { blew = true; break; }
+        }
+        if (mode !== "overfit" && (k % 10 === 0 || blew || k >= Ttotal) && k > 0) {
+          const v = evalLoss(valSet.X, valSet.y);
+          valSteps.push(k); valHist.push(v);
+        }
+        if (k % 20 === 0 || blew || k >= Ttotal) {
+          netGraph.setWeights(layerWeights());
+          netGraph.setActivations(activationsFor(trainSet.X[0]));
+          deadPct = deadFraction() * 100;
+        }
+        drawLoss();
+        const elapsed = (performance.now() - t0) / 1000;
+        updateOut(last, elapsed > 0 ? stepsDone / elapsed : 0);
+        if (blew || k >= Ttotal) {
+          raf = null;
+          document.querySelectorAll(".d24-break-row .btn").forEach(b => b.disabled = false);
+          return;
+        }
+        raf = requestAnimationFrame(loop);
+      }
+      raf = requestAnimationFrame(loop);
+    }
+
+    document.getElementById("d24-overfit").addEventListener("click", () => { build("overfit"); run(); });
+    document.getElementById("d24-train").addEventListener("click", () => { build("train"); run(); });
+    document.getElementById("d24-break").addEventListener("click", () => {
+      const sel = document.getElementById("d24-break-select").value;
+      build(sel); run();
+    });
+    document.getElementById("d24-reset").addEventListener("click", () => { seed = (seed + 101) % 100000; build("idle"); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => {
+      drawLoss(); netGraph && netGraph.draw(); gnormTL && gnormTL.draw(); lrTL && lrTL.draw();
+    }, 0));
+
+    build("idle");
+  })();
+
+  renderQuiz("quiz-24", [
+    {
+      q: "Before touching a single hyperparameter, the 60-second test that tells you whether forward / loss / backward / optimizer are wired correctly is:",
+      opts: [
+        "Overfit a single batch of ~8 examples to near-zero loss",
+        "Sweep the learning rate across a few orders of magnitude",
+        "Add more training data and see if the curve improves",
+        "Increase the batch size until GPU utilization looks good"
+      ],
+      a: 0,
+      why: "The universal first move (§14.0). If it doesn't collapse toward 0 on 8 memorizable points, you have a bug — no LR sweep fixes a wiring bug, so tuning first wastes runs."
+    },
+    {
+      q: "Trainable parameters for Qwen3-8B with LoRA r=16, target_modules=\"all-linear\" — the count you should see printed in the panel:",
+      num: 43646976, tol: 100000, unit: "params",
+      why: "constants.md §3: 43,646,976 = 0.533% of P. Seeing 8,190,735,360 means you froze nothing (wrong param group); seeing 0 means you froze everything."
+    },
+    {
+      q: "Training loss pins exactly at $\\ln V$ (0.6931 nats for a 2-class task) and refuses to move. The most likely cause is:",
+      opts: [
+        "The labels carry no signal relative to the inputs (e.g. shuffled/randomized)",
+        "The model has converged perfectly and there is nothing left to learn",
+        "The learning rate is set too low",
+        "Gradient clipping is too aggressive"
+      ],
+      a: 0,
+      why: "$\\ln V$ is exactly the random-guess loss (§14.2, constants.md §9.1). A model with zero signal to exploit does the best it can: predict the prior, which is $\\ln V$ nats of loss — it looks like convergence but it's the absence of anything to converge to."
+    },
+    {
+      q: "Loss rises for a few steps and then goes NaN, with the grad-norm panel spiking first. The most likely cause is:",
+      opts: ["Learning rate too high", "Corrupted / bad data in the batch", "Missing zero_grad()", "fp16 overflow"],
+      a: 0,
+      why: "§14.1's #1 cause: loss rises then NaN, grad norm exploded first — divide the LR by 10. Bad data instead produces NaN at the SAME step every run with a fixed seed, not a rising-then-NaN trajectory."
+    },
+    {
+      q: "A NaN appears at a different step each time you rerun training with a FIXED seed. This points to:",
+      opts: [
+        "A numerics or race-condition issue, not the data",
+        "A single poisoned example in the dataset",
+        "Weight decay set too high",
+        "The validation set being too small"
+      ],
+      a: 0,
+      why: "§14.5, the determinism trick: same-step-every-run with a fixed seed ⇒ data; different-step-each-run ⇒ numerics/race. This is the reverse case, so it's numerics."
+    },
+    {
+      q: "The rule-of-thumb healthy value for the update ratio $\\|\\Delta\\theta\\|/\\|\\theta\\|$ is approximately:",
+      num: 0.001, tol: 0.0005, unit: "(dimensionless)",
+      why: "constants.md §9.3, [EST] — traces to Karpathy's CS231n notes, never formally validated, so the course labels it a rule of thumb, not a fact. $10^{-1}$ suggests LR ~100× too high; $10^{-6}$ suggests ~1000× too low."
+    },
+    {
+      q: "Train loss falls to ~0 almost immediately and val loss rises right away — the classic \"overfits instantly\" signature with $P \\gg N$. The fix is:",
+      opts: [
+        "Lower the LoRA rank, fewer epochs, and add early stopping",
+        "Train for more epochs so the model has time to generalize",
+        "Increase the learning rate to escape the overfit faster",
+        "Remove the validation set so the curves stop looking bad"
+      ],
+      a: 0,
+      why: "§14.3: too much capacity for too little data. Lower rank (p.23's rank-as-bias-variance-knob), 1–3 epochs not 50, and keep-best early stopping — \"more epochs\" is exactly backwards for this failure mode."
+    }
+  ], "Page 24 self-check");
+
+});
+</script>
+</body>
+</html>

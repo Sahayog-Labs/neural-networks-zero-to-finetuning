@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>2. Vectors, Matrices, Tensors — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: the checkbox control isn't one of makeCtrl's slider shapes, so
+     it gets its own small row inside the shared .ctrl wrapper — same font, same
+     spacing, same theme variables, nothing bespoke about the colors. */
+  .demo .ctrl.chk-row { flex-direction: row; align-items: center; gap: 8px; min-width: 260px; }
+  .demo .ctrl.chk-row label { display: flex; align-items: center; gap: 7px; font-size: .85rem; color: var(--text); cursor: pointer; }
+  .demo .ctrl.chk-row input[type="checkbox"] { width: 15px; height: 15px; accent-color: var(--accent); cursor: pointer; }
+  @media (max-width: 900px) {
+    .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+  }
+</style>
+</head>
+<body data-page="02-vectors-and-shapes.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I — The Machine</span>
+    <h1>Vectors, Matrices, Tensors — Shape Is the Skill</h1>
+    <p class="subtitle">Notation starts here. Not because the symbols are hard, but because almost every real
+      mistake you will make fine-tuning a model is a <em>shape</em> mistake — and shape mistakes are the ones
+      Python doesn't always have the courtesy to crash on.</p>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in prose right after the broadcasting warn box below. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You add a bias of shape <code>(4096,)</code> to a batch of activations of shape
+      <code>(32, 128, 4096)</code>. Does it <b>(a)</b> error, <b>(b)</b> add the bias to every row correctly, or
+      <b>(c)</b> run but silently produce a <code>(32,128,4096,4096)</code> monster? Commit to one before you
+      keep reading.
+    </div>
+
+    <!-- ===================== SHAPES, WITH UNITS ===================== -->
+    <h2>Shapes, with units</h2>
+    <p>The last neuron you dragged (page 1) took two numbers in and produced one number out — no notation needed
+      for that. The moment there's more than one neuron, you need a name for "how many numbers, arranged how."
+      That name is <b>shape</b>, and its vocabulary is short:</p>
+    <table class="ledger">
+      <thead><tr><th>Object</th><th>Rank</th><th>Notation</th><th>Shape</th></tr></thead>
+      <tbody>
+        <tr><td>scalar</td><td>0</td><td>$x$</td><td><code>()</code></td></tr>
+        <tr><td>vector</td><td>1</td><td>$\mathbf{x}\in\mathbb{R}^{d}$</td><td><code>(d,)</code></td></tr>
+        <tr><td>matrix</td><td>2</td><td>$W\in\mathbb{R}^{m\times n}$</td><td><code>(m, n)</code></td></tr>
+        <tr><td>tensor</td><td>≥3</td><td>an activation batch</td><td><code>(B, S, d_model)</code></td></tr>
+      </tbody>
+    </table>
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Shape bookkeeping is the #1 practical skill in this course — <em>not</em> calculus. Almost every fine-tuning
+      failure you will personally hit, from a loss that trains to nonsense to a CUDA out-of-memory crash, is a
+      shape error or a memory error, and both start life as a shape you didn't check.
+    </div>
+
+    <!-- ===================== THE ONE RULE ===================== -->
+    <h2>The one rule: matrix multiplication</h2>
+    <p>Everything in a forward pass is built from one operation, applied over and over:</p>
+    <p>$$(AB)_{ij} = \sum_{k=1}^{n} A_{ik}B_{kj}, \qquad A\in\mathbb{R}^{m\times n},\ B\in\mathbb{R}^{n\times p}
+       \ \Rightarrow\ AB\in\mathbb{R}^{m\times p}.$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$A$</td><td>left operand</td><td>$(m, n)$</td><td>given</td></tr>
+        <tr><td>$B$</td><td>right operand</td><td>$(n, p)$</td><td>given</td></tr>
+        <tr><td>$n$</td><td>the inner dimension</td><td>scalar</td><td><b>annihilates</b> — it must match, and it vanishes from the output</td></tr>
+        <tr><td>$AB$</td><td>the product</td><td>$(m, p)$</td><td>computed above</td></tr>
+      </tbody>
+    </table>
+    <p>Play the cancellation game out loud: <code>(m,&nbsp;[n)&nbsp;@&nbsp;(n],&nbsp;p)&nbsp;→&nbsp;(m,&nbsp;p)</code> —
+      the two inner <code>n</code>'s have to match, and once they've matched, they disappear. Every shape bug in
+      this course is that game played wrong. The FLOP cost of one matmul is $2mnp$ (one multiply and one add per
+      term, counted separately — the vendor convention this course uses everywhere); you won't need that number
+      until the roofline pages (page 43), but it's cheap to bank now.</p>
+
+    <div class="box rule"><span class="box-title">📐 The invariant</span>
+      $W$ is <b>always</b> $(d_{\text{out}}, d_{\text{in}})$. Always. In the maths, in the code, in every
+      convention this course ever uses. Rows of $W$ are output neurons; columns are inputs. Page 7 is the whole
+      page built to pay this sentence off — hold onto it until then.
+    </div>
+
+    <p>Every multi-step tensor computation in this course carries its shapes inline, in this fixed format — the
+      <b>shape ribbon</b>. Here is the canonical one, shown once and reused, never redrawn:</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">Shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x        (B=32, S=128, d_model=4096)</span>
+<span class="line">W        (12288, 4096)        # (out, in) — ALWAYS</span>
+<span class="line">h = x @ W.T                    (32, 128, 12288)</span></code></pre>
+    </div>
+    <p>Read it left to right: the input tensor, its shape with every axis <em>named</em> (not just sized); the
+      weight, shape-and-role labelled; the operation, with the result shape it must produce. You'll see this exact
+      strip under every tensor operation from here on — same format, same discipline, no exceptions.</p>
+
+    <!-- ===================== WORKED EXAMPLE — QWEN3-8B FFN ===================== -->
+    <h2>Carried to a number: Qwen3-8B's FFN block</h2>
+    <p><b>[THREAD:Qwen3-8B beat 1]</b> — the anchor model's first arithmetic. Qwen3-8B is the model this whole
+      course fine-tunes; from here on, its numbers recur until they're reflexive. One transformer block's FFN
+      (SwiGLU) has three weight matrices, all built from $d_{\text{model}}=4096$ and $d_{\text{ff}}=12288$
+      ($=3d$) — and every one of them, correctly, is $(d_{\text{out}}, d_{\text{in}})$:</p>
+    <div class="box worked"><span class="box-title">✍️ Worked example — the FFN's three matrices</span>
+      <table class="ledger">
+        <tbody>
+          <tr><td>$W_{\text{gate}}$</td><td>maps $d_{\text{model}}\to d_{\text{ff}}$</td><td>shape $(12288,\,4096)$</td><td>$12288\times4096=\mathbf{50{,}331{,}648}$</td></tr>
+          <tr><td>$W_{\text{up}}$</td><td>maps $d_{\text{model}}\to d_{\text{ff}}$</td><td>shape $(12288,\,4096)$</td><td>$\mathbf{50{,}331{,}648}$</td></tr>
+          <tr><td>$W_{\text{down}}$</td><td>maps $d_{\text{ff}}\to d_{\text{model}}$</td><td>shape $(4096,\,12288)$</td><td>$\mathbf{50{,}331{,}648}$</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">Notice the invariant holds for <em>every</em> row of that table, even though
+        $W_{\text{down}}$'s mapping runs the opposite direction from the other two — $(d_{\text{out}}, d_{\text{in}})$
+        doesn't care which way information flows, only which axis is which.</p>
+      <p style="margin:.6em 0 0"><b>FFN per block $= 3\,d_{\text{model}}\,d_{\text{ff}} = 3\times4096\times12288 =
+        \mathbf{150{,}994{,}944}$</b>, which is <b>78.26%</b> of the block's $192{,}946{,}432$ parameters
+        (<code>constants.md</code> §1.2–1.3). Across all 36 blocks that's
+        $150{,}994{,}944\times36 = 5{,}435{,}817{,}984$, and $5{,}435{,}817{,}984 / 8{,}190{,}735{,}360 =
+        \mathbf{66.4\%}$ of the <em>whole</em> model (<code>constants.md</code> §1.3).</p>
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ Two different denominators — say which</span>
+      <b>78.26%</b> and <b>66.4%</b> are both true FFN shares — they just divide by different things (a block's
+      params vs. the whole model's). Never say "the FFN is ~70% of the model" without naming which: that retired
+      70% figure was a <em>Llama-3.1-8B</em> number ($d_{\text{ff}}=3.5d$); Qwen3-8B's FFN is $d_{\text{ff}}=3d$,
+      giving 66.4% of the model or 78.26% of a block — never 70% (<code>constants.md</code> §1.3, D-01).
+    </div>
+    <p><b>[THREAD:memory beat 1]</b> One line, then a deliberate pause: at bf16, those 8,190,735,360 parameters
+      weigh <b>16.38 GB</b> (decimal — <code>constants.md</code> §1.1). Weights are the <em>cheap</em> line item.
+      Page 18 adds gradients and optimizer state on top and the number stops being something you can shrug at.</p>
+
+    <!-- ===================== BROADCASTING ===================== -->
+    <h2>Broadcasting — and the bug that never raises</h2>
+    <p>Shapes don't have to match exactly to combine — they have to be <em>compatible</em>. Align two shapes from
+      the right; a pair of dims is compatible if they're equal, if either is $1$ (it gets stretched), or if one
+      tensor simply runs out of dims (missing dims count as $1$). This is what lets a $(4096,)$ bias add cleanly
+      to a $(32, 128, 4096)$ batch — the last axis matches, the rest just get copied down every row. <em>(That
+      resolves the predict above: it's <b>(b)</b> — add correctly, every row. The $(32,128,4096,4096)$ monster in
+      option (c) is what happens when the bias picks up an accidental trailing axis, not when you add it
+      directly — which is exactly the trap below, at a smaller scale.)</em></p>
+    <div class="box warn"><span class="box-title">⚠️ The single highest-value warning in this chapter</span>
+      <p><code>(64,)</code> is not <code>(64, 1)</code> is not <code>(1, 64)</code> — three different tensors, and
+        PyTorch will let all three of them subtract from each other without complaint:</p>
+      <div class="codeblock" data-lang="python">
+        <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">pred   = torch.randn(<span class="tok-num">64</span>)      <span class="tok-com"># (64,)</span></span>
+<span class="line">target = torch.randn(<span class="tok-num">64</span>, <span class="tok-num">1</span>)   <span class="tok-com"># (64, 1)</span></span>
+<span class="line hl">loss = ((pred - target)**<span class="tok-num">2</span>).mean()   <span class="tok-com"># NO ERROR. Broadcasts to (64,64). Garbage.</span></span></code></pre>
+      </div>
+      <p>Right-aligned, <code>(64,)</code> against <code>(64,1)</code>: the last axes are $64$ vs.\ $1$ —
+        compatible, the $1$ stretches. The leading $64$ on <code>target</code> has nothing across from it on
+        <code>pred</code>, so <code>pred</code> is treated as if it had a leading $1$ there too — which then
+        stretches to $64$ as well. Result: a $(64,64)$ matrix of <em>every</em> <code>pred[j] - target[i]</code>,
+        averaged into one number that looks like a loss and is not one. <b>It runs. It trains. It converges — to
+        nonsense.</b> Habit: <code>assert pred.shape == target.shape</code> before every loss, no exceptions.
+      </p>
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ $A \odot B$ is not $AB$</span>
+      Elementwise (Hadamard) product $\odot$ multiplies same-shaped tensors entry-by-entry; matrix product
+      $AB$ (`@`) contracts a shared inner dimension. They look similar on the page and do completely different
+      things — SwiGLU (page 11) uses <em>both</em>, in the same line, on purpose: `down_proj(gate_act ⊙ up)` is a
+      Hadamard product feeding a matmul. Confusing the two is a shape-passing bug, not a subtle one.
+    </div>
+    <p>One more habit worth stating plainly: the batch axis is a hardware convenience, not a mathematical one.
+      $(B, d)$ stacks $B$ independent examples so the GPU can matmul them together; mathematically, each row is
+      its own, unrelated forward pass. Nothing in the maths above needed a batch axis — page 7 is where it gets
+      added to the column-vector convention without changing $W$'s shape at all.</p>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Shape Detective</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag <code>m</code>, <code>n</code>, <code>p</code> — the matmul below always cancels cleanly, because
+      <code>n</code> is the <em>same</em> slider for both operands. Then check the box and watch what "add a
+      trailing 1 to B" really does: sometimes it's a hard PyTorch error, and sometimes — worse — it silently runs
+      and hands you back a shape you didn't ask for.
+    </div>
+    <div class="demo">
+      <div class="demo-head">A @ B, live <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-shape" height="230"></canvas>
+        <div class="controls" id="d-shape-ctrls"></div>
+        <p style="margin:10px 0 0"><button class="btn secondary" id="d-shape-animate">Animate A @ B →</button></p>
+        <div class="readout" id="d-shape-out"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/shape_gym.py</code> builds exactly the <code>(64,)</code>-vs-<code>(64,1)</code> pair from the
+      warn box above, prints the buggy $(64,64)$-broadcast loss next to the correct elementwise loss, and asserts
+      they disagree. CPU, under a second, <code>torch</code> only.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz02"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- Demo: Shape Detective — real TensorViz matmul + a real (JS-computed)
+     matmul-broadcasting legality check, driven by the same three sliders and
+     one checkbox that toggles "B gains a trailing 1." Nothing here is faked:
+     the legality test below is the actual torch.matmul broadcasting rule for
+     a 2-D A against a 2-D-or-3-D B (batch dims broadcast; the last two dims
+     must satisfy the inner-dimension match), and TensorViz's own red/green
+     text is its independent, primitive-level confirmation of the same rule. */
+  (function () {
+    const canvas = document.getElementById("d-shape");
+    const ctrlsEl = document.getElementById("d-shape-ctrls");
+    const out = document.getElementById("d-shape-out");
+
+    const tv = new TensorViz(canvas, {
+      mode: "matmul",
+      A: { shape: [3, 4], label: "A" }, B: { shape: [4, 2], label: "B" },
+    });
+
+    const mCtrl = makeCtrl(ctrlsEl, { label: "rows of A — m", min: 1, max: 8, step: 1, value: 3, fmt: v => v.toFixed(0) });
+    const nCtrl = makeCtrl(ctrlsEl, { label: "shared inner — n", min: 1, max: 8, step: 1, value: 4, fmt: v => v.toFixed(0) });
+    const pCtrl = makeCtrl(ctrlsEl, { label: "cols of B — p", min: 1, max: 8, step: 1, value: 2, fmt: v => v.toFixed(0) });
+
+    // makeCtrl only builds sliders; the checkbox is wired by hand into the
+    // same .ctrl/.controls layout so it reads as one control row, not a
+    // bolted-on extra.
+    const chkWrap = document.createElement("div");
+    chkWrap.className = "ctrl chk-row";
+    chkWrap.innerHTML = `<label><input type="checkbox" id="d-shape-trailing">
+      add a trailing 1 to B — <code>(n,p)</code> → <code>(n,p,1)</code></label>`;
+    ctrlsEl.appendChild(chkWrap);
+    const chk = chkWrap.querySelector("input");
+
+    function state() {
+      return { m: mCtrl.get() | 0, n: nCtrl.get() | 0, p: pCtrl.get() | 0, trailing: chk.checked };
+    }
+
+    function draw() {
+      const { m, n, p, trailing } = state();
+      // The 2-D shape TensorViz actually visualizes: B itself, or — once the
+      // trailing 1 makes B 3-D, (n,p,1) — its "matrix part" (the last two
+      // dims), since that's what a batched matmul checks against A.
+      const Bmat = trailing ? [p, 1] : [n, p];
+      tv.setMatmul({ shape: [m, n], label: "A" }, { shape: Bmat, label: trailing ? "B's matrix part" : "B" });
+
+      const legal = n === Bmat[0];
+      let html;
+      if (!trailing) {
+        html = `<span style="color:var(--good)">✓ legal.</span> <code>(${m},${n}) @ (${n},${p}) → (${m},${p})</code>` +
+          ` — the shared inner dimension <b>n=${n}</b> cancels, every time, because this demo's <code>n</code> slider` +
+          ` drives both operands at once.`;
+      } else if (!legal) {
+        html = `<span style="color:var(--bad)">✗ RuntimeError.</span> B is now 3-D: <code>(${n},${p},1)</code>.` +
+          ` A batched matmul checks A's last dim against B's <em>matrix part's</em> first dim:` +
+          ` <code>${n} ≠ ${p}</code> → <code>mat1 and mat2 shapes cannot be multiplied (${m}x${n} and ${p}x1)</code>.`;
+      } else {
+        html = `<span style="color:var(--warn)">⚠ runs — but not into what you meant.</span> B is now 3-D:` +
+          ` <code>(${n},${p},1)</code>. Because n=p=${n}, PyTorch treats the leading <b>${n}</b> as a <em>batch</em>` +
+          ` dimension instead of erroring, and returns <code>(${n},${m},1)</code> — not the <code>(${m},${p})</code>` +
+          ` the 2-D game upstairs promised. The trailing 1 doesn't crash here. It just quietly changes what the` +
+          ` answer means — the same family of bug as the <code>(64,)</code>-vs-<code>(64,1)</code> trap above.`;
+      }
+      out.innerHTML = html;
+    }
+
+    [mCtrl, nCtrl, pCtrl].forEach(c => c.onInput(draw));
+    chk.addEventListener("change", draw);
+    document.getElementById("d-shape-animate").addEventListener("click", () => {
+      const { m, n, p, trailing } = state();
+      const Bmat = trailing ? [p, 1] : [n, p];
+      tv.animateMatmul({ A: { shape: [m, n], label: "A" }, B: { shape: Bmat, label: trailing ? "B's matrix part" : "B" } });
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => tv.draw(), 0));
+
+    draw();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz02", [
+    {
+      q: "$A$ is $(32, 128, 4096)$, $W$ is $(12288, 4096)$. Shape of $A \\,@\\, W^\\top$? Enter the last dimension only.",
+      num: 12288, tol: 0,
+      why: "$(\\ldots,4096) @ (4096,12288) \\to (\\ldots,12288)$ — the shared 4096 annihilates, and $W^\\top$ flips $(12288,4096)$ to $(4096,12288)$ for the multiply."
+    },
+    {
+      q: "Qwen3-8B's FFN parameters per block: $3 \\times 4096 \\times 12288 =$ ?",
+      num: 150994944, tol: 0,
+      why: "$3\\,d_{\\text{model}}\\,d_{\\text{ff}} = 3\\times4096\\times12288 = 150{,}994{,}944$ (constants.md §1.2–1.3)."
+    },
+    {
+      q: "<code>pred</code> has shape $(64,)$, <code>target</code> has shape $(64,1)$. <code>pred - target</code> has shape:",
+      opts: ["$(64,)$", "$(64,1)$", "$(64,64)$", "It raises an error"],
+      a: 2,
+      why: "Right-aligned broadcasting: the last axes $64$ vs.\\ $1$ are compatible (the 1 stretches); the leading $64$ on <code>target</code> has nothing across from it on <code>pred</code>, so <code>pred</code> gets an implicit leading 1 that also stretches to 64. Result: $(64,64)$ — and no error, which is exactly why the bug survives. \"Shapes must match to subtract\" (the error option) is the misconception this warn box exists to correct."
+    },
+    {
+      q: "A model trains but its loss plateaus at nonsense; you find the loss line silently broadcasts <code>(64,)</code> against <code>(64,1)</code>. The fix is:",
+      opts: ["Lower the learning rate", "<code>target.squeeze()</code> or <code>pred.unsqueeze(1)</code> so both sides match", "Train for more epochs"],
+      a: 1,
+      why: "The loss was never computing what you intended — no learning-rate or epoch-count change fixes a garbage objective. Matching the shapes (squeeze or unsqueeze so both sides are $(64,)$ or both are $(64,1)$) is the only real fix."
+    },
+    {
+      q: "$W$ for <code>nn.Linear(4096, 12288)</code> has shape:",
+      opts: ["$(4096, 12288)$", "$(12288, 4096)$"],
+      a: 1,
+      why: "The invariant: $W$ is always $(d_{\\text{out}}, d_{\\text{in}})$. <code>nn.Linear(4096, 12288)</code> maps 4096 in, 12288 out, so <code>.weight.shape == (12288, 4096)</code> — the (in, out) answer is the single most common shape-convention error in the field (notation.md anti-pattern #2)."
+    },
+    {
+      q: "The FFN's share of the <em>whole</em> Qwen3-8B model (not just one block):",
+      num: 66.4, tol: 0.5, unit: "%",
+      why: "$5{,}435{,}817{,}984 / 8{,}190{,}735{,}360 = 66.4\\%$ of the whole model — a different, larger denominator than the 78.26% per-block figure (constants.md §1.3). State which one you mean; \"~70%\" is a retired Llama-3.1-8B number and does not apply to Qwen3-8B's $d_{\\text{ff}}=3d$."
+    }
+  ], "Vectors, matrices, tensors — self-check");
+
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>7. Row or Column? The Shape Bridge — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the prescription table and the shape ribbon can run wider than
+   a phone. Let them scroll inside their own box on narrow screens so the page
+   body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.prescription { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="07-row-or-column.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine</span>
+    <h1>Row or Column? The Shape Bridge</h1>
+    <p class="subtitle">Page 6 handed you $\mathbf y = W\mathbf x$ on paper and <code>a1 = tanh(lin1(x))</code> in
+      PyTorch, and quietly let the question sit: are those the same $W$? They are. This page proves it, gives you
+      the one rule that never changes, and closes the loop page 6 deliberately left open with
+      <code>nn.Linear(2,&nbsp;2)</code>.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:TN-1 beat 2/9]</b> — TN-1's forward pass, recast in explicit shapes. Same nine numbers, code-shape
+      clothing. <b>[THREAD:Qwen3-8B beat 3]</b> — the FFN's $(12288,4096)$ weight from page&nbsp;2 comes back to make
+      the invariant concrete on the model you'll actually fine-tune.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      <code>nn.Linear(3, 5)</code> — what is <code>.weight.shape</code>? <b>(a) (3, 5)</b> or <b>(b) (5, 3)</b>?
+      Commit to one, then read on — we'll see why the maths and the code agree even though one writes
+      $W\mathbf x$ and the other writes $x A^\top$.
+    </div>
+
+    <!-- ===================== GROUND TRUTH ===================== -->
+    <h2>The ground truth</h2>
+    <p><b>[VP] PyTorch 2.13.</b> <code>torch.nn.Linear</code> applies $y = xA^\top + b$, and its <code>weight</code>
+      has shape <code>(out_features, in_features)</code>. Every maths treatment in this course writes
+      $\mathbf y = W\mathbf x + \mathbf b$ with $\mathbf x$ a column. Put a real layer through both readings:</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">layer = nn.<span class="tok-fn">Linear</span>(<span class="tok-num">3</span>, <span class="tok-num">5</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(layer.weight.shape)   <span class="tok-com"># torch.Size([5, 3])</span></span></code></pre>
+    </div>
+
+    <p><code>nn.Linear(3, 5).weight.shape == (5, 3)</code> — <b>answer (b).</b> And the maths's $W$ in
+      $\mathbf y = W\mathbf x$, for that same layer, is also $(5,3)$: five rows (one per output), three columns
+      (one per input). <b>There is no second matrix to reconcile.</b> It is the identical $15$ numbers, read two
+      ways.</p>
+
+    <div class="box key"><span class="box-title">🔑 The reconciling gift</span>
+      There is no disagreement about $W$. $\texttt{nn.Linear(3, 5).weight.shape} == (5, 3)$, and the maths's $W$ in
+      $\mathbf y = W\mathbf x$ is also $(5,3)$. The two conventions differ <em>only</em> in whether you stack a
+      batch on the left. Every other course you've half-read that made this feel confusing was fighting a battle
+      that doesn't exist.
+    </div>
+
+    <!-- ===================== PRESCRIPTION ===================== -->
+    <div class="box rule"><span class="box-title">📐 The prescription</span>
+      <table class="prescription">
+        <thead><tr><th>Context</th><th>Convention</th><th>Form</th></tr></thead>
+        <tbody>
+          <tr><td>Single-example maths; all trunk derivations; backprop</td><td><b>Column vectors</b></td>
+              <td>$\mathbf y = W\mathbf x + \mathbf b$, &nbsp; $\mathbf x \in \mathbb R^{d_{in}\times 1}$</td></tr>
+          <tr><td>Anything with a batch or sequence axis; <b>all code</b>; <b>all attention</b></td>
+              <td><b>Row-batched</b></td>
+              <td>$Y = XW^\top + \mathbf b^\top$, &nbsp; $X \in \mathbb R^{B\times d_{in}}$</td></tr>
+          <tr><td colspan="3"><b>Everywhere, no exceptions:</b> $W$ is $(d_{\text{out}}, d_{\text{in}})$.</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$W$</td><td>the layer's weight matrix</td><td>$(d_{out}, d_{in})$</td><td>learned parameters — <b>the same matrix in both forms</b></td></tr>
+        <tr><td>$\mathbf x$</td><td>one input example, a column</td><td>$(d_{in}, 1)$</td><td>single-example maths</td></tr>
+        <tr><td>$X$</td><td>a batch of inputs, stacked as rows</td><td>$(B, d_{in})$</td><td>code / row-batched maths</td></tr>
+        <tr><td>$\mathbf b$</td><td>bias</td><td>$(d_{out}, 1)$</td><td>learned parameters</td></tr>
+        <tr><td>$\mathbf y$</td><td>output, single example</td><td>$(d_{out}, 1)$</td><td>column form: $\mathbf y = W\mathbf x + \mathbf b$</td></tr>
+        <tr><td>$Y$</td><td>output, whole batch</td><td>$(B, d_{out})$</td><td>row form: $Y = XW^\top + \mathbf b^\top$</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>Why split rather than pick one globally.</b> Column-only would force transposing every attention equation
+      you'll ever read — attention is written row-style universally in the literature, and fighting that spends
+      credibility to buy nothing. Row-only makes the backprop derivation on page&nbsp;14 uglier: gradients become
+      row covectors and the Jacobian bookkeeping that makes backprop <em>click</em> gets muddier right where it
+      needs to be cleanest. The split costs exactly one page — this one. In exchange, the thing you must remember
+      never changes: only the batch placement does, and the shape ribbon shows you that on every line.</p>
+
+    <!-- ===================== SHAPE RIBBON ===================== -->
+    <h2>The same object, both shapes</h2>
+    <p>Page&nbsp;6's TN-1 ran one example, column form. Here is that exact hidden layer, first as you saw it, then
+      stretched to a batch — <b>same $W_1$, same numbers:</b></p>
+
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">Shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x            (2,)                                # one example — page 6</span>
+<span class="line">W1           (2, 2)     b1  (2,)                 # (out, in) — ALWAYS</span>
+<span class="line">z1 = W1 x + b1                  (2,)              # column form</span>
+<span class="line"></span>
+<span class="line">X            (B, 2)                              # a batch of B examples</span>
+<span class="line">W1           (2, 2)     b1  (2,)                 # (out, in) — SAME W1</span>
+<span class="line">Z1 = X @ W1.T + b1.T             (B, 2)            # row-batched form</span></code></pre>
+    </div>
+
+    <p>Three facts to hammer here — they recur unchanged at attention (pages 29–30):</p>
+    <ul>
+      <li>The output has one row per input example; the batch axis is purely a hardware convenience — each row is
+        computed independently.</li>
+      <li>$d_{\text{in}}$ disappears after the projection; only $d_{\text{out}}$ survives into the next shape.</li>
+      <li>The operation is dimensionally rigid — there is exactly one legal wiring, and the shape ribbon makes a
+        mis-wiring visible before you run anything.</li>
+    </ul>
+
+    <p>And the anchor model makes the invariant concrete at real scale — <b>[THREAD:Qwen3-8B beat 3]</b>: Qwen3-8B's
+      <code>down_proj</code> is <code>nn.Linear(12288, 4096)</code>, so its weight is
+      <code>(4096, 12288)</code> — <em>(out, in)</em>, exactly as page&nbsp;2's invariant demanded, at nine digits
+      instead of two (<code>constants.md §1.2</code>).</p>
+
+    <!-- ===================== TRANSLATION TABLE ===================== -->
+    <div class="box rule"><span class="box-title">📐 Translation Table — papers call these differently</span>
+      <table class="prescription">
+        <thead><tr><th>We write</th><th>Papers write</th><th>Where it bites</th></tr></thead>
+        <tbody>
+          <tr><td>$S$ (sequence length)</td><td>$T$, $L$, $N$, <code>seq_len</code>, <code>max_length</code></td><td>the worst offender — four rival letters</td></tr>
+          <tr><td>$L$ (layers)</td><td><code>num_hidden_layers</code></td><td>every model config you'll open</td></tr>
+          <tr><td>$\vartheta$ (geometric angle)</td><td>papers' bare $\theta$ — which collides with parameters</td><td>dot-product (page 3) and RoPE (page 33)</td></tr>
+        </tbody>
+      </table>
+      This is the deal stated in full on page&nbsp;3 and notation.md §3: internal consistency beats matching any one
+      paper, and every deviation gets exactly this kind of note, once, where it first bites.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <div class="box warn"><span class="box-title">⚠️ "The maths and the code use different weight matrices."</span>
+      Same $W$, transposed multiply. <code>x @ W.T</code> and <code>W @ x</code> (per example) are the same numbers
+      — the <code>shapes_bridge.py</code> demo below asserts it bit-for-bit, not just approximately.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "(2, 2) proves I understand the convention."</span>
+      It can't. When <code>out == in</code>, $(d_{out}, d_{in})$ and $(d_{in}, d_{out})$ are the same tuple — page
+      6's <code>nn.Linear(2, 2)</code> was deliberately ambiguous for exactly this reason. That's why every demo
+      on <em>this</em> page uses <code>nn.Linear(2, 3)</code>: with $(out,in)=(3,2)$, a transposed load is
+      unmistakable.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Transpose moves data."</span>
+      In PyTorch, <code>.T</code> is a stride change — a new view over the same bytes, no copy — until a kernel
+      demands <code>.contiguous()</code> and forces one. Cheap to reach for; not free to abuse in a hot loop.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: what the backprop page would look like if the architect had gone row-only</summary><div>
+      <p>Row-only would make every gradient a <em>row</em> covector instead of a column, because the forward pass
+        is $Y = XW^\top$ and differentiating through a transpose flips which side every Jacobian multiplies on.
+        Page&nbsp;14's clean recursion $\boldsymbol\delta^{(\ell)} = (W^{(\ell+1)\top}\boldsymbol\delta^{(\ell+1)})
+        \odot \phi'(\mathbf z^{(\ell)})$ would instead read
+        $\boldsymbol\delta^{(\ell)} = (\boldsymbol\delta^{(\ell+1)} W^{(\ell+1)}) \odot \phi'(\mathbf z^{(\ell)})$
+        with $\boldsymbol\delta$ a row vector at every layer — correct, but it obscures the "gradient has the same
+        shape as the thing it's the gradient of" law that makes the recursion legible. That one clarity is the
+        entire justification for column form in the trunk; it costs this one bridging page.</p>
+    </div></details>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Shape bridge, live</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Pick <code>out</code>, <code>in</code>, and a batch size $B$. The left panel animates $W\mathbf x$ — one
+      example, column form. The right panel animates $XW^\top$ — the same $W$, transposed, a whole batch at once.
+      Watch the readout: row&nbsp;0 of $Y$ and $\mathbf y$ are computed by two different pieces of arithmetic and
+      still land on the identical numbers.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">$W\mathbf x$ (column) vs. $XW^\top$ (row-batched) — same $W$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px" class="d-bridge-grid">
+          <div><canvas id="d-bridge-col" height="230"></canvas></div>
+          <div><canvas id="d-bridge-row" height="230"></canvas></div>
+        </div>
+        <div class="controls" id="d-bridge-ctrls"></div>
+        <p style="margin:12px 0 0"><button class="btn secondary" id="d-bridge-go">Animate both →</button></p>
+        <div class="readout" id="d-bridge-out"></div>
+      </div>
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The aha</span>
+      Same $W$, same answer — the batch just moved to the left. The $(out,in)$ shape of $W$ never budged, and it
+      never will, in any equation this course writes.
+    </div>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <h2>Verify it yourself</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      <code>code/shapes_bridge.py</code> — builds <code>nn.Linear(2, 3)</code>, prints <code>weight.shape →
+      (3, 2)</code>, then computes the same layer's output as $W\mathbf x$ (column) and as $x W^\top$ (row) and
+      asserts <code>torch.allclose</code>. Runs on CPU in under a second.
+    </div>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python · code/shapes_bridge.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line">SEED = <span class="tok-num">42</span></span>
+<span class="line">torch.<span class="tok-fn">manual_seed</span>(SEED)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># nn.Linear(in_features=2, out_features=3): weight is ALWAYS (out, in).</span></span>
+<span class="line">layer = torch.nn.<span class="tok-fn">Linear</span>(<span class="tok-num">2</span>, <span class="tok-num">3</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-fn">tuple</span>(layer.weight.shape))   <span class="tok-com"># (3, 2)</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">tuple</span>(layer.weight.shape) == (<span class="tok-num">3</span>, <span class="tok-num">2</span>)</span>
+<span class="line"></span>
+<span class="line">W = layer.weight.<span class="tok-fn">detach</span>().<span class="tok-fn">clone</span>()      <span class="tok-com"># (3, 2) — the SAME matrix, both forms below</span></span>
+<span class="line">b = layer.bias.<span class="tok-fn">detach</span>().<span class="tok-fn">clone</span>()        <span class="tok-com"># (3,)</span></span>
+<span class="line">x = torch.<span class="tok-fn">tensor</span>([<span class="tok-num">1.0</span>, <span class="tok-num">2.0</span>])           <span class="tok-com"># one example, column-form shape (2,)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Column form: single-example maths, y = W x + b.</span></span>
+<span class="line">y_col = W @ x + b                      <span class="tok-com"># (3,2) @ (2,) -> (3,)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Row-batched form: code's convention, Y = X W^T + b. Batch of 1, same x.</span></span>
+<span class="line">X = x.<span class="tok-fn">unsqueeze</span>(<span class="tok-num">0</span>)                     <span class="tok-com"># (1, 2) — x promoted to a one-row batch</span></span>
+<span class="line">y_row = X @ W.T + b                    <span class="tok-com"># (1,2) @ (2,3) -> (1,3)</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">assert</span> torch.<span class="tok-fn">allclose</span>(y_col, y_row.<span class="tok-fn">squeeze</span>(<span class="tok-num">0</span>))</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">"y_col == y_row.squeeze(0):"</span>, torch.<span class="tok-fn">allclose</span>(y_col, y_row.<span class="tok-fn">squeeze</span>(<span class="tok-num">0</span>)))</span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz07"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: Shape bridge — TensorViz x2, fed by a REAL Mat matmul both ways ---- */
+  (function () {
+    const { Mat, RNG } = NN;
+    const colCanvas = document.getElementById("d-bridge-col");
+    const rowCanvas = document.getElementById("d-bridge-row");
+    const ctrlsEl = document.getElementById("d-bridge-ctrls");
+    const out = document.getElementById("d-bridge-out");
+    const goBtn = document.getElementById("d-bridge-go");
+
+    const outCtrl = makeCtrl(ctrlsEl, { label: "out (d_out)", min: 2, max: 6, step: 1, value: 3, fmt: v => v.toFixed(0) });
+    const inCtrl  = makeCtrl(ctrlsEl, { label: "in (d_in)",  min: 2, max: 6, step: 1, value: 2, fmt: v => v.toFixed(0) });
+    const bCtrl   = makeCtrl(ctrlsEl, { label: "batch B",    min: 1, max: 4, step: 1, value: 3, fmt: v => v.toFixed(0) });
+
+    let tvCol = null, tvRow = null;
+    let last = null; // {dOut,dIn,B,W,x,X} for the animate button
+
+    function build() {
+      const dOut = outCtrl.get(), dIn = inCtrl.get(), B = bCtrl.get();
+      const rng = new RNG(7); // fixed seed — reproducible small integers every rebuild
+
+      // Small integers so the arithmetic is checkable by eye; row 0 of X IS x,
+      // so the parity check below is visible, not just asserted.
+      const Wd = []; for (let i = 0; i < dOut * dIn; i++) Wd.push(rng.int(7) - 3);
+      const W = new Mat(dOut, dIn, Wd);
+      const xd = []; for (let i = 0; i < dIn; i++) xd.push(rng.int(7) - 3);
+      const x = new Mat(dIn, 1, xd);
+      const Xd = xd.slice();
+      for (let i = 1; i < B; i++) for (let j = 0; j < dIn; j++) Xd.push(rng.int(7) - 3);
+      const X = new Mat(B, dIn, Xd);
+
+      // REAL math: y = W @ x (column form); Y = X @ W.T (row-batched form).
+      const y = W.matmul(x);       // (dOut, 1)
+      const Y = X.matmul(W.T());   // (B, dOut)
+
+      // Parity check: row 0 of Y must equal y transposed to a row — same W,
+      // same numbers, only the batch axis moved.
+      let maxDiff = 0;
+      for (let j = 0; j < dOut; j++) maxDiff = Math.max(maxDiff, Math.abs(Y.get(0, j) - y.get(j, 0)));
+
+      last = { dOut, dIn, B, W, x, X };
+
+      if (!tvCol) {
+        tvCol = new TensorViz(colCanvas, { mode: "matmul", A: { shape: [dOut, dIn], label: "W" }, B: { shape: [dIn, 1], label: "x" }, labels: { C: "y" } });
+        tvRow = new TensorViz(rowCanvas, { mode: "matmul", A: { shape: [B, dIn], label: "X" }, B: { shape: [dIn, dOut], label: "Wᵀ" }, labels: { C: "Y" } });
+      } else {
+        tvCol.setMatmul({ shape: [dOut, dIn], label: "W" }, { shape: [dIn, 1], label: "x" });
+        tvRow.setMatmul({ shape: [B, dIn], label: "X" }, { shape: [dIn, dOut], label: "Wᵀ" });
+      }
+
+      out.innerHTML =
+        `weight.shape = (out, in) = <b>(${dOut}, ${dIn})</b> &nbsp;·&nbsp; ` +
+        `y = Wx &rarr; <b>(${dOut}, 1)</b> &nbsp;·&nbsp; Y = XWᵀ &rarr; <b>(${B}, ${dOut})</b> ` +
+        `&nbsp;·&nbsp; row 0 of Y vs. yᵀ: max abs diff = <b>${maxDiff.toFixed(6)}</b> — ` +
+        (maxDiff === 0 ? "exactly equal." : "equal to float precision.");
+    }
+
+    outCtrl.onInput(build); inCtrl.onInput(build); bCtrl.onInput(build);
+    build();
+
+    goBtn.addEventListener("click", () => {
+      tvCol.animateMatmul({ A: { shape: [last.dOut, last.dIn], label: "W" }, B: { shape: [last.dIn, 1], label: "x" } });
+      tvRow.animateMatmul({ A: { shape: [last.B, last.dIn], label: "X" }, B: { shape: [last.dIn, last.dOut], label: "Wᵀ" } });
+    });
+
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => { tvCol && tvCol.draw(); tvRow && tvRow.draw(); }, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz07", [
+    {
+      q: "<code>nn.Linear(4096, 12288).weight.shape</code> — enter dim 0 (the first number).",
+      num: 12288, tol: 0,
+      why: "(out, in) = (12288, 4096) for nn.Linear(in_features=4096, out_features=12288) — Qwen3-8B's gate_proj/up_proj shape (constants.md §1.2, notation.md §1.1)."
+    },
+    {
+      q: "<code>nn.Linear(2, 3).weight.shape</code> is:",
+      opts: ["(2, 3)", "(3, 2)", "(6,)", "(3, 2, 1)"],
+      a: 1,
+      why: "(out, in) = (3, 2) — three output rows, two input columns. Picking (2,3) is the classic (in,out) error (notation.md anti-pattern #2)."
+    },
+    {
+      q: "The maths $W\\mathbf x$ and the code $x W^\\top$ differ in:",
+      opts: [
+        "The weight matrix — they're two different W's",
+        "Only where the batch axis sits",
+        "The result values",
+        "The bias term"
+      ],
+      a: 1,
+      why: "Same W, same numbers, transposed multiply. The only thing that changes between the two conventions is whether a batch is stacked on the left (notation.md §1.2)."
+    },
+    {
+      q: "Your <code>nn.Linear</code> layer errors with a shape mismatch after you hand-loaded pretrained weights. You loaded them transposed — as (in, out) instead of (out, in). The fix:",
+      opts: [
+        "Retrain from scratch",
+        "Store weight as (out, in), not (in, out), and re-load",
+        "Lower the learning rate",
+        "Switch from column to row form"
+      ],
+      a: 1,
+      why: "The invariant is non-negotiable: W is always (out, in). A transposed load is a loading bug, not a convention choice — fix the load, not the maths."
+    },
+    {
+      q: "A paper writes \"sequence length $T$.\" In this course that quantity is written:",
+      opts: ["$t$ — diffusion timestep", "$S$", "$L$ — layer count", "$k$ — optimizer step"],
+      a: 1,
+      why: "We reserve t for diffusion timestep and k for optimizer step (notation.md §3), so sequence length is S — papers' worst-offending symbol, written as T/L/N/seq_len/max_length depending on the paper (notation.md §3.2)."
+    }
+  ], "Row-or-column self-check");
+
+});
+</script>
+</body>
+</html>

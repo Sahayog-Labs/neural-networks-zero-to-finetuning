@@ -1,0 +1,470 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>12. Loss from Maximum Likelihood — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+</head>
+<body data-page="12-loss-from-mle.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>What &ldquo;Learning&rdquo; Optimizes: Loss from Maximum Likelihood</h1>
+    <p class="subtitle">A loss is not a design choice pulled from a menu. It is the
+      negative log-likelihood of your data under the model &mdash; <em>one</em>
+      principle, and cross-entropy and mean-squared error are its two branches.
+      This is the page where &ldquo;the surface we descend&rdquo; gets its shape.</p>
+
+    <!-- ===================== PREDICT ===================== -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A freshly-initialised <b>Qwen3-8B</b> &mdash; every weight random, no training
+      yet &mdash; is asked to predict the next token from a vocabulary of
+      <b>151,936</b>. On the very first batch, what loss (in <b>nats</b>) do you
+      expect? Write a single number down before you scroll.
+      <span style="opacity:.8">(You are allowed to be wrong by a lot. The point is to
+      have a number to be wrong <em>against</em>.)</span>
+    </div>
+
+    <p>Hold that number. By the end of the first section you will be able to compute
+      the answer in one line, and it will turn out to be a quantity you can read off
+      the vocabulary size alone. <b>[THREAD:QWEN &mdash; the anchor model, beat&nbsp;1]</b></p>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>Learning means making the data probable</h2>
+
+    <p>Strip away the machinery and a trained model is a claim about probability: it
+      assigns a number $p_\theta(y\mid x)$ to every possible answer $y$ for an input
+      $x$. &ldquo;Learning&rdquo; is nudging the parameters $\theta$ until the answers
+      that <em>actually happened</em> in your data get high probability. That is the
+      whole game, and it hands us a loss for free.</p>
+
+    <p>A good loss is a scalar that is <b>small when the model is confident and
+      right</b>, and <b>large when it is confident and wrong</b>. Notice the asymmetry
+      already: being wrong is not what costs you &mdash; being wrong <em>while
+      certain</em> is. We will see that fall directly out of the logarithm.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      There is one derivation and two branches. Pick a probability model for your
+      output, write down the probability it assigns to the observed target, take the
+      negative logarithm, and average. Everything the course ever calls a
+      &ldquo;loss&rdquo; is this quantity with a different probability model plugged
+      in.
+    </div>
+
+    <!-- ===================== MLE ===================== -->
+    <h2>Maximum likelihood, in one line</h2>
+
+    <p>Assume the $N$ examples are independent. The probability the model assigns to
+      the entire dataset is the product of the per-example probabilities. We want the
+      parameters that make that product as large as possible:</p>
+
+    <p>$$\theta^\star=\arg\max_\theta\;\prod_{n=1}^{N} p_\theta(y_n\mid x_n)
+      \;\;\Longleftrightarrow\;\;
+      \theta^\star=\arg\min_\theta\;\underbrace{-\sum_{n=1}^{N}\ln p_\theta(y_n\mid x_n)}_{\text{the loss}}$$</p>
+
+    <p>Two moves turn the left side into the right. Taking a logarithm turns the
+      product into a sum (and does not move the location of the maximum, because $\ln$
+      is monotone). Negating turns &ldquo;maximise likelihood&rdquo; into
+      &ldquo;minimise a loss,&rdquo; because everyone&rsquo;s optimizer walks
+      <em>downhill</em>. <b>The negative log-likelihood <em>is</em> the loss.</b> We
+      did not invent it; we recognised it.</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$p_\theta(y\mid x)$</td><td>probability the model assigns to target $y$ given input $x$</td><td>scalar in $(0,1]$</td><td>the model&rsquo;s output layer</td></tr>
+        <tr><td>$\theta$</td><td>all learnable parameters, flattened</td><td>$(P,)$</td><td>what we optimise</td></tr>
+        <tr><td>$x_n,\ y_n$</td><td>the $n$-th input and its observed target</td><td>data</td><td>the dataset</td></tr>
+        <tr><td>$N$</td><td>number of examples</td><td>scalar</td><td>the dataset size</td></tr>
+        <tr><td>$\mathcal{L}$</td><td>per-example loss, $-\ln p_\theta(y_n\mid x_n)$</td><td>scalar, <b>nats</b></td><td>defined here</td></tr>
+      </tbody>
+    </table>
+
+    <p>Units matter and the course fixes them once: because we used the <em>natural</em>
+      logarithm, loss is measured in <b>nats</b>. Use $\log_2$ and you would get bits.
+      Same quantity, different ruler; this course always uses nats.</p>
+
+    <!-- ===================== BRANCH C ===================== -->
+    <h2>Branch C &mdash; a categorical output gives cross-entropy</h2>
+
+    <p>Suppose the model outputs a probability over $V$ discrete classes via a softmax
+      of its logits $z$ (this is exactly the softmax you built on
+      <a href="09-logs-softmax-cross-entropy.html">page&nbsp;9</a>). The probability of
+      the true class $c$ is $\hat y_c$, so the per-example loss is:</p>
+
+    <p>$$\mathcal{L}=-\ln \hat y_c=-\ln\frac{e^{z_c}}{\sum_{v=1}^{V} e^{z_v}}
+      = \Big(\ln\textstyle\sum_v e^{z_v}\Big) - z_c$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$z_v$</td><td>logit for class $v$ &mdash; the raw pre-softmax score</td><td>scalar</td><td>the model&rsquo;s final linear layer</td></tr>
+        <tr><td>$\hat y_v$</td><td>softmax probability of class $v$, $e^{z_v}/\sum_u e^{z_u}$</td><td>scalar in $(0,1)$</td><td>page&nbsp;9&rsquo;s softmax</td></tr>
+        <tr><td>$c$</td><td>index of the <em>true</em> class</td><td>integer in $[1,V]$</td><td>the label</td></tr>
+        <tr><td>$V$</td><td>number of classes (the vocabulary, for an LLM)</td><td>scalar</td><td>151,936 for Qwen3-8B</td></tr>
+        <tr><td>$\mathcal{L}$</td><td>cross-entropy loss for this example</td><td>scalar, nats</td><td>$-\ln\hat y_c$</td></tr>
+      </tbody>
+    </table>
+
+    <p>The rightmost form &mdash; $\big(\ln\sum_v e^{z_v}\big)-z_c$ &mdash; is worth a
+      second look. It never divides, never forms a probability. That is not an
+      accident; it is the shape the machine actually computes, and we come back to why
+      at the bottom of the page.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example &mdash; the course&rsquo;s canonical logits</span>
+      Take $z=[\,2.0,\ 1.0,\ 0.1\,]$ with true class $c=0$ (the first). Every number
+      below is frozen &mdash; you will meet this exact triple again on the temperature,
+      top-$k$, and $\sqrt{d_{\text{head}}}$ pages.
+      <div style="margin:.6em 0 .2em">Exponentiate: $e^{z}=[\,7.389056,\ 2.718282,\ 1.105171\,]$, whose sum is $\ \sum_v e^{z_v}=11.212509$.</div>
+      <div style="margin:.2em 0">Normalise: $\hat y=[\,\mathbf{0.659001},\ 0.242433,\ 0.098566\,]$ &mdash; these are probabilities, they sum to $1$.</div>
+      <div style="margin:.2em 0">The loss is the negative log of the <em>true</em> class&rsquo;s probability:
+        $$\mathcal{L}=-\ln(0.659001)=\mathbf{0.417030}\ \text{nats.}$$</div>
+      And the gradient the next chapter lives on:
+      $$\frac{\partial\mathcal{L}}{\partial z}=\hat y-y=[\,\mathbf{-0.340999},\ +0.242433,\ +0.098566\,].$$
+      Look at those three numbers: they <b>sum to exactly zero</b>. They always will &mdash;
+      softmax outputs sum to $1$, the one-hot target sums to $1$, so their difference
+      sums to $0$. Probability that leaves the true class is exactly the probability
+      that arrives at the others.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ &ldquo;The softmax gradient must be complicated&rdquo;</span>
+      It looks like it should be &mdash; a softmax couples every logit to every other
+      through the shared denominator. But the whole Jacobian collapses: for softmax
+      followed by cross-entropy, $\partial\mathcal{L}/\partial z=\hat y-y$, full stop.
+      It is arguably the cleanest gradient in all of deep learning, and it is why the
+      output layer is never the hard part of backprop
+      (<a href="14-backprop-by-pencil.html">page&nbsp;14</a>).
+    </div>
+
+    <!-- ===================== BRANCH A ===================== -->
+    <h2>Branch A &mdash; a Gaussian output gives mean-squared error</h2>
+
+    <p>Now change only the probability model. Suppose the target is a real number and
+      the model predicts it with Gaussian noise around its guess:
+      $y\sim\mathcal{N}(\hat y,\sigma^2)$ &mdash; <b>this is the exact bell curve you met
+      on <a href="08-probability-and-the-gaussian.html">page&nbsp;8</a></b>, now with the
+      model&rsquo;s prediction $\hat y$ sitting in the mean slot. Write its negative log:</p>
+
+    <p>$$-\ln p(y\mid\hat y)=-\ln\!\left[\frac{1}{\sqrt{2\pi}\,\sigma}
+      \exp\!\Big(-\frac{(y-\hat y)^2}{2\sigma^2}\Big)\right]
+      =\frac{1}{2\sigma^2}(y-\hat y)^2+\underbrace{\ln\big(\sqrt{2\pi}\,\sigma\big)}_{\text{constant in }\hat y}$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$y$</td><td>the observed real-valued target</td><td>scalar</td><td>the dataset</td></tr>
+        <tr><td>$\hat y$</td><td>the model&rsquo;s prediction &mdash; the Gaussian&rsquo;s mean</td><td>scalar</td><td>the model output</td></tr>
+        <tr><td>$\sigma$</td><td>noise standard deviation &mdash; a fixed scale, not a sigmoid</td><td>scalar &gt; 0</td><td>page&nbsp;8&rsquo;s Gaussian</td></tr>
+        <tr><td>$-\ln p$</td><td>the per-example loss for this model</td><td>scalar, nats</td><td>defined here</td></tr>
+      </tbody>
+    </table>
+
+    <p>The term with $\hat y$ in it is $\tfrac{1}{2\sigma^2}(y-\hat y)^2$; the rest is a
+      constant that the gradient never sees. So minimising the negative log-likelihood
+      of a Gaussian output <em>is</em> minimising $\tfrac12(y-\hat y)^2$ &mdash;
+      squared error, up to the fixed scale $1/\sigma^2$.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea &mdash; MSE is not a separate fact</span>
+      Mean-squared error is <b>Branch A of the same derivation</b>: it is literally the
+      negative log of the page-8 Gaussian. Cross-entropy is Branch C, for a categorical
+      output. They differ in <em>one</em> place only &mdash; the assumed noise
+      distribution &mdash; and in nothing else. The bell curve you met on page&nbsp;8 is
+      where squared error comes from. (When the diffusion track arrives, its training
+      loss will be a third corollary of this same Gaussian &mdash; noise prediction is
+      Branch A wearing a different hat.)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ &ldquo;Cross-entropy and MSE are unrelated losses&rdquo;</span>
+      They feel unrelated because they are taught in different weeks and look nothing
+      alike. But both are negative log-likelihoods; they differ <em>only</em> in the
+      assumed output distribution &mdash; categorical (softmax) for cross-entropy,
+      Gaussian for MSE. Choose the distribution, and the loss is no longer yours to
+      pick.
+    </div>
+
+    <!-- ===================== LOSS ANCHORS ===================== -->
+    <h2>The anchors: numbers a loss curve is measured against</h2>
+
+    <p>A loss value in isolation means nothing. To read a training curve you need
+      reference lines &mdash; the loss of a model that has learned <em>nothing</em>. For
+      a $V$-way softmax that has not been trained, every class is equally likely, so
+      $\hat y_c=1/V$ and the loss is $-\ln(1/V)=\ln V$.</p>
+
+    <div class="box rule"><span class="box-title">📐 Loss anchors (memorise these three)</span>
+      <ul style="margin:.3em 0 .2em 1.1em;padding:0">
+        <li><b>Random-init loss, Qwen3-8B:</b> $\ln V=\ln(151{,}936)=\mathbf{11.93}$ nats.
+          This is the number your PREDICT was chasing. <b>[THREAD:QWEN &mdash; beat&nbsp;2]</b></li>
+        <li><b>Perplexity at init:</b> $\mathrm{PPL}=e^{\mathcal{L}}=e^{\ln V}=V=\mathbf{151{,}936}$ &mdash; exactly the vocabulary size, by construction.</li>
+        <li><b>Coin flip ($V=2$):</b> $\ln 2=\mathbf{0.6931}$ nats.</li>
+      </ul>
+      <b>Always plot $\ln V$ as a horizontal line on every loss curve.</b> A curve
+      sitting on that line has learned nothing; a curve that never leaves it means the
+      run is broken. It is the single cheapest sanity check in the course.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Not 11.76</span>
+      You will see $\ln V=11.76$ quoted in blog posts and even some course notes. That is
+      $\ln(128{,}256)$ &mdash; Llama-3&rsquo;s vocabulary, not Qwen3&rsquo;s. This course&rsquo;s
+      anchor model is Qwen3-8B with $V=151{,}936$, so the number is <b>11.93</b>. If your
+      untrained run starts near 11.76 you are looking at the wrong tokenizer.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ &ldquo;Higher accuracy always means lower loss&rdquo;</span>
+      Loss is calibrated confidence, not correctness. A model that predicts the right
+      class but only at $\hat y_c=0.34$ still carries loss $-\ln 0.34=1.08$ nats even
+      though it is &ldquo;right.&rdquo; You can nudge accuracy up while loss goes up, and
+      vice versa. Track the loss; it is what the gradient actually sees.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>Demo &mdash; the cross-entropy explorer</h2>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the three logits. The bars are the live softmax $\hat y=\mathrm{softmax}(z)$;
+      the readout is the live cross-entropy $\mathcal{L}=-\ln\hat y_0$ and its gradient
+      $\hat y-y$, both computed by <code>nn.js</code> every frame. Start from the frozen
+      triple $[2.0,1.0,0.1]$ and watch the readout land on <b>0.4170</b>. Then push
+      $z_0$ up and down, and hit <b>&ldquo;flatten&rdquo;</b> to make all three equal.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Cross-entropy over 3 classes, true class = 0 <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="ce-bars" height="300"></canvas>
+        <div class="controls" id="ce-ctrls"></div>
+        <p style="margin:10px 0 0">
+          <button class="btn secondary" id="ce-flat">Flatten all logits equal</button>
+          <button class="btn secondary" id="ce-reset">Reset to [2.0, 1.0, 0.1]</button>
+        </p>
+        <div class="readout" id="ce-out"></div>
+      </div>
+    </div>
+
+    <p>Two things to feel in your hands. <b>Drag $z_0$ down</b> and the loss climbs
+      without bound &mdash; being confidently wrong is unboundedly expensive &mdash; yet
+      the gradient $\partial\mathcal{L}/\partial z$ never leaves $[-1,1]$, because it is
+      just $\hat y - y$ and probabilities live in $[0,1]$. Unbounded loss, bounded
+      gradient: that is what makes softmax+cross-entropy safe to train.
+      <b>Hit &ldquo;flatten,&rdquo;</b> and the loss lands on $\ln 3=1.0986$ &mdash; the
+      random-guess value for three classes, the small-vocabulary cousin of your
+      $\ln V=11.93$.</p>
+
+    <!-- ===================== LOGSUMEXP ===================== -->
+    <h2>Why the LogSumExp trick exists</h2>
+
+    <p>On paper, cross-entropy forms $\hat y_c=e^{z_c}/\sum_v e^{z_v}$ and takes a log.
+      In the machine, $e^{z}$ overflows: a logit of $1000$ &mdash; ordinary during
+      training &mdash; makes $e^{1000}=\infty$ in float, and the loss becomes
+      <code>nan</code> before it becomes a number. The fix is an identity, not an
+      approximation:</p>
+
+    <p>$$\ln\sum_{v} e^{z_v}=m+\ln\sum_{v} e^{z_v-m},\qquad m=\max_v z_v.$$</p>
+
+    <p>Subtracting the max makes the largest exponent exactly $e^0=1$, so nothing
+      overflows, and because we add $m$ back the value is <em>identical</em> &mdash; the
+      constant carries no error and no gradient. That is why the fused form
+      $\mathcal{L}=\big(\ln\sum_v e^{z_v}\big)-z_c$ from the Branch-C box never divides:
+      this course&rsquo;s <code>crossEntropyLoss</code> (and PyTorch&rsquo;s) computes the
+      log-sum-exp directly and never forms the probability at full scale.</p>
+
+    <div class="box key"><span class="box-title">🔑 The same lesson, arriving early</span>
+      LogSumExp is the first appearance of a theme this course returns to made-literal
+      on <a href="15-autograd-float-reality.html">page&nbsp;15</a>: <b>the math on paper and
+      the math in the machine are not the same math.</b> On paper, $e^{1000}$ is a large
+      finite number; in float it is $\infty$. The stable algorithm is the one that
+      respects the difference. (Page&nbsp;15 shows the flip side &mdash; a gradient that is
+      exactly $0$ on paper prints as <code>1.4e-08</code> &mdash; and it is the same
+      lesson.)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ &ldquo;LogSumExp makes cross-entropy differentiable&rdquo;</span>
+      No &mdash; cross-entropy was already differentiable; its gradient is the tidy
+      $\hat y-y$ we derived above. LogSumExp changes <em>nothing</em> about the value or
+      the derivative. It only changes whether the computation <em>overflows</em>. It is
+      a numerical-stability trick, not a mathematical one.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why $\ln\sum_v e^{z_v}$ is called a &ldquo;soft&rdquo; maximum</summary><div>
+      <p>As one logit $z_c$ pulls far above the rest, $\ln\sum_v e^{z_v}\to z_c=\max_v z_v$:
+        the sum is dominated by its largest term. So $\ln\sum_v e^{z_v}$ is a smooth,
+        differentiable stand-in for $\max_v z_v$ &mdash; hence &ldquo;LogSumExp is a soft
+        max,&rdquo; and the reason the function that normalises it is called
+        <em>soft</em>max. The $m=\max_v z_v$ we subtract for stability is the very
+        quantity the whole expression approximates &mdash; a pleasing symmetry, and a
+        reason the subtraction is exact rather than a hack.</p>
+    </div></details>
+
+    <!-- ===================== CODE ===================== -->
+    <h2>Run it yourself</h2>
+
+    <div class="box try"><span class="box-title">Try it &mdash; <code>code/12_cross_entropy.py</code></span>
+      Reproduce the frozen triple in PyTorch. The one rule that matters:
+      <code>cross_entropy</code> takes <b>logits</b>, never probabilities &mdash; feed it
+      <code>log(softmax(...))</code> and you double-count the log. The assertion nails
+      the value to the sixth decimal.
+    </div>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">import</span> torch.nn.functional <span class="tok-kw">as</span> F</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># The course's canonical logits (constants.md 9.2), true class 0.</span></span>
+<span class="line">z = torch.tensor([[<span class="tok-num">2.0</span>, <span class="tok-num">1.0</span>, <span class="tok-num">0.1</span>]])   <span class="tok-com"># shape (1, 3) = (batch, classes)</span></span>
+<span class="line">c = torch.tensor([<span class="tok-num">0</span>])                <span class="tok-com"># the TRUE class index</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># F.cross_entropy expects LOGITS, not probabilities. It fuses</span></span>
+<span class="line"><span class="tok-com"># log_softmax + nll_loss with the LogSumExp trick inside.</span></span>
+<span class="line">loss = F.<span class="tok-fn">cross_entropy</span>(z, c)</span>
+<span class="line"><span class="tok-kw">print</span>(loss.<span class="tok-fn">item</span>())            <span class="tok-com"># 0.41703... nats</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(loss.<span class="tok-fn">item</span>() - <span class="tok-num">0.417030</span>) &lt; <span class="tok-num">1e-5</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># The gradient is exactly softmax(z) - onehot(c), and sums to 0.</span></span>
+<span class="line">z.<span class="tok-fn">requires_grad_</span>(<span class="tok-kw">True</span>)</span>
+<span class="line">F.<span class="tok-fn">cross_entropy</span>(z, c).<span class="tok-fn">backward</span>()</span>
+<span class="line"><span class="tok-kw">print</span>(z.grad)              <span class="tok-com"># [[-0.340999, 0.242433, 0.098566]]</span></span>
+<span class="line"><span class="tok-kw">assert</span> <span class="tok-fn">abs</span>(z.grad.<span class="tok-fn">sum</span>().<span class="tok-fn">item</span>()) &lt; <span class="tok-num">1e-6</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># The random-init anchor: an untrained V-way softmax scores ln(V).</span></span>
+<span class="line"><span class="tok-kw">import</span> math</span>
+<span class="line"><span class="tok-kw">print</span>(math.<span class="tok-fn">log</span>(<span class="tok-num">151936</span>))     <span class="tok-com"># 11.93  <- Qwen3-8B, NOT 11.76 (that's Llama-3)</span></span></code></pre>
+    </div>
+
+    <!-- ===================== FORESHADOW ===================== -->
+    <div class="box key"><span class="box-title">🔑 Hold onto this</span>
+      Every model in this course &mdash; the MLP three pages ago, the 8-billion-parameter
+      transformer in Part III, the diffusion U-Net in Part VI &mdash; is this same
+      machine minimising a negative log-likelihood. <b>The only thing that ever changes
+      is what we ask it to predict.</b> Cross-entropy over a vocabulary is an LLM&rsquo;s
+      loss; squared error on injected noise is a diffusion model&rsquo;s. One principle,
+      two branches, the whole course.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-12"></div>
+
+    <p style="margin-top:2em"><b>Where this connects.</b> Backward:
+      <a href="08-probability-and-the-gaussian.html">page&nbsp;8</a> planted the Gaussian and
+      the $\mu+\sigma\varepsilon$ trick that Branch&nbsp;A just cashed;
+      <a href="09-logs-softmax-cross-entropy.html">page&nbsp;9</a> built the softmax and
+      LogSumExp primitives. Forward:
+      <a href="13-gradient-descent-landscape.html">page&nbsp;13</a> makes this loss a
+      <em>surface</em> and rolls downhill;
+      <a href="15-autograd-float-reality.html">page&nbsp;15</a> takes the paper-vs-machine
+      lesson to its sharpest edge. The LLM track (Part&nbsp;V) meets this loss again as
+      &ldquo;cross-entropy, per position&rdquo; &mdash; you will already know it.</p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: cross-entropy explorer — real softmax + CE from nn.js ---- */
+  (function () {
+    const { softmaxValues, crossEntropyLoss } = NN;
+    const canvas = document.getElementById("ce-bars");
+    const out = document.getElementById("ce-out");
+    const DEFAULTS = [2.0, 1.0, 0.1];
+
+    const ctrls = document.getElementById("ce-ctrls");
+    const sliders = [0, 1, 2].map(i => makeCtrl(ctrls, {
+      label: `logit z${["₀", "₁", "₂"][i]}`, min: -4, max: 4, step: 0.1,
+      value: DEFAULTS[i], fmt: v => v.toFixed(1)
+    }));
+
+    const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+    const trueC = () => vizUtils.cssVar("--good", "#5ce6a0");
+    const barBg = () => vizUtils.cssVar("--plot-grid", "#243049");
+    const txtC = () => vizUtils.cssVar("--plot-label", "#a8b4cc");
+
+    function draw() {
+      const z = sliders.map(s => s.get());
+      // REAL math, live: stable softmax and fused cross-entropy from nn.js.
+      const probs = softmaxValues(z).map(v => v.data);     // ŷ = softmax(z)
+      const L = crossEntropyLoss(z, 0).data;               // ℒ = -ln ŷ₀ (LogSumExp inside)
+      const grad = probs.map((p, i) => p - (i === 0 ? 1 : 0));  // ∂ℒ/∂z = ŷ - y
+
+      // Draw the softmax bars on a Plot canvas (bars are ŷ ∈ [0,1]).
+      const p = new Plot(canvas, { xmin: -0.5, xmax: 2.5, ymin: 0, ymax: 1, xlabel: "class v", ylabel: "ŷ = softmax(z)" });
+      p.clear(); p.grid([{ v: 0, s: "0" }, { v: 1, s: "1" }, { v: 2, s: "2" }]);
+      const g = p.g, y0 = p._ty(0);
+      const halfW = (p._tx(1) - p._tx(0)) * 0.32;
+      for (let i = 0; i < 3; i++) {
+        const cx = p._tx(i), yTop = p._ty(probs[i]);
+        g.fillStyle = barBg(); g.fillRect(cx - halfW, p._ty(1), 2 * halfW, y0 - p._ty(1));
+        g.fillStyle = (i === 0) ? trueC() : accent();
+        g.fillRect(cx - halfW, yTop, 2 * halfW, y0 - yTop);
+        g.fillStyle = txtC(); g.font = "12px Consolas, monospace"; g.textAlign = "center";
+        g.fillText(probs[i].toFixed(4), cx, yTop - 6);
+      }
+      // The equation, shown with the live values substituted in.
+      out.innerHTML =
+        `<div>ŷ = softmax(z) = [<b>${probs.map(v => v.toFixed(4)).join(", ")}</b>] &nbsp;(sum ${probs.reduce((a, b) => a + b, 0).toFixed(4)})</div>` +
+        `<div>ℒ = &minus;ln&nbsp;ŷ₀ = &minus;ln(${probs[0].toFixed(4)}) = <b>${L.toFixed(4)}</b> nats</div>` +
+        `<div>∂ℒ/∂z = ŷ &minus; y = [<b>${grad.map(v => (v >= 0 ? "+" : "") + v.toFixed(4)).join(", ")}</b>] &nbsp;(sum ${grad.reduce((a, b) => a + b, 0).toFixed(4)})</div>`;
+    }
+
+    sliders.forEach(s => s.onInput(draw));
+
+    function setAll(vals) {
+      sliders.forEach((s, i) => { s.input.value = vals[i]; s.input.dispatchEvent(new Event("input")); });
+      draw();
+    }
+    document.getElementById("ce-flat").addEventListener("click", () => setAll([0, 0, 0]));
+    document.getElementById("ce-reset").addEventListener("click", () => setAll(DEFAULTS));
+
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-12", [
+    {
+      q: "For logits $z=[2.0,\\,1.0,\\,0.1]$ with true class $c=0$, the cross-entropy loss (in nats) is:",
+      num: 0.4170, tol: 0.005, unit: "nats",
+      why: "$\\mathcal{L}=-\\ln\\hat y_0=-\\ln(0.659001)=0.417030$. If you got 0.242, you read off $\\hat y_1$ &mdash; a probability, not a loss."
+    },
+    {
+      q: "This course measures loss in which unit?",
+      opts: ["bits", "nats", "joules", "percent"],
+      a: 1,
+      why: "We use the natural logarithm, so loss is in nats. Bits would come from $\\log_2$ &mdash; the same quantity on a different ruler."
+    },
+    {
+      q: "An untrained Qwen3-8B (vocabulary $V=151{,}936$) scores what loss on its first batch?",
+      num: 11.93, tol: 0.05, unit: "nats",
+      why: "$\\ln V=\\ln(151{,}936)=11.93$ nats. The trap answer 11.76 is $\\ln(128{,}256)$ &mdash; Llama-3's vocabulary, not Qwen3's."
+    },
+    {
+      q: "For softmax followed by cross-entropy, $\\partial\\mathcal{L}/\\partial z$ equals:",
+      opts: ["$-1/\\hat y_c$", "$\\hat y - y$, which sums to zero", "$\\hat y \\cdot (1-\\hat y)$", "$z - \\bar z$"],
+      a: 1,
+      why: "The full softmax Jacobian collapses to $\\hat y - y$. The distractor $-1/\\hat y_c$ is only the $-\\ln$ term, missing the softmax derivative that multiplies it."
+    },
+    {
+      q: "Why does the course compute cross-entropy with the LogSumExp identity?",
+      opts: ["It makes the loss differentiable", "It prevents $e^z$ from overflowing, at an identical value", "It lowers the loss", "It removes the need for a true label"],
+      a: 1,
+      why: "LogSumExp is a numerical-stability trick: $\\ln\\sum_v e^{z_v}=m+\\ln\\sum_v e^{z_v-m}$ is exact. Cross-entropy was already differentiable; the value is unchanged."
+    },
+    {
+      q: "How is mean-squared error related to maximum likelihood?",
+      opts: ["Unrelated; MSE is chosen for smoothness", "MSE is the negative log-likelihood of a Gaussian output", "MSE is cross-entropy for two classes", "MSE only applies to classification"],
+      a: 1,
+      why: "MSE is Branch A: put the prediction in a Gaussian's mean, $y\\sim\\mathcal{N}(\\hat y,\\sigma^2)$, and its NLL is $\\tfrac{1}{2\\sigma^2}(y-\\hat y)^2+\\text{const}$. It is the log of the page-8 bell curve."
+    }
+  ], "Loss from maximum likelihood — self-check");
+
+});
+</script>
+</body>
+</html>

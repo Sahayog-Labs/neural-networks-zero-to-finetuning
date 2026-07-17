@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>1. What a Neural Network Actually Is — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+</head>
+<body data-page="01-what-is-a-network.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine</span>
+    <h1>What a Neural Network Actually Is</h1>
+    <p class="subtitle">No symbols yet — just a machine, a knob, and the one question every later page in this
+      course spends its time answering: which knobs, and how do you turn them fast enough to matter?</p>
+
+    <!-- ===================== PREDICT (opens the page) ===================== -->
+    <!-- on-page-resolution rule: answered in the paragraph right after Demo A. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Below is one artificial neuron separating blue points from red. If you increase <em>both</em> its weights
+      by the same large factor — steepening it — does the dividing line (a) move to a new place, (b) stay put but
+      get sharper, or (c) rotate? Commit to an answer. Then drag.
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the two weight sliders until the line separates the blue cluster from the red one, then press the
+      ×10 button and watch what changes — and, just as tellingly, what doesn't.
+    </div>
+
+    <h2>Demo — the neuron is a ruler and a bend</h2>
+    <div class="demo">
+      <div class="demo-head">One neuron, 40 points <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-neuron" height="380"></canvas>
+        <div class="controls" id="d-neuron-ctrls"></div>
+        <p style="margin:12px 0 0">
+          <button class="btn secondary" id="d-neuron-boost">×10 (sharpen)</button>
+          <button class="btn secondary" id="d-neuron-reset">Reset</button>
+        </p>
+        <div class="readout" id="d-neuron-out">Ready.</div>
+      </div>
+    </div>
+
+    <p><strong>Resolving the predict:</strong> the answer is (b). Multiplying every weight by the same factor
+      doesn't change <em>where</em> the neuron's raw score crosses zero, so the dividing line doesn't move at all.
+      What it does change is how large that score gets away from the line — which snaps the soft color gradient
+      into a hard edge. Only the offset slides the line; only the balance between the two weights turns it. Watch
+      it happen above: click ×10 and the line holds perfectly still while the transition band collapses into a
+      wall. <em>Two facts, one drag</em> — and the second one (magnitude buys confidence, not position) is a fact
+      you'll meet again as temperature (page 9) and as classifier-free guidance strength (page 60), both places you
+      already turn a dial in ComfyUI without necessarily knowing this is what it's doing underneath.</p>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>One machine, many knobs</h2>
+    <p>A neural network — however many billions of parameters it has — is <em>one function</em>. Numbers go in,
+      numbers come out, and in between there are a great many small numbers you can turn: the knobs. When the
+      network is <em>running</em> (inference), the knobs are frozen and only the input changes from call to call.
+      When the network is <em>learning</em> (training), something flips: the input is fixed — it's your data, you
+      don't get to change it — and the knobs are what moves. You turn them, a little at a time, to make one
+      particular output number smaller: how wrong the machine currently is.</p>
+    <p>Say that flip out loud, because it is the single conceptual pivot the rest of this course hangs off of:
+      <strong>training changes the knobs, not the input.</strong> Page 4 will give that sentence its symbols —
+      what you differentiate <em>with respect to</em> is the knobs, with the input held fixed. For now just feel
+      the shape of it: inference asks "what does this input produce?"; training asks "which nudge to the knobs
+      makes the machine less wrong?" — a completely different question, aimed at a completely different set of
+      things.</p>
+
+    <h2>A neuron is a ruler and a bend</h2>
+    <p>Zoom into the smallest piece. A single artificial neuron does two things, in order. First it acts like a
+      <strong>ruler</strong>: it measures how much of the input points along a direction it has learned to care
+      about. Second it <strong>bends</strong> that reading — squashes it through a soft S-shaped curve so the
+      output always lands between "definitely no" and "definitely yes," with a smooth ramp in between rather than
+      a hard jump.</p>
+    <p>Two separate facts about the ruler are worth pulling apart, because the demo above just showed you both.
+      Its <strong>direction</strong> decides which way the dividing line faces — which side of the input space
+      counts as "yes." Its <strong>length</strong> (how emphatically it measures) decides how abruptly the output
+      snaps from "no" to "yes" as you cross the line — a short ruler gives a lazy, uncertain ramp; a long one gives
+      a cliff. A third, separate knob — the offset — slides the whole line around without turning it at all. Three
+      knobs, three distinct jobs; the demo let you feel the difference between all three.</p>
+
+    <h2>A network is neurons feeding neurons</h2>
+    <p>Layers are not different kinds of machine. Every layer performs the identical move — measure, then bend —
+      and the output of one layer is simply the input to the next. "Deep" doesn't mean each layer learns a
+      different job; it means the same simple move is repeated, stacked, many times over, so later layers can
+      measure combinations of what earlier ones already noticed.</p>
+    <p><code>[THREAD:dot-product beat 0/…]</code> — the "ruler" you just met has a name. It's called the dot
+      product, and it is the single operation this entire course keeps coming back to: as a neuron's score, as an
+      attention score, as an embedding similarity search, as the direction ComfyUI's CFG pushes an image toward.
+      Page 3 gives it its name and its trigonometry — hang on to the word "ruler" until then.</p>
+    <p>Hold on to one more thing before you move on: later in this course, the machine itself never changes — only
+      the question you ask it does. Predicting the next word and denoising an image both come out of the same
+      measure-and-bend machine; the only thing that differs is the target it's trained toward. That's the fork
+      this whole course eventually takes, and everything between here and there is building the one machine both
+      sides need.</p>
+    <p><code>[THREAD:memory beat 0]</code> — one more thing to file away and forget for now: those knobs also have
+      to live somewhere, in your GPU's memory, every one of them. No numbers yet — page 18 is where you count them
+      against your own box.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      A neural network is one function with millions of knobs. Training is turning the knobs so the machine is
+      less wrong. Everything else in this course is <em>how you turn them fast enough to matter.</em>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "the network looks up or stores the answer"</span>
+      It doesn't. A trained network is a deterministic function evaluation — the same weights, fed the same input,
+      produce the same output, every single time. Any randomness you see in an LLM's replies or a diffusion
+      model's images is added <em>afterward</em>, at sampling — it isn't the network changing its mind. Run the
+      same prompt at temperature 0 twice and you get identical text; run it at temperature 0.8 and you get
+      different text — but the weights never moved between those two runs. (The mechanism behind "temperature"
+      gets its own page — 9.)
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Misconception: "layers are separate programs"</span>
+      They aren't. There is no internal boundary where one "program" hands off to the next — a network is one
+      function, and a layer is just where we've drawn a bookkeeping line inside it. One layer's output feeding
+      straight into the next <em>is</em> the entire mechanism; nothing is dispatched, looked up, or routed between
+      them.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why one output and billions of inputs forces everything later
+      to run backward</summary><div>
+      <p>The loss is a funnel: it takes every one of a network's billions of knobs and collapses them down to a
+        single number — how wrong the machine is right now. Asking "which direction, for each of billions of
+        knobs, makes that one number smaller?" is a fundamentally different shape of question than "what does this
+        input produce?" — and it is exactly that asymmetry, one output built from many inputs, that forces the
+        gradient computation to run from the loss backward toward the knobs rather than forward alongside them.
+        This is only a seed here; page 5 (the chain rule) picks it up properly, and Part II turns it into an
+        algorithm you execute by hand.</p>
+    </div></details>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-01"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- Demo A: "the neuron is a ruler and a bend" ----
+     Raw canvas (no Plot — this is a shaded 2-D field, not a line chart). The
+     background at every cell is a REAL live sigmoid(w1*x1 + w2*x2 + b); the
+     40 points are a fixed, seeded two-class cloud; the readout accuracy is
+     computed fresh every frame from the actual current weights. Nothing here
+     is precomputed or faked (course contract rule 2). This page carries no
+     notation, so labels stay in plain words throughout. */
+  (function () {
+    const { RNG, makeDataset } = NN;
+    const canvas = document.getElementById("d-neuron");
+    const ctrlsEl = document.getElementById("d-neuron-ctrls");
+    const out = document.getElementById("d-neuron-out");
+    const boostBtn = document.getElementById("d-neuron-boost");
+    const resetBtn = document.getElementById("d-neuron-reset");
+
+    // Fixed, reproducible cloud: 40 points, two classes, seeded so the
+    // picture is identical on every reload (brief-pedagogy §7.1 Demo A).
+    const rng = new RNG(7);
+    const ds = makeDataset("blobs", 40, { rng, noise: 0.3 });
+
+    const DOM = 2.4; // both axes span [-DOM, DOM] in data units
+
+    let boost = 1; // a confidence multiplier driven ONLY by the ×10 button —
+                    // deliberately decoupled from the weight sliders so the
+                    // demo can show "boundary unchanged, confidence changed"
+                    // without fighting the sliders' own [-3,3] range.
+
+    const w1c = makeCtrl(ctrlsEl, { label: "horizontal weight", min: -3, max: 3, step: 0.1, value: 1, fmt: v => v.toFixed(1) });
+    const w2c = makeCtrl(ctrlsEl, { label: "vertical weight", min: -3, max: 3, step: 0.1, value: 0, fmt: v => v.toFixed(1) });
+    const bc = makeCtrl(ctrlsEl, { label: "offset", min: -3, max: 3, step: 0.1, value: 0, fmt: v => v.toFixed(1) });
+
+    function sigmoid(z) { return 1 / (1 + Math.exp(-z)); }
+
+    function draw() {
+      const w1 = w1c.get(), w2 = w2c.get(), b = bc.get();
+      const { g, W, H } = vizUtils.fitCanvas(canvas, 380);
+      g.clearRect(0, 0, W, H);
+
+      const cmap = vizUtils.sequentialCmap(cssVar("--track-llm", "#62c3ff"), cssVar("--bad", "#ff6b6b"));
+      const toPx = x1 => (x1 + DOM) / (2 * DOM) * W;
+      const toPy = x2 => H - (x2 + DOM) / (2 * DOM) * H;
+
+      // ---- shaded field: real sigmoid(w1 x1 + w2 x2 + b) at every cell ----
+      const cell = 5;
+      for (let px = 0; px < W; px += cell) {
+        const x1 = (px / W) * 2 * DOM - DOM;
+        for (let py = 0; py < H; py += cell) {
+          const x2 = DOM - (py / H) * 2 * DOM;
+          const a = sigmoid(boost * (w1 * x1 + w2 * x2 + b));
+          g.fillStyle = cmap(a);
+          g.fillRect(px, py, cell, cell);
+        }
+      }
+
+      // ---- the dividing line: w1 x1 + w2 x2 + b = 0 (boost never moves it) ----
+      g.save();
+      g.strokeStyle = cssVar("--text", "#e4e0f2");
+      g.lineWidth = 2.5;
+      g.beginPath();
+      if (Math.abs(w2) > 1e-6) {
+        const y1 = -(w1 * (-DOM) + b) / w2, y2 = -(w1 * DOM + b) / w2;
+        g.moveTo(toPx(-DOM), toPy(y1)); g.lineTo(toPx(DOM), toPy(y2));
+      } else if (Math.abs(w1) > 1e-6) {
+        const x0 = -b / w1;
+        g.moveTo(toPx(x0), toPy(-DOM)); g.lineTo(toPx(x0), toPy(DOM));
+      }
+      g.stroke();
+      g.restore();
+
+      // ---- the 40-point cloud, and the real live accuracy ----
+      let correctCount = 0;
+      const blue = cssVar("--track-llm", "#62c3ff"), red = cssVar("--bad", "#ff6b6b"), ring = cssVar("--bg-canvas", "#0a0810");
+      ds.X.forEach((pt, i) => {
+        const [x1, x2] = pt;
+        const a = sigmoid(boost * (w1 * x1 + w2 * x2 + b));
+        const pred = a > 0.5 ? 1 : 0;
+        if (pred === ds.y[i]) correctCount++;
+        g.beginPath();
+        g.fillStyle = ds.y[i] === 1 ? red : blue;
+        g.strokeStyle = ring; g.lineWidth = 1.5;
+        g.arc(toPx(x1), toPy(x2), 6, 0, 2 * Math.PI);
+        g.fill(); g.stroke();
+      });
+
+      const acc = Math.round(100 * correctCount / ds.X.length);
+      let msg = `accuracy on the 40 points: <b>${acc}%</b> (${correctCount}/${ds.X.length})`;
+      if (boost > 1) msg += ` · confidence boost ×<b>${boost}</b> — the line hasn't moved, only how hard it commits has`;
+      out.innerHTML = msg;
+    }
+
+    w1c.onInput(() => { boost = 1; draw(); });
+    w2c.onInput(() => { boost = 1; draw(); });
+    bc.onInput(() => { boost = 1; draw(); });
+    boostBtn.addEventListener("click", () => { boost *= 10; draw(); });
+    resetBtn.addEventListener("click", () => {
+      w1c.input.value = 1; w1c.input.dispatchEvent(new Event("input"));
+      w2c.input.value = 0; w2c.input.dispatchEvent(new Event("input"));
+      bc.input.value = 0; bc.input.dispatchEvent(new Event("input"));
+      boost = 1;
+      draw();
+    });
+
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- Quiz: 5 spec-mandated prediction/diagnosis items (zero vocabulary,
+     zero numbers — this page teaches no notation) plus one numeric item read
+     straight off the live demo above, so the quiz still carries the ≥1
+     numeric-with-tolerance question the course-wide QA checklist requires
+     without breaking the page's own no-notation constraint. */
+  renderQuiz("quiz-01", [
+    {
+      q: "You scale a neuron's two weights up by 5×, leaving the offset ratio fixed. The dividing line:",
+      opts: ["Stays put, but the transition sharpens", "Moves toward the origin", "Rotates 45°"],
+      a: 0,
+      why: "Scaling both weights by the same factor doesn't change where the neuron's raw score crosses zero — only how fast it grows away from that line. “Moves” is the misconception that weights set position (that's the offset's job); “rotates” confuses magnitude with direction."
+    },
+    {
+      q: "Same LLM prompt, temperature 0, run twice, different answers. Most likely cause:",
+      opts: ["The network is nondeterministic internally", "You didn't actually set temperature 0 (or the seed) the way you think you did", "The weights drifted between runs"],
+      a: 1,
+      why: "The network itself is a deterministic function of its weights. Any randomness in generation is injected afterward, at sampling — identical seed and temperature 0 mean identical output, every time. “Nondeterministic internally” is the “network stores/rolls the answer” misconception from this page."
+    },
+    {
+      q: "Increasing only the offset (the third knob, alongside the two weights):",
+      opts: ["Rotates the boundary", "Translates the boundary", "Sharpens the boundary"],
+      a: 1,
+      why: "Only the offset slides the line without turning it. The two weights set direction (rotation, via their ratio) and, together, magnitude (sharpness)."
+    },
+    {
+      q: "“Deep” most nearly means:",
+      opts: ["Each layer solves a different task", "The same measure-and-bend move, repeated many times, each layer feeding the next", "More knobs packed into a single neuron"],
+      a: 1,
+      why: "Every layer performs the identical operation — measure, then bend. Depth means stacking that one move, not specializing each layer into a different program."
+    },
+    {
+      q: "In ComfyUI, changing the seed changes the image but not the model file. The idea on this page closest to why:",
+      opts: ["Training changed the weights", "Randomness is added at sampling, outside the deterministic function the weights define", "The boundary moved"],
+      a: 1,
+      why: "ComfyUI's seed drives the sampling randomness, not the model's weights — exactly the split this page draws: the function (the weights) stays fixed; the randomness lives outside it, at generation time."
+    },
+    {
+      q: "Set the sliders back to their defaults (horizontal weight 1.0, vertical weight 0.0, offset 0.0) with the Reset button. Read the live accuracy percentage the demo reports on the 40-point cloud.",
+      num: 93, tol: 5, unit: "%",
+      why: "The default vertical boundary (horizontal weight only) already separates most of the seeded cloud, because the two blobs are offset mainly along the horizontal axis — but a few noisy points cross it, which is exactly the invitation to drag and do better."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>

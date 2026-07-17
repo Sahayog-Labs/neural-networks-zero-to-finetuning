@@ -1,0 +1,454 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>43. The Roofline: Your Box, Measured — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped: the roofline demo's little legend + the confidence-tag chip.
+     Everything uses the shared CSS custom properties so it stays theme-aware. */
+  .roof-legend { display: flex; flex-wrap: wrap; gap: 16px; margin: 8px 0 2px; font-size: .82rem; color: var(--text-dim); }
+  .roof-legend .swatch { display: inline-block; width: 22px; height: 3px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+  .roof-legend .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+  .tag { font-family: var(--mono); font-size: .72rem; font-weight: 700; padding: 1px 5px; border-radius: 4px;
+         background: color-mix(in srgb, var(--accent) 18%, transparent); color: var(--accent2); white-space: nowrap; }
+  .ctrl-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 20px; }
+  .seg-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 2px; }
+  .seg-row button {
+    padding: 6px 13px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: .84rem; font-family: var(--font);
+  }
+  .seg-row button.active { background: var(--accent); color: var(--btn-text); border-color: var(--accent); font-weight: 700; }
+  .seg-label { display: block; font-size: .8rem; color: var(--text-dim); margin: 10px 0 2px; }
+  @media (max-width: 620px) { .ctrl-grid { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body data-page="43-your-box-roofline.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV — Adaptation</span>
+    <h1>The Roofline: Your Box, Measured</h1>
+    <p class="subtitle">A chip has two speed limits — how fast it computes, and how fast it can feed
+      itself. One number decides which one binds. It is the last thing the trunk teaches before the
+      LLM and diffusion tracks fork, because both tracks are the <em>same division</em> with opposite answers.</p>
+
+    <!-- PREDICT — resolved on-page by the measured-confirmation box and the demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict, before you scroll</span>
+      Your Spark advertises <strong>~1,000 TFLOP/s</strong> — that's FP4 <em>with sparsity</em>. A
+      single-token LLM decode reads the whole model once and does about 2 FLOP per weight. Predict
+      your decode speed for Qwen3-8B in bf16: closer to <strong>thousands of tok/s, hundreds, or tens?</strong>
+      Commit — then measure.
+    </div>
+
+    <h2>Two speed limits, one division</h2>
+    <p>Every accelerator can be starved two different ways. It can run out of <em>arithmetic</em> —
+      the tensor cores are all busy and there is simply no more multiply-add per second to give. Or it
+      can run out of <em>bandwidth</em> — the cores sit idle waiting for the next slab of data to arrive
+      from DRAM. Which wall you hit is not a property of the chip alone; it depends entirely on how much
+      arithmetic you do per byte you move. That ratio has a name.</p>
+    <p>(We are retiring the "Ferrari with a garden hose" line here on purpose — it is arithmetically
+      unfair, because it divides a sparse-FP4 marketing peak by a real bandwidth. The honest version is
+      damning enough without cheating.)</p>
+
+    <div class="box rule"><span class="box-title">📐 Arithmetic intensity and the ridge</span>
+      $$I = \frac{\text{FLOPs}}{\text{bytes}}\ \ [\text{FLOP/byte}], \qquad
+        I^\star = \frac{P_{\text{peak}}}{BW}, \qquad
+        P(I) = \min\!\bigl(P_{\text{peak}},\ BW\cdot I\bigr).$$
+      The roofline is those two lines meeting at $I^\star$. <strong>Below $I^\star$ you are
+      memory-bound</strong> (the chip starves, waiting on DRAM); <strong>above $I^\star$ you are
+      compute-bound</strong> (the chip actually works).
+    </div>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$I$</td><td>arithmetic intensity — work done per byte fetched</td><td>FLOP/byte</td><td>the quantity that decides which wall binds</td></tr>
+        <tr><td>$P_{\text{peak}}$</td><td>the chip's peak throughput</td><td>FLOP/s</td><td>a hardware ceiling (unpublished for the Spark — see below)</td></tr>
+        <tr><td>$BW$</td><td>memory bandwidth</td><td>bytes/s</td><td>273 GB/s [VP], constants §6.1</td></tr>
+        <tr><td>$I^\star$</td><td>the ridge point — where the two limits cross</td><td>FLOP/byte</td><td>$P_{\text{peak}}/BW$</td></tr>
+        <tr><td>$P(I)$</td><td>achievable throughput at intensity $I$</td><td>FLOP/s</td><td>the roofline itself</td></tr>
+      </tbody>
+    </table>
+
+    <h2>The formula the whole fork hangs on</h2>
+    <p>For a dense bf16 transformer, one forward pass reads every weight once ($2N$ bytes for
+      $N$ parameters at 2 B each) and does about $2N$ FLOP per token processed. Put $S_{\text{fwd}}$
+      tokens through that one weight read and the arithmetic is $2N\,S_{\text{fwd}}$ while the bytes stay
+      $2N$:</p>
+
+    <div class="box key"><span class="box-title">🔑 Arithmetic intensity equals tokens per forward pass</span>
+      $$I = \frac{2N\cdot S_{\text{fwd}}}{2N} = \boxed{\,S_{\text{fwd}}\ \ \text{FLOP/byte}\,}$$
+      One weight read, amortized over however many tokens you push through it. (For other weight
+      precisions it generalizes to $I \approx S_{\text{fwd}}\times 2/b_W$.) This single frozen formula is
+      used in <em>both</em> tracks — the LLM page and the diffusion page each plug in their own
+      $S_{\text{fwd}}$ and get opposite verdicts. <b>[THREAD:MEM]</b> — the $2N$ bytes is the weight-read
+      from the p.18 ledger; the $2N$ FLOP/token is from the compute page's $C\approx6ND$. <b>[THREAD:DOT]</b>
+      — decode does exactly one multiply-add per weight, the dot product at hardware scale, so $I=1$.
+    </div>
+
+    <h2>The Spark's numbers — stated with their tags</h2>
+    <p>Bandwidth is the easy one: $BW = \mathbf{273\ GB/s}$ <span class="tag">VP</span> (constants §6.1).
+      The compute ceiling is where the honesty starts.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ The headline number is not a training ceiling</span>
+      The Spark's "1 PFLOP / 1000 TOPS" is <strong>FP4 with 2:4 structured sparsity</strong>
+      <span class="tag">VP</span> — NVIDIA's own footnote says so. Your training weights are neither FP4
+      nor 2:4 sparse. <strong>Never size a training run off this number.</strong>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ The dense-BF16 ceiling — inferred, not published</span>
+      NVIDIA publishes <em>no</em> dense-BF16 figure for GB10 <span class="tag">VP: absence verified</span>.
+      So the course prints the inference chain and labels every rung <span class="tag">INF</span>
+      (constants §6.3):
+      <div style="font-family:var(--mono);font-size:.86rem;line-height:1.7;margin:10px 0;padding:10px 14px;background:var(--bg-code);border:1px solid var(--border);border-radius:8px;">
+        1000 TFLOP/s&nbsp;&nbsp;FP4 sparse&nbsp;&nbsp;<span style="color:var(--text-dim)">(published, marketing)</span><br>
+        ÷2&nbsp;(2:4 sparsity)&nbsp;&nbsp;→&nbsp;&nbsp;500&nbsp;&nbsp;FP4 dense<br>
+        ÷2&nbsp;(FP4 → FP8)&nbsp;&nbsp;→&nbsp;&nbsp;250<br>
+        ÷2&nbsp;(FP8 → BF16)&nbsp;&nbsp;→&nbsp;&nbsp;125&nbsp;&nbsp;BF16, FP16-accumulate<br>
+        ÷2&nbsp;(FP32-accumulate penalty)&nbsp;&nbsp;→&nbsp;&nbsp;<strong>~62</strong>&nbsp;&nbsp;BF16, FP32-accum&nbsp;&nbsp;<span style="color:var(--text-dim)">← what a PyTorch training matmul does</span>
+      </div>
+      Two independent checks: a microbenchmark measured <strong>~511 TF dense NVFP4</strong>
+      (102% of the implied 500) <span class="tag">VP</span>; and the per-SM rate closes —
+      $48\ \text{SM}\times512\ \text{FLOP/SM/clk}\times2.6\ \text{GHz} = \mathbf{64\ TF}$ (FP32-accum),
+      or $48\times1024\times2.6 = 128\ \text{TF}$ (FP16-accum) <span class="tag">INF</span>.
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ The ridge is genuinely unresolved — and that is the point</span>
+      Because the ceiling is inferred, so is the ridge:
+      $$I^\star = \frac{62\times10^{12}}{273\times10^{9}} = \mathbf{227}\ \text{FLOP/byte}\ \ (\text{if }\sim62\text{ TF})
+        \qquad\text{or}\qquad \frac{125\times10^{12}}{273\times10^{9}} = 458\ \ (\text{if }\sim125\text{ TF}).$$
+      We <strong>print 227 with the <span class="tag">INF</span> label, name 458 as the live alternative,
+      and print neither as fact.</strong> An SDXL-BF16 benchmark implies 69.7 TF/s <em>if</em> CFG was on
+      (the blog doesn't say), which would rule out 62 TF and lean toward 125; community GEMM reports lean
+      62 TF. The <strong>verdicts below are robust to both</strong> — only the ridge <em>number</em> turns
+      on the ceiling, which is exactly why the fix is to <em>measure</em> it, not argue it. (Retired: the
+      old <s>3,663 FLOP/byte</s> ridge used the sparse-FP4 marketing peak.)
+    </div>
+
+    <h2>Same machine, opposite verdicts</h2>
+    <p>Now plug the two tracks into $I \approx S_{\text{fwd}}$. They land on opposite sides of the ridge,
+      which is the entire reason the box <em>feels</em> fast for images and slow for chat:</p>
+
+    <div class="box key"><span class="box-title">🔑 The engineered contrast (one formula, not two stories)</span>
+      <div style="overflow-x:auto;">
+      <table class="ledger" style="min-width:520px;">
+        <thead><tr><th>Workload</th><th>$S_{\text{fwd}}$</th><th>$I$</th><th>vs ridge (227 / 458)</th><th>Verdict</th></tr></thead>
+        <tbody>
+          <tr><td>LLM decode, batch 1</td><td>1</td><td><strong>1</strong></td><td>227× / 458× below</td><td>bandwidth-bound — <strong>the Spark is weak</strong></td></tr>
+          <tr><td>LLM decode, batch 32</td><td>32</td><td>32</td><td>7× / 14× below</td><td>still bandwidth-bound</td></tr>
+          <tr><td>LLM prefill, S=2048</td><td>2048</td><td>2048</td><td>9× / 4.5× above</td><td>compute-bound</td></tr>
+          <tr><td>Diffusion, 4096 latent tokens</td><td>4096</td><td><strong>4096</strong></td><td>18× / 9× above</td><td>compute-bound — <strong>the Spark is strong</strong></td></tr>
+        </tbody>
+      </table>
+      </div>
+      That is why this box feels fast for images and slow for chat — and it was predictable from one
+      division. (Correcting brief-tooling's "$I\approx2$ for decode": it is <strong>1</strong> at bf16 —
+      2 FLOP/param ÷ 2 bytes/param.)
+    </div>
+
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the batch slider in the roofline below. At $B=1$ the marker sits deep on the diagonal, hundreds
+      of times under the roof — bandwidth-starved. Push $B\to32$ and throughput climbs ~linearly. Then flip
+      the ceiling toggle 62↔125 TF and watch the ridge slide 227↔458 while the <em>decode verdict never
+      changes</em>. That is the whole hardware chapter in one drag.
+    </div>
+
+    <!-- ===== DEMO: the roofline, computed live ===== -->
+    <div class="demo">
+      <div class="demo-head">Your roofline · Spark, 273 GB/s <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-roof" height="340"></canvas>
+        <div class="roof-legend">
+          <span><span class="swatch" style="background:#4fc3f7"></span>roofline $P(I)=\min(P_{\text{peak}},BW\!\cdot\!I)$</span>
+          <span><span class="dot" style="background:#ffb74d"></span>your workload (slider-driven)</span>
+          <span><span class="dot" style="background:#81c784"></span>measured (Llama-3.1-8B FP8, LMSYS)</span>
+        </div>
+        <div class="seg-label">Compute ceiling (the unresolved one — try both):</div>
+        <div class="seg-row" id="d-roof-ceil">
+          <button data-tf="62" class="active">62 TF/s (FP32-accum → ridge 227)</button>
+          <button data-tf="125">125 TF/s (FP16-accum → ridge 458)</button>
+        </div>
+        <div class="seg-label">Weight precision (sets bytes/param $b_W$):</div>
+        <div class="seg-row" id="d-roof-prec">
+          <button data-bw="2" class="active">bf16 (2 B)</button>
+          <button data-bw="4">fp32 (4 B)</button>
+          <button data-bw="1">fp8 (1 B)</button>
+          <button data-bw="0.5">nf4 (0.5 B)</button>
+        </div>
+        <div class="controls" id="d-roof-ctrls"></div>
+        <div class="readout" id="d-roof-out"></div>
+      </div>
+    </div>
+    <p style="font-size:.85rem;color:var(--text-dim)">The green dots are real measurements on this box
+      (Llama-3.1-8B FP8, LMSYS), placed live from their tok/s: throughput $P = \text{tok/s}\times 2N$.
+      Decode $b{=}1$ sits at ~60% of the bandwidth roof (MBU 60.3%), and batching to 32 walks it up the
+      diagonal — memory-bound the whole way, exactly as $I\approx S_{\text{fwd}}$ predicts. The model is
+      deliberately imperfect and the gap to the roof is shown, not hidden.</p>
+
+    <h2>The roofline, measured, on the box he owns</h2>
+    <div class="box worked"><span class="box-title">✍️ LMSYS on the Spark — the contrast, measured</span>
+      Llama-3.1-8B FP8, SGLang <span class="tag">VP</span> (constants §6.7): decode
+      <strong>20.5 tok/s (batch 1) → 368 (batch 32) = 18×</strong>, while prefill is
+      <strong>flat: 7,991 → 7,949</strong>. Prefill was already compute-bound and gained nothing;
+      decode was bandwidth-bound and gained ~linearly with $I$. That is $I\approx S_{\text{fwd}}$, measured,
+      on his machine. <b>[THREAD:MEM]</b>
+    </div>
+    <p>And here is the predict resolved. Qwen3-8B in bf16 decodes at a <strong>ceiling of 16.67 tok/s</strong>
+      ($273\ \text{GB/s} \div 16.38\ \text{GB}$) with a realistic <strong>~10.8 tok/s</strong> expectation
+      once you apply the 0.65 memory-bandwidth-utilization coefficient <span class="tag">DER</span>
+      (constants §6.7). Not thousands. Not hundreds. <strong>Tens.</strong> The prediction at the top of the
+      page was answerable from one division — and quantizing to fp8 (~21.7) or NVFP4 (~43) moves it because
+      it cuts the bytes, not because it adds compute. <b>[THREAD:Qwen3-8B]</b></p>
+
+    <div class="box rule"><span class="box-title">📐 The decode heuristic, and its one honest failure mode</span>
+      $$\text{decode tok/s} \approx 0.65 \times \frac{BW\ (\text{GB/s})}{\text{weight bytes read per token (GB)}}
+        \qquad\text{[EST, dense batch-1]}$$
+      The 0.65 is the round, slightly-conservative choice (mean MBU 0.69, error bars ±10–15%). The punchline:
+      <strong>if your heuristic predicts more than 100% of peak bandwidth, your model is an MoE.</strong>
+      gpt-oss-20B decodes at 49.7 tok/s, which on its 12.8 GB checkpoint <em>implies</em> 637 GB/s = 234% of
+      the 273 GB/s bus — impossible — because only ~3.6 B of its ~20.9 B params are active per token. The
+      deeper lesson: for a quantized model, weight-bytes-per-token is <strong>the file minus the embedding
+      table</strong>, not the file size and not params × bits.
+    </div>
+
+    <h2>Why you adapt instead of rebuild — priced in years</h2>
+    <p>The same ceiling that makes decode slow makes <em>pretraining</em> a fantasy. Qwen3-8B took about
+      $1.5\times10^{24}$ FLOP to train <span class="tag">D is EST</span> (constants §5; the token count $D$
+      is unverified). Divide by the theoretical FP16-accumulate peak and you get
+      $1.5\times10^{24} / 1.25\times10^{14} = 381$ years. But that assumes the machine runs at its
+      theoretical peak at 100% utilization, which it will not — at the ~62 TF FP32-accum roofline and ~40%
+      MFU it is closer to <strong>1,900 years.</strong></p>
+    <div class="box key"><span class="box-title">🔑 The honest sentence</span>
+      <strong>"At least four centuries — and that assumes the machine runs at its theoretical peak, which it
+      will not. Realistically, closer to two millennia."</strong> Assuming peak is generous <em>to the
+      machine</em>, so 381 years is a <em>lower bound</em>, not a generous estimate — the conclusion is
+      strengthened by honesty, not weakened. This is why Part IV existed: you take someone's four centuries
+      of compute and spend a few hours redirecting it. <b>[THREAD:MEM · final]</b>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: accumulate precision — the 62-vs-125 question, in detail</summary><div>
+      <p>A GEMM multiplies bf16 inputs but has to <em>sum</em> the products somewhere. If it accumulates in
+        fp16, the tensor core runs at full rate (~125 TF on GB10). If it accumulates in fp32 — which a plain
+        PyTorch training matmul does, because fp16 accumulation loses too much precision over a long
+        reduction — consumer-class Blackwell halves the rate, to ~62 TF. That single choice is the entire
+        62-vs-125 fork.</p>
+      <p>This also dissolves a community mystery. Reports of "~60 TF measured BF16" on GB10 get blamed on
+        missing sm_121-tuned kernels. That is largely wrong: ~60 TF is ~96% of the 62.5 TF FP32-accumulate
+        ceiling — the hardware is performing correctly. Quoting 125 TF as "the roof" for an FP32-accumulate
+        GEMM would make a learner's honest measurement look like a 50% failure when it is at ~96% of
+        achievable. <code>measure_your_box.py</code> runs a big BF16 GEMM in both accumulate modes; whichever
+        your box lands at, understanding <em>why</em> teaches accumulate precision better than any paragraph
+        — and it fixes your ridge.</p>
+    </div></details>
+
+    <!-- ===== The centerpiece code artifact ===== -->
+    <div class="box try"><span class="box-title">Try it — the centerpiece</span>
+      Run <code>~/ComfyUI/.venv/bin/python measure_your_box.py</code> (it installs nothing, writes nothing,
+      read-only). First it tells you what your 128 GB box <em>actually</em> has. Then it measures the two
+      numbers NVIDIA won't print — your dense bf16 TFLOP/s and your achieved bandwidth — and divides them to
+      get <em>your</em> ridge. Compare it to the 227 and 458 on this page: <strong>which ceiling is your box
+      on?</strong> Use <code>--quick</code> for a ~20 s run; <code>--no-gpu</code> for memory facts only
+      (safe while ComfyUI is up). It contends with the GPU for a few seconds per size, so if ComfyUI is
+      running the numbers come out pessimistic.
+    </div>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python · code/measure_your_box.py (excerpt)</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-com"># Part 1 — memory facts, no GPU. The p.18 ledger's reality check.</span></span>
+<span class="line"><span class="tok-kw">with</span> <span class="tok-fn">open</span>(<span class="tok-str">"/proc/meminfo"</span>) <span class="tok-kw">as</span> f:          <span class="tok-com"># MemTotal = 121.6875 GiB, not 128</span></span>
+<span class="line">    ...                                    <span class="tok-com"># firmware carveout eats 6.31 GiB (4.9%)</span></span>
+<span class="line">need_gib = <span class="tok-num">122.05</span>                        <span class="tok-com"># 16 B/param x 8.19e9, full AdamW FT</span></span>
+<span class="line">slack = total_b / GiB - need_gib           <span class="tok-com"># -0.36 GiB --> DOES NOT FIT, before activations</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Part 2 — the two roofline numbers NVIDIA won't publish.</span></span>
+<span class="line">flops = <span class="tok-num">2</span> * n**<span class="tok-num">3</span>                          <span class="tok-com"># dense bf16 matmul: multiply + add</span></span>
+<span class="line">tf = flops / secs / <span class="tok-num">1e12</span>                   <span class="tok-com"># YOUR measured ceiling</span></span>
+<span class="line">bw = moved / secs / <span class="tok-num">1e9</span>                    <span class="tok-com"># YOUR achieved bandwidth vs 273 GB/s</span></span>
+<span class="line">ridge = tf * <span class="tok-num">1e12</span> / (bw * <span class="tok-num">1e9</span>)          <span class="tok-com"># --> is it 227, or 458?</span></span></code></pre>
+    </div>
+    <p style="font-size:.86rem;color:var(--text-dim)">The dense-BF16 ceiling and the achieved bandwidth are on
+      the course's <span class="tag">MEA</span> list — the course ships the method, not the number
+      (constants §10, exercise #2). Two of this course's three best beats rest on numbers you measure
+      yourself; this is one of them.</p>
+
+    <h2>Where this goes</h2>
+    <p>This is the last trunk page. Everything before it — the ledger (p.18), LoRA (p.40), quantization
+      (p.41) — fed one question: <em>does it fit, and will it run?</em> The fork is next. The LLM track and
+      the diffusion track each open their own hardware page with the <em>same</em> ridge and the <em>same</em>
+      unresolved 227/458, plug in their own $S_{\text{fwd}}$, and derive their own opposite verdict before
+      being told it. Same machine. Same formula. The tracks only diverge because the workloads sit on
+      opposite sides of one division.</p>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-roof"></div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- The roofline, computed live ---- */
+  (function () {
+    const canvas = document.getElementById("d-roof");
+    const out = document.getElementById("d-roof-out");
+    if (!canvas) return;
+
+    const BW = 273e9;                 // bytes/s  [VP]
+    const P_FULL = 8190735360;        // Qwen3-8B param count (weights = 2*P bytes at bf16)
+    const N_LL = 8.03e9;              // Llama-3.1-8B params, for the measured-point y = tok/s * 2N
+    const roofColor = "#4fc3f7", markColor = "#ffb74d", measColor = "#81c784";
+
+    let P_peak = 62e12;               // toggled 62/125 TF
+    let b_W = 2;                      // bytes/param, toggled bf16/fp32/fp8/nf4
+
+    const batch = makeCtrl(document.getElementById("d-roof-ctrls"),
+      { label: "batch size B (tokens per forward, S_fwd)", min: 1, max: 64, step: 1, value: 1, fmt: v => v.toFixed(0) });
+
+    // segmented buttons -------------------------------------------------
+    function wireSeg(id, attr, apply) {
+      const box = document.getElementById(id);
+      box.querySelectorAll("button").forEach(b => b.addEventListener("click", () => {
+        box.querySelectorAll("button").forEach(x => x.classList.remove("active"));
+        b.classList.add("active");
+        apply(parseFloat(b.dataset[attr]));
+        draw();
+      }));
+    }
+    wireSeg("d-roof-ceil", "tf", v => { P_peak = v * 1e12; });
+    wireSeg("d-roof-prec", "bw", v => { b_W = v; });
+
+    function dot(p, x, y, color, r) {
+      const g = p.g; g.save();
+      g.fillStyle = color; g.beginPath();
+      g.arc(p._tx(x), p._ty(y), r || 5, 0, 2 * Math.PI); g.fill();
+      g.restore();
+    }
+
+    function draw() {
+      const p = new Plot(canvas, {
+        xmin: 1e-2, xmax: 1e4, ymin: 1e10, ymax: 2e14, xlog: true, ylog: true,
+        xlabel: "arithmetic intensity  I  (FLOP/byte)", ylabel: "throughput (FLOP/s)"
+      });
+      p.clear(); p.grid();
+
+      // roofline: sweep I in log space, P = min(P_peak, BW*I)
+      const xs = [], ys = [];
+      for (let e = -2; e <= 4; e += 0.02) {
+        const I = Math.pow(10, e);
+        xs.push(I); ys.push(Math.min(P_peak, BW * I));
+      }
+      p.trace(xs, ys, roofColor, 2.5);
+
+      // ridge marker
+      const ridge = P_peak / BW;
+      p.vline(ridge, cssVar("--plot-tick", "#8391ab"), [4, 4]);
+      p.label(ridge * 1.08, P_peak * 0.55, "I* = " + ridge.toFixed(0), cssVar("--accent2", "#7fd1ff"));
+
+      // measured DECODE points (real tok/s -> P = tok/s * 2N), Llama-3.1-8B FP8, LMSYS.
+      // Both are memory-bound, so they sit under the bandwidth diagonal regardless of
+      // the compute ceiling. (The measured PREFILL point is deliberately NOT drawn here:
+      // its fp8 throughput ~128 TF-equivalent belongs on the fp8 compute roof, not this
+      // bf16 one, and would render above the 62 TF ceiling — an impossible-looking point.
+      // The flat-prefill story is told in the worked box below instead.)
+      const twoN = 2 * N_LL;
+      dot(p, 2,    20.5 * twoN, measColor, 5);   // decode b=1  (I = 2*1/1 fp8)
+      dot(p, 64,   368 * twoN,  measColor, 5);   // decode b=32 (I = 2*32/1 fp8)
+      p.label(2 * 1.15, 20.5 * twoN, "decode b1", measColor);
+      p.label(64 * 0.42, 368 * twoN * 1.35, "decode b32", measColor);
+
+      // the live workload marker: I = 2B/b_W ; P = min(peak, BW*I)
+      const B = batch.get();
+      const I = 2 * B / b_W;
+      const P = Math.min(P_peak, BW * I);
+      dot(p, I, P, markColor, 7);
+
+      // readout
+      const tps = P / (2 * P_FULL);
+      const bound = I < ridge;
+      const factor = bound ? (ridge / I) : (I / ridge);
+      out.innerHTML =
+        `B=<b>${B}</b>, b_W=<b>${b_W} B</b> → I = 2·${B}/${b_W} = <b>${I % 1 === 0 ? I : I.toFixed(2)}</b> FLOP/byte · ` +
+        `ridge I* = <b>${ridge.toFixed(0)}</b> (${(P_peak / 1e12).toFixed(0)} TF ceiling) → ` +
+        `<b>${factor.toFixed(0)}× ${bound ? "below → memory-bound" : "above → compute-bound"}</b> · ` +
+        `ceiling throughput ${eng(P, "FLOP/s")} → decode <b>${tps.toFixed(2)} tok/s</b> ` +
+        `<span style="color:var(--text-dim)">(roofline ceiling; realistic ≈ ${(0.65 * tps).toFixed(1)} at 0.65 MBU)</span>`;
+    }
+
+    batch.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-roof", [
+    {
+      q: "Your Spark's ceiling is $P_{\\text{peak}}=62$ TF/s and $BW=273$ GB/s. What is the ridge $I^\\star$ in FLOP/byte?",
+      num: 227, tol: 5, unit: "FLOP/byte",
+      why: "$62\\times10^{12}/273\\times10^{9} = 227$. It is [INF] — at the 125 TF ceiling it is 458. You measure the ceiling to settle it; the verdicts hold either way."
+    },
+    {
+      q: "The Spark's advertised '1 PFLOP / 1000 TOPS' is:",
+      opts: [
+        "its dense bf16 training peak",
+        "FP4 with 2:4 structured sparsity — never size a training run off it",
+        "its achieved memory bandwidth",
+        "the fp8 inference ceiling"
+      ],
+      a: 1,
+      why: "It is FP4 with 2:4 sparsity [VP]. Your weights are neither FP4 nor 2:4 sparse; using it as a training ceiling is the classic laundered-marketing trap."
+    },
+    {
+      q: "For a dense bf16 transformer decoding one token (batch 1), what is the arithmetic intensity $I$?",
+      num: 1, tol: 0.1, unit: "FLOP/byte",
+      why: "$I = 2N\\cdot1 / 2N = 1$. brief-tooling's '$\\approx 2$' is off by 2× — it forgot the 2 bytes/param in the denominator."
+    },
+    {
+      q: "LLM decode is bandwidth-bound but diffusion is compute-bound on the *same* box. Why?",
+      opts: [
+        "diffusion runs in FP4, decode in bf16",
+        "they sit on opposite sides of the ridge because $I\\approx S_{\\text{fwd}}$ — 1 for decode vs 4096 for diffusion",
+        "the GPU clocks higher for image work",
+        "diffusion uses the tensor cores and decode does not"
+      ],
+      a: 1,
+      why: "Same ridge, opposite verdicts: $I\\approx S_{\\text{fwd}}$, so decode (1) is far below and diffusion (4096) far above $I^\\star$. Not a precision or clock difference."
+    },
+    {
+      q: "Your decode heuristic predicts a token rate that would require 234% of your memory bandwidth. What must be true of the model?",
+      opts: [
+        "the measurement is wrong",
+        "it is running in fp8",
+        "it is an MoE — only a fraction of its parameters are active per token",
+        "the bandwidth spec is understated"
+      ],
+      a: 2,
+      why: "If the heuristic implies more than 100% of peak bandwidth, the model is an MoE. gpt-oss-20B implies 637 GB/s (234% of 273) because only ~3.6 B of ~20.9 B params are active per token."
+    },
+    {
+      q: "Qwen3-8B in bf16, decode-traffic ≈ 16.38 GB, $BW=273$ GB/s, coefficient 0.65. Expected decode tok/s?",
+      num: 10.8, tol: 1.5, unit: "tok/s",
+      why: "$0.65\\times273/16.38 = 10.8$ tok/s (realistic). The roofline *ceiling* is $273/16.38 = 16.67$ — say which is which. Tens, not hundreds."
+    },
+    {
+      q: "Going from batch 1 → 32 took decode from 20.5 → 368 tok/s (18×) but prefill stayed flat at ~7,990. Which workload was already compute-bound?",
+      opts: [
+        "decode — it sped up",
+        "prefill — it was already above the ridge, so more batch bought nothing",
+        "both were bandwidth-bound",
+        "neither; the measurement is noise"
+      ],
+      a: 1,
+      why: "[VP] measured on his box. Prefill (I≈2048) was already compute-bound and gained nothing; decode (I≈1) was bandwidth-bound and gained ~linearly. The roofline, measured."
+    }
+  ], "Roofline self-check");
+
+});
+</script>
+</body>
+</html>

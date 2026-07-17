@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>5. The Chain Rule — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the multipath / worked ledgers carry KaTeX fractions wider than a
+   phone. Let each table scroll inside its own box on narrow screens so the page
+   body never scrolls horizontally. Desktop (>900px) is untouched. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* The custom computation-graph canvas draws its own boxes/edges; it just needs a
+   block canvas that fills the demo body. */
+#d-graph { width: 100%; display: block; }
+.gr-legend { font: 12px system-ui; color: var(--text-dim); margin-top: 6px; }
+.gr-legend b.fwd { color: var(--accent); }
+.gr-legend b.bwd { color: #e0607e; }
+</style>
+</head>
+<body data-page="05-the-chain-rule.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · ⭐ The Course Spine</span>
+    <h1>The Chain Rule — Multiply Along Paths, Add Across Paths</h1>
+    <p class="subtitle">One sentence on this page <em>is</em> backpropagation. We'll earn it: chain three
+      sensitivities into a real gradient by hand, watch autograd print the same number, and see why a product of
+      small slopes dies — and why one skip connection saves it.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:chain-rule beat 1/… — the verb]</b>. Page&nbsp;04 handed you a table of seven derivatives — the
+      <em>local</em> slopes. This page gives you the rule that <em>composes</em> them into the slope of a whole
+      network. That composition rule is the engine of every gradient you will ever compute: it returns as TN-1's
+      mechanized backward pass (page&nbsp;14), as autograd (page&nbsp;15), and, much later, as the diffusion
+      score. Same rule, reopened each time — never re-taught.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: resolved in "Gears" prose + the ✍️ box directly below it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A gear train: a <b>3:1</b> gear feeds a <b>2:1</b> gear. What is the overall ratio? And if one gear buried in
+      a deep chain has ratio <b>0.25</b> (the steepest a sigmoid ever manages), what happens to everything
+      <em>upstream</em> of it after <b>10</b> such gears? Commit a number for each before you scroll.
+    </div>
+
+    <!-- ===================== GEARS ===================== -->
+    <h2>Intuition: gears in a chain</h2>
+    <p>Turn the first gear one notch and the last gear turns by the <em>product</em> of all the ratios in between.
+      A 3× link feeding a 2× link makes a <b>6×</b> overall link — you multiply, you don't add. That is the whole
+      idea of the chain rule, stated in brass: <em>sensitivities compose by multiplication</em>. Backprop is this
+      exact move, done a few million times, in the one order that never recomputes a gear.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Resolving the prediction</span>
+      <b>3:1 feeding 2:1 → 6:1.</b> Ratios multiply: $3 \times 2 = 6$. And a single <b>0.25</b> gear ten deep?
+      $0.25^{10} = 9.54\times10^{-7}$ — the upstream gear turns about <b>a millionth</b> as much as the downstream
+      one. Ten mild reductions in a row is a near-total stall. Hold that number; the deep-chain demo below detonates
+      it, and page&nbsp;11 names it the reason sigmoids were abandoned as hidden units.
+    </div>
+
+    <p>The <b>0.25</b> is not arbitrary: it is the largest value $\sigma'$ ever takes, at $\sigma'(0)=0.25$
+      (page&nbsp;04). Stack a chain of sigmoids and every link multiplies in a factor $\le 0.25$. Ten of them cost
+      six orders of magnitude; thirty-two of them cost $0.25^{32}=5.4\times10^{-20}$
+      (<code>constants.md</code>&nbsp;§9.3) — <em>below the smallest normal float32</em>, i.e. exactly zero on your
+      box. This is the vanishing-gradient problem, and you can already see its cause: it is not "depth," it is
+      <em>repeated multiplication by numbers less than one.</em></p>
+
+    <!-- ===================== SINGLE VARIABLE ===================== -->
+    <h2>The rule, single variable</h2>
+    <p>If $y$ depends on $u$, and $u$ depends on $x$, then the sensitivity of $y$ to $x$ is the product of the two
+      local sensitivities:</p>
+    <p>$$\frac{d}{dx}\,f\bigl(g(x)\bigr) \;=\; f'\bigl(g(x)\bigr)\,\cdot\, g'(x).$$</p>
+    <p>Read it left to right as "slope of the outer function, evaluated where the inner function landed, times the
+      slope of the inner function." The phrase <em>evaluated where the inner landed</em> is the part that will cost
+      you memory later: to multiply by $f'(g(x))$ you must have kept $g(x)$ around from the forward pass.</p>
+
+    <!-- ===================== MULTIPATH ===================== -->
+    <h2>The rule, multipath — the version backprop actually uses</h2>
+    <p>Weights fan out: one knob can influence the loss through several different downstream units at once. When a
+      quantity $x$ feeds several intermediates $u_1,\dots,u_k$, its total sensitivity is the <b>sum over paths</b>
+      of the per-path products:</p>
+    <p>$$\frac{\partial\mathcal{L}}{\partial x} \;=\; \sum_{i=1}^{k}\;
+        \frac{\partial\mathcal{L}}{\partial u_i}\,\frac{\partial u_i}{\partial x}.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathcal{L}$</td><td>the loss — one number, at the end of the chain</td><td>scalar (nats)</td><td>the objective</td></tr>
+        <tr><td>$x$</td><td>the upstream quantity we want the sensitivity of (a weight, an activation)</td><td>scalar</td><td>what we solve for</td></tr>
+        <tr><td>$u_i$</td><td>the $i$-th intermediate that $x$ <em>directly</em> feeds</td><td>scalar</td><td>forward pass</td></tr>
+        <tr><td>$\partial\mathcal{L}/\partial u_i$</td><td>sensitivity of the loss to that intermediate</td><td>scalar</td><td>already computed downstream — <b>this is the reuse</b></td></tr>
+        <tr><td>$\partial u_i/\partial x$</td><td>local slope of $u_i$ w.r.t. $x$</td><td>scalar</td><td>one of page&nbsp;04's seven derivatives</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The sentence that is backpropagation</span>
+      <b>For every path from a knob to the loss, multiply the sensitivities along the path; then add across all
+      paths.</b> Multiply along paths, add across paths. Say it out loud — that sentence, executed in reverse
+      topological order so no slope is computed twice, <em>is</em> backpropagation. There is no additional idea in
+      Part II; there is only bookkeeping that makes this cheap.
+    </div>
+
+    <p>The "add across paths" half is the one everyone forgets, and it is exactly what makes a <b>residual
+      connection</b> work. A residual gives a signal two ways to reach the loss: one through the block, and one
+      straight through, whose local derivative is <em>exactly 1</em>. Add across those two paths and the $+1$ term
+      guarantees the gradient can never fully vanish — a superhighway that survives any number of small-slope
+      detours. You'll build that intuition in the demo and cash it in for real on page&nbsp;34.</p>
+
+    <!-- ===================== WORKED ===================== -->
+    <h2>Worked by hand — one neuron, carried to a decimal</h2>
+    <p>Take the smallest network that has a chain in it: one input, one weight, one bias, a sigmoid, and a
+      squared-error loss. Concrete numbers: $x=2$, $w=0.5$, $b=0.1$, target $y=1$.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Forward, then backward</span>
+      <b>Forward</b> (build the chain):
+      <table class="ledger">
+        <tbody>
+          <tr><td>$z$</td><td>$wx+b = 0.5(2)+0.1$</td><td>$1.1$</td></tr>
+          <tr><td>$a$</td><td>$\sigma(z)=\sigma(1.1)$</td><td>$0.75026$</td></tr>
+          <tr><td>$\mathcal{L}$</td><td>$(a-y)^2 = (0.75026-1)^2$</td><td>$0.06237$</td></tr>
+        </tbody>
+      </table>
+      <b>Backward</b> (multiply the local slopes along the one path $w \to z \to a \to \mathcal{L}$):
+      <table class="ledger">
+        <tbody>
+          <tr><td>$\partial\mathcal{L}/\partial a$</td><td>$2(a-y) = 2(-0.24974)$</td><td>$-0.49948$</td></tr>
+          <tr><td>$\partial a/\partial z$</td><td>$\sigma(z)\bigl(1-\sigma(z)\bigr)=0.75026\times0.24974$</td><td>$0.18737$</td></tr>
+          <tr><td>$\partial z/\partial w$</td><td>$x$</td><td>$2$</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.4em 0 0">Chain them:
+        $\dfrac{\partial\mathcal{L}}{\partial w} = (-0.49948)(0.18737)(2) = \mathbf{-0.1872}$, and since
+        $\partial z/\partial b = 1$, $\;\dfrac{\partial\mathcal{L}}{\partial b} = (-0.49948)(0.18737)(1) =
+        \mathbf{-0.0936}$.</p>
+      <p style="margin:.4em 0 0"><b>Take one step</b> ($\eta = 0.5$):
+        $w \leftarrow 0.5 - 0.5(-0.1872) = 0.5936$, $\;b \leftarrow 0.1 - 0.5(-0.0936) = 0.1468$. Re-run the
+        forward pass with the new knobs: $\mathcal{L}' = 0.0435$ — <b>down from 0.0624</b>. You just trained a
+        neuron with a pencil.</p>
+    </div>
+
+    <!-- ===================== VERIFY IN PYTORCH ===================== -->
+    <h2>The same numbers, from autograd</h2>
+    <p>This is the <em>one</em> <code>.backward()</code> call Part I permits — not to teach the reverse pass (that
+      is page&nbsp;14), but to prove the pencil was right. Run it with your ComfyUI venv's Python; it costs
+      nothing (&lt;0.1&nbsp;s, CPU).</p>
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"></span>
+<span class="line">w = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">0.5</span>, requires_grad=<span class="tok-kw">True</span>)</span>
+<span class="line">b = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">0.1</span>, requires_grad=<span class="tok-kw">True</span>)</span>
+<span class="line">x = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">2.0</span>)</span>
+<span class="line">y = torch.<span class="tok-fn">tensor</span>(<span class="tok-num">1.0</span>)</span>
+<span class="line"></span>
+<span class="line">z = w * x + b</span>
+<span class="line">a = torch.<span class="tok-fn">sigmoid</span>(z)</span>
+<span class="line">loss = (a - y)**<span class="tok-num">2</span></span>
+<span class="line hl">loss.<span class="tok-fn">backward</span>()               <span class="tok-com"># autograd walks the same chain, in reverse</span></span>
+<span class="line"><span class="tok-fn">print</span>(w.grad, b.grad)        <span class="tok-com"># tensor(-0.1872) tensor(-0.0936)</span></span></code></pre>
+    </div>
+    <div class="box key"><span class="box-title">🔑 Three representations, one number</span>
+      Pencil: $-0.1872$. Autograd: $-0.1872$. The demo below: $-0.1872$. Backpropagation is not a different
+      thing from the chain rule — it is the chain rule plus memoization plus a reverse-topological order, and
+      nothing else. The mechanics that make it cheap are page&nbsp;15's; the rule is entirely on this page.
+    </div>
+
+    <!-- ===================== DEMO A ===================== -->
+    <h2>Demo — the one-neuron chain, backward and live</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag $w$, $b$, $x$, $y$ and watch the forward values (top of each node) and the gradients (red, bottom)
+      recompute every frame — a <em>real</em> reverse pass through a live autograd graph, not a stored picture.
+      Set $w,b,x,y$ to $0.5,0.1,2,1$ and confirm the readout builds the pencil's $-0.1872$ term by term.
+    </div>
+    <div class="demo">
+      <div class="demo-head">$w \to z \to a \to \mathcal{L}$ · forward &amp; backward <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-graph" height="220"></canvas>
+        <div class="controls" id="d-graph-ctrls"></div>
+        <p style="margin:10px 0 0"><button class="btn secondary" id="d-graph-flash">← Pulse the backward pass</button></p>
+        <div class="readout" id="d-graph-out"></div>
+        <div class="gr-legend">Each node shows its <b class="fwd">forward value</b> (top) and its
+          <b class="bwd">gradient $\partial\mathcal{L}/\partial\,\cdot$</b> (bottom). Edge labels are the local
+          slopes the chain rule multiplies.</div>
+      </div>
+    </div>
+
+    <!-- ===================== DEMO B ===================== -->
+    <h2>Demo — deep chains: why a product of slopes dies, and what saves it</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Stack $N$ identical units and read off the gradient that reaches the <em>first</em> one. With sigmoids it
+      falls off a cliff in scientific notation. Toggle to ReLU (local slope 1) and it holds. Turn on
+      <b>residual</b> connections and even the sigmoid chain survives — because the skip path adds a $+1$ into the
+      backward sum. Insight (3) is worth the whole widget.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Gradient reaching layer 1, vs depth <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-deep" height="300"></canvas>
+        <div class="controls" id="d-deep-ctrls"></div>
+        <p style="margin:10px 0 0">
+          <button class="btn secondary" id="d-deep-act">Activation: sigmoid</button>
+          <button class="btn secondary" id="d-deep-res">Residual: off</button>
+        </p>
+        <div class="readout" id="d-deep-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Backprop is a different, harder thing than the chain rule."</span>
+      It is the chain rule, plus keeping intermediate results so no slope is recomputed, plus visiting nodes in
+      reverse order. That is the entire content. The mechanization onto a graph is page&nbsp;15; the idea is the
+      sentence you just repeated.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "The gradient flows back through the same weights $W$."</span>
+      It flows through $W^{\top}$, not $W$ — and you don't have to take that on faith: <b>the shapes force it.</b>
+      Forward, an activation of shape $(B,d_{\text{in}})$ meets $(d_{\text{in}},d_{\text{out}})$; backward, an error
+      of shape $(B,d_{\text{out}})$ must come back out as $(B,d_{\text{in}})$, which only $(d_{\text{out}},
+      d_{\text{in}})$ — i.e. $W^{\top}$ — makes dimensionally legal (pages&nbsp;02 and&nbsp;07; cashed in on
+      page&nbsp;14).
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Autograd differentiates my Python symbolically."</span>
+      No. It records the operations that <em>actually ran</em> into a graph and walks that graph backward. That is
+      why an <code>if</code> or a Python loop just works (only the taken branch is on the tape), and why
+      <code>.detach()</code> and <code>no_grad()</code> are real tools — they keep ops off the tape. Full story:
+      page&nbsp;15.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Intermediate activations are thrown away after the forward pass."</span>
+      They are <b>kept</b> — because $\partial a/\partial z$ needs the stored $z$, and $\partial\mathcal{L}/\partial
+      W$ needs the stored input. <b>[THREAD:memory beat 3]</b> This is precisely why training memory scales with
+      batch × sequence × depth, and why <em>gradient checkpointing</em> — trading recomputation for memory — is a
+      real knob on your Spark. Page&nbsp;18 turns this into the activation line of the memory ledger.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Vanishing gradients are about depth."</span>
+      Depth is only the multiplier count. The cause is <em>repeated multiplication by factors below one</em>:
+      $0.25^{32}=5.4\times10^{-20}$, dead in float32. ReLU's factor of exactly 1 (for active units) is the fix
+      you'll meet on page&nbsp;11 — and the residual's $+1$ path is the fix you meet in the demo above.
+    </div>
+
+    <!-- ===================== DEEPDIVE ===================== -->
+    <details class="deepdive"><summary>🔬 Deep dive: why backprop runs in reverse, not forward</summary><div>
+      <p>There are two honest ways to apply the chain rule to a whole network. <b>Forward mode</b> pushes a
+        derivative <em>with respect to one input</em> forward through the graph; one sweep gives you how every
+        quantity responds to that single input. <b>Reverse mode</b> pulls a derivative <em>of one output</em>
+        backward; one sweep gives you how that output responds to <em>every</em> input.</p>
+      <p>A neural network has one output that matters — the scalar loss — and $P$ inputs that matter — the $P$
+        parameters (page&nbsp;01's asymmetry). Reverse mode computes all $P$ gradients in a single backward pass;
+        forward mode would need $P$ separate passes, one per parameter. At $P = 8.19\times10^{9}$ that difference is
+        the difference between "trainable" and "never." <em>That asymmetry is why backprop exists.</em> The reverse
+        pass itself — over TN-1's nine parameters — is page&nbsp;14.</p>
+    </div></details>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <div class="box try"><span class="box-title">Try it · <code>code/chain_rule.py</code></span>
+      The 8-line verification above, plus a loop that stacks $N$ sigmoid layers and prints the layer-1 gradient for
+      $N = 1\ldots12$ so you watch it underflow on your own machine. CPU, &lt;1&nbsp;s. Autograd prints the pencil's
+      $-0.1872$, and then it prints the death of a deep sigmoid gradient.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz"></div>
+
+    <!-- ===================== CROSS-REFS ===================== -->
+    <div class="box key"><span class="box-title">↪ Where this returns</span>
+      <b>[THREAD:chain-rule beat 1/…]</b> — the verb, formally. It reopens as TN-1's mechanized backward pass
+      (page&nbsp;14) and autograd (page&nbsp;15). The cached-activations beat feeds the memory ledger
+      (page&nbsp;18); the $+1$ residual path is derived in full on page&nbsp;34; the dying sigmoid is explained and
+      retired on page&nbsp;11. The seven local slopes it multiplies are page&nbsp;04's.
+    </div>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO A: one-neuron chain graph, real reverse pass via NN.Value ---- */
+  (function () {
+    const { V } = NN;
+    const canvas = document.getElementById("d-graph");
+    const out = document.getElementById("d-graph-out");
+    const ctrls = document.getElementById("d-graph-ctrls");
+
+    const cw = makeCtrl(ctrls, { label: "w (weight)", min: -3, max: 3, step: 0.1, value: 0.5, fmt: v => v.toFixed(1) });
+    const cb = makeCtrl(ctrls, { label: "b (bias)", min: -3, max: 3, step: 0.1, value: 0.1, fmt: v => v.toFixed(1) });
+    const cx = makeCtrl(ctrls, { label: "x (input)", min: -3, max: 3, step: 0.1, value: 2.0, fmt: v => v.toFixed(1) });
+    const cy = makeCtrl(ctrls, { label: "y (target)", min: 0, max: 1, step: 1, value: 1, fmt: v => v.toFixed(0) });
+
+    let flash = 0; // 0..1 pulse strength for the backward highlight
+
+    // Build the live autograd graph for the current slider state and backprop it.
+    function compute() {
+      const wv = V(cw.get(), "w"), bv = V(cb.get(), "b"), xv = V(cx.get(), "x");
+      const y = cy.get();
+      const zmul = wv.mul(xv);         // w*x
+      const z = zmul.add(bv);          // z = w*x + b
+      const a = z.sigmoid();           // a = sigma(z)
+      const diff = a.sub(y);           // a - y
+      const L = diff.pow(2);           // (a-y)^2
+      L.backward();
+      // Local slopes the chain rule multiplies (read straight off the math):
+      const dLda = 2 * (a.data - y);
+      const dadz = a.data * (1 - a.data);
+      const dzdw = xv.data;
+      return { wv, bv, xv, y, z, a, L, dLda, dadz, dzdw };
+    }
+
+    function fmt(v) {
+      if (!isFinite(v)) return "—";
+      const av = Math.abs(v);
+      if (av !== 0 && (av < 1e-3 || av >= 1e4)) return v.toExponential(2);
+      return v.toFixed(4);
+    }
+
+    function draw() {
+      const s = compute();
+      const dpr = window.devicePixelRatio || 1;
+      const W = canvas.clientWidth || 640, H = +canvas.getAttribute("height");
+      if (canvas.width !== Math.round(W * dpr) || canvas.height !== Math.round(H * dpr)) {
+        canvas.width = Math.round(W * dpr); canvas.height = Math.round(H * dpr);
+        canvas.style.height = H + "px";
+      }
+      const g = canvas.getContext("2d");
+      g.setTransform(dpr, 0, 0, dpr, 0, 0);
+      g.clearRect(0, 0, W, H);
+
+      const accent = cssVar("--accent", "#b48cff");
+      const bwd = "#e0607e";
+      const border = cssVar("--plot-border", "#3b4a6b");
+      const txt = cssVar("--text", "#dce3f0");
+      const dim = cssVar("--text-dim", "#8391ab");
+      const panel = cssVar("--panel-2", cssVar("--panel", "#161d2f"));
+
+      // Node layout: x (input) and the four computed nodes across the row.
+      const cy0 = H / 2;
+      const nodes = [
+        { x: 44,  label: "x",  fwd: s.xv.data, grad: s.xv.grad },
+        { x: 172, label: "z",  fwd: s.z.data,  grad: s.z.grad,  sub: "w·x + b" },
+        { x: 300, label: "a",  fwd: s.a.data,  grad: s.a.grad,  sub: "σ(z)" },
+        { x: 428, label: "ℒ",  fwd: s.L.data,  grad: s.L.grad,  sub: "(a−y)²" }
+      ];
+      const scaleX = W / 480;
+      const bw = 92 * Math.min(1, scaleX), bh = 62;
+
+      // edges with local-slope labels
+      const edges = [
+        { from: 0, to: 1, top: "∂z/∂x = w", val: s.wv.data },
+        { from: 1, to: 2, top: "∂a/∂z", val: s.dadz },
+        { from: 2, to: 3, top: "∂ℒ/∂a", val: s.dLda }
+      ];
+      g.lineWidth = 2;
+      edges.forEach(e => {
+        const x1 = nodes[e.from].x * scaleX + bw / 2, x2 = nodes[e.to].x * scaleX - bw / 2;
+        g.strokeStyle = flash > 0 ? bwd : border;
+        g.globalAlpha = flash > 0 ? (0.4 + 0.6 * flash) : 1;
+        g.beginPath(); g.moveTo(x1, cy0); g.lineTo(x2, cy0); g.stroke();
+        // arrowhead (forward direction, right)
+        g.beginPath(); g.moveTo(x2, cy0); g.lineTo(x2 - 7, cy0 - 4); g.lineTo(x2 - 7, cy0 + 4); g.closePath();
+        g.fillStyle = g.strokeStyle; g.fill();
+        g.globalAlpha = 1;
+        g.fillStyle = dim; g.font = "11px Consolas, monospace"; g.textAlign = "center"; g.textBaseline = "bottom";
+        g.fillText(e.top, (x1 + x2) / 2, cy0 - 8);
+        g.fillStyle = bwd; g.textBaseline = "top";
+        g.fillText(fmt(e.val), (x1 + x2) / 2, cy0 + 8);
+      });
+
+      nodes.forEach(n => {
+        const nx = n.x * scaleX;
+        g.fillStyle = panel; g.strokeStyle = border; g.lineWidth = 1.5;
+        g.beginPath(); g.rect(nx - bw / 2, cy0 - bh / 2, bw, bh); g.fill(); g.stroke();
+        g.textAlign = "center";
+        g.fillStyle = dim; g.font = "12px system-ui"; g.textBaseline = "top";
+        g.fillText(n.label + (n.sub ? "" : ""), nx, cy0 - bh / 2 + 4);
+        g.fillStyle = accent; g.font = "bold 14px Consolas, monospace"; g.textBaseline = "middle";
+        g.fillText(fmt(n.fwd), nx, cy0 - 4);
+        g.fillStyle = bwd; g.font = "12px Consolas, monospace"; g.textBaseline = "bottom";
+        g.fillText(fmt(n.grad), nx, cy0 + bh / 2 - 4);
+      });
+
+      // knobs w,b shown feeding z
+      g.fillStyle = dim; g.font = "11px Consolas, monospace"; g.textAlign = "center"; g.textBaseline = "top";
+      g.fillText("w=" + s.wv.data.toFixed(2) + "  b=" + s.bv.data.toFixed(2) + "  (knobs → z)",
+        172 * scaleX, cy0 + bh / 2 + 6);
+
+      // readout: the substituted product string
+      out.innerHTML =
+        "<b>∂ℒ/∂w</b> = (∂ℒ/∂a)(∂a/∂z)(∂z/∂w) = " +
+        `<b style="color:${bwd}">${fmt(s.dLda)}</b> × <b style="color:${bwd}">${fmt(s.dadz)}</b> × ` +
+        `<b style="color:${bwd}">${fmt(s.dzdw)}</b> = <b style="color:${bwd}">${fmt(s.wv.grad)}</b>` +
+        `&nbsp;·&nbsp; ∂ℒ/∂b = <b style="color:${bwd}">${fmt(s.bv.grad)}</b>`;
+    }
+
+    [cw, cb, cx, cy].forEach(c => c.onInput(draw));
+    document.getElementById("d-graph-flash").addEventListener("click", () => {
+      flash = 1;
+      const t0 = performance.now();
+      const step = () => {
+        const e = (performance.now() - t0) / 900;
+        flash = e >= 1 ? 0 : (1 - e);
+        draw();
+        if (e < 1) requestAnimationFrame(step);
+      };
+      requestAnimationFrame(step);
+    });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- DEMO B: deep-chain gradient vs depth, real reverse pass ---- */
+  (function () {
+    const { V } = NN;
+    const canvas = document.getElementById("d-deep");
+    const out = document.getElementById("d-deep-out");
+    const cN = makeCtrl(document.getElementById("d-deep-ctrls"),
+      { label: "depth N (layers)", min: 1, max: 12, step: 1, value: 12, fmt: v => v.toFixed(0) });
+
+    let useRelu = false, residual = false;
+    const actBtn = document.getElementById("d-deep-act");
+    const resBtn = document.getElementById("d-deep-res");
+
+    // Real reverse pass: gradient of the final output w.r.t. the first layer's
+    // input signal, through n identical units. w=1, b=0.1, h0=1. This is the
+    // literal product of local slopes the chain rule multiplies.
+    function grad1(n) {
+      const h0 = V(1.0, "h0");
+      let h = h0;
+      const w = 1.0, b = 0.1;
+      for (let l = 0; l < n; l++) {
+        const z = h.mul(w).add(b);              // z = w*h + b
+        const a = useRelu ? z.relu() : z.sigmoid();
+        h = residual ? a.add(h) : a;            // add-across-paths: the skip is the +1 term
+      }
+      h.backward();                             // d(output)/d(h0)
+      return h0.grad;
+    }
+
+    function draw() {
+      const N = cN.get();
+      const p = new Plot(canvas, {
+        xmin: 1, xmax: 12, ymin: 1e-9, ymax: 10, ylog: true,
+        xlabel: "depth N", ylabel: "|gradient reaching layer 1|"
+      });
+      p.clear(); p.grid();
+      const xs = [], ys = [];
+      let endVal = 0;
+      for (let n = 1; n <= 12; n++) {
+        const gg = Math.abs(grad1(n));
+        xs.push(n); ys.push(gg === 0 ? 1e-12 : gg);
+        if (n === N) endVal = grad1(n);
+      }
+      const accent = cssVar("--accent", "#b48cff");
+      p.trace(xs, ys, accent, 2.5);
+      // mark current N
+      p.vline(N, cssVar("--text-dim", "#8391ab"), [4, 4]);
+      // the "dead in float32" floor
+      p.hline(1.18e-38, "#e0607e", [3, 3]);
+      p.label(1.4, 2e-38, "float32 min-normal", "#e0607e");
+
+      const mode = (useRelu ? "ReLU" : "sigmoid") + (residual ? " + residual" : "");
+      out.innerHTML = `At N=<b>${N}</b> (${mode}), the gradient reaching layer 1 is ` +
+        `<b>${isFinite(endVal) ? (Math.abs(endVal) < 1e-3 ? endVal.toExponential(2) : endVal.toFixed(4)) : "—"}</b>. ` +
+        (useRelu && residual ? "ReLU's local slope is 1 <i>and</i> the skip adds another +1, so every backward sum is 2 — the gradient explodes as 2^N, not holding near 1."
+          : useRelu ? "ReLU's local slope is exactly 1 for active units — the product does not shrink."
+          : residual ? "The skip path adds a +1 into every backward sum, so even this saturating sigmoid chain holds the product ≈ 1 no matter how deep."
+          : "Every sigmoid link multiplies in a factor ≤ 0.25 — the product collapses toward zero.");
+    }
+
+    cN.onInput(draw);
+    actBtn.addEventListener("click", () => { useRelu = !useRelu; actBtn.textContent = "Activation: " + (useRelu ? "ReLU" : "sigmoid"); draw(); });
+    resBtn.addEventListener("click", () => { residual = !residual; resBtn.textContent = "Residual: " + (residual ? "on" : "off"); draw(); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz", [
+    {
+      q: "One-neuron example ($x=2,\\ w=0.5,\\ b=0.1,\\ y=1$): the chain gives $\\partial\\mathcal{L}/\\partial w = (-0.49948)(0.18737)(2)$. Enter it.",
+      num: -0.1872, tol: 0.001,
+      why: "Multiply the three local slopes along the single path $w\\to z\\to a\\to\\mathcal{L}$: $-0.49948 \\times 0.18737 \\times 2 = -0.1872$. Autograd prints the same number."
+    },
+    {
+      q: "A single 0.25 gear ten deep: what is $0.25^{10}$?",
+      num: 9.54e-7, tol: 1e-7,
+      why: "$0.25^{10} = 9.54\\times10^{-7}$ — ten mild reductions in a row leave the upstream gear turning about a millionth as much (constants.md §9.3)."
+    },
+    {
+      q: "The chain rule plus memoization plus reverse-topological order is:",
+      opts: [
+        "a numerical finite-difference method",
+        "backpropagation",
+        "symbolic differentiation of your Python source"
+      ],
+      a: 1,
+      why: "It is exactly backpropagation — no extra idea. 'Finite differences' and 'symbolic differentiation of my code' are both named misconceptions the page corrects; the mechanics are pages 14–15."
+    },
+    {
+      q: "In the backward pass the gradient multiplies by which matrix, and how do you know?",
+      opts: [
+        "By $W$; the paper says so",
+        "By $W^{\\top}$; the shapes force it",
+        "By $W$; the shapes force it"
+      ],
+      a: 1,
+      why: "It is $W^{\\top}$, and you don't need the paper: an error of shape $(B,d_{\\text{out}})$ must come back as $(B,d_{\\text{in}})$, which only $(d_{\\text{out}},d_{\\text{in}})=W^{\\top}$ makes legal (pages 02/07, cashed in on 14)."
+    },
+    {
+      q: "Stack 32 sigmoid layers. The gradient reaching layer 1 is roughly:",
+      opts: [
+        "about 0.25",
+        "about $10^{-20}$ — zero in float32",
+        "about 1"
+      ],
+      a: 1,
+      why: "Each link multiplies in a factor $\\le 0.25$: $0.25^{32}=5.4\\times10^{-20}$, below float32's min-normal (constants.md §9.3). The cause is repeated multiplication by numbers &lt; 1, not depth per se."
+    },
+    {
+      q: "A residual connection fixes vanishing gradients because:",
+      opts: [
+        "it removes layers so there are fewer factors",
+        "it adds a path whose local derivative is exactly 1 into the backward sum",
+        "it lowers the learning rate"
+      ],
+      a: 1,
+      why: "'Add across paths': the skip gives the signal a second route with derivative exactly 1, so the summed gradient can never fully vanish — the $+1$ superhighway. Derived in full on page 34."
+    },
+    {
+      q: "Autograd keeps intermediate activations from the forward pass because:",
+      opts: [
+        "to save wall-clock time",
+        "$\\partial a/\\partial z$ needs the stored $z$ — which is why training eats VRAM and why gradient checkpointing exists",
+        "for logging and debugging"
+      ],
+      a: 1,
+      why: "Local slopes are evaluated at the values the forward pass produced, so those values must be cached. That cache is the activation-memory term on your box, and trading it for recomputation is gradient checkpointing (page 18)."
+    }
+  ], "The chain rule — 7 questions");
+
+});
+</script>
+</body>
+</html>

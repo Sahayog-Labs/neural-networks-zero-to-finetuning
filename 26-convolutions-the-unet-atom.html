@@ -1,0 +1,532 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>26. Convolutions: What Your U-Net Is Made Of — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The flagship demo is a receptive-field grower: an input grid
+   with the traced neuron's theoretical RF square + effective (path-count)
+   falloff, driven by an editable stack of conv layers. Wide artifacts scroll
+   inside their own box so the page body never scrolls sideways. */
+.cv-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; align-items: start; }
+.cv-ribbon { font-family: var(--mono, monospace); font-size: .82rem; line-height: 1.7;
+  background: var(--bg-code); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; overflow-x: auto; white-space: pre; color: var(--text-dim); }
+.cv-btns { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 4px; }
+.cv-btns .btn.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cv-layers { width: 100%; border-collapse: collapse; font-size: .84rem; margin-top: 8px; }
+.cv-layers th, .cv-layers td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.cv-layers select { background: var(--bg-code); color: var(--text); border: 1px solid var(--border);
+  border-radius: 5px; padding: 2px 4px; font-family: var(--mono, monospace); }
+.cv-layers .rm { cursor: pointer; color: var(--bad); background: none; border: none; font-size: 1rem; }
+.cv-stat { font-family: var(--mono, monospace); }
+@media (max-width: 820px) { .cv-grid { grid-template-columns: 1fr; } }
+@media (max-width: 780px) { .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="26-convolutions-the-unet-atom.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture</span>
+    <h1>Convolutions: What Your U-Net Is Made Of</h1>
+    <p class="subtitle">You have <em>run</em> U-Nets — every ComfyUI denoise step is one. This page opens the box.
+      Not an ImageNet history; no AlexNet-to-ResNet lineage. Only the five things that survive into your diffusion
+      workflow: the sliding stencil, the params-vs-compute split, the receptive field, and why a generative net
+      throws pooling away. By the end the phrase "downsampling block" stops being a shape in a graph and becomes
+      an arithmetic you can predict.</p>
+
+    <div class="track-banner track-diffusion"><span class="track-label">→ Diffusion U-Net (this is the atom of pages 53–62)</span></div>
+
+    <!-- ===================== THREAD ===================== -->
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD: the memory budget — seed]</b>. <em>Same reality check as page 18's ledger</em>, which counted
+      <em>bytes</em> before trusting a config. <em>What is new:</em> here we learn to count a conv's two costs
+      <em>separately</em> — its parameters (bytes on disk) and its FLOPs (compute per step) diverge, and the whole
+      "why is 1024² so much slower than 512²?" mystery lives in that gap. <em>Reopen later:</em> page 37 (attention's
+      $O(S^2)$) and page 43 (the roofline that decides whether your box is compute- or bandwidth-bound). Counting the
+      right cost is the recurring skill; a conv is where the two costs first come apart.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in prose immediately, formalized in the
+         "asymmetry" .box key, landed decimally in the worked example, and made
+         interactive in the "Resolution vs cost" plot demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You switch a render from 512×512 to 1024×1024. Does the U-Net now have
+      <b>(a)</b> ~4× more parameters, <b>(b)</b> the same parameters but ~4× more compute, or
+      <b>(c)</b> both? Commit before you scroll — you have <em>felt</em> this one at the GPU.
+    </div>
+    <p>The answer is <b>(b)</b>, and it is the single most useful fact about a convolution. A conv's weights are a
+      small stencil that does not know or care how big the image is; doubling each side leaves every parameter
+      untouched. But it slides that stencil over 4× as many positions, so it does 4× the arithmetic. Parameters
+      flat, compute quadratic. We will pin both numbers to the decimal below.</p>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>The stencil that slides</h2>
+    <p>A convolution is one small pattern-matcher slid across the image. At every position it asks the same
+      question — <em>"how much does the patch under me look like my stencil?"</em> — and writes the answer to that
+      spot in the output. You learn the stencil; the sliding is free. That is the entire trick, and it buys one
+      enormous thing: an edge detector learned in the top-left corner works, unchanged, in the bottom-right. The net
+      never has to <em>relearn</em> the same feature at a new location, the way a fully-connected layer would
+      (page 25: the fully-connected first layer spent 150 million weights and a conv spent 1,792 to install exactly
+      that indifference-to-position).</p>
+
+    <p>The operation is technically <em>cross-correlation</em> — the stencil is <b>not</b> flipped the way a signals
+      textbook's convolution is. It makes no difference here because the stencil is <em>learned</em>: the net simply
+      learns whatever orientation it needs. Say it once for the DSP-literate and move on.</p>
+
+    <!-- ===================== THE MATH ===================== -->
+    <h2>The math, with every shape</h2>
+    <p>For one output channel $c_{\text{out}}$ at position $(i,j)$, with input $x$, kernel $W$, stride $s$, padding
+      $p$:</p>
+    <p>$$y[c_{\text{out}},i,j] = b[c_{\text{out}}] + \sum_{c_{\text{in}}}\sum_{u=0}^{k_h-1}\sum_{v=0}^{k_w-1}
+      W[c_{\text{out}},c_{\text{in}},u,v]\;x[c_{\text{in}},\,s\,i+u-p,\,s\,j+v-p]$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$x$</td><td>input feature map</td><td>$(C_{\text{in}}, H, W)$</td><td>previous layer</td></tr>
+        <tr><td>$y$</td><td>output feature map</td><td>$(C_{\text{out}}, H', W')$</td><td>computed here</td></tr>
+        <tr><td>$W$</td><td>the learned filter bank (one 3-D stencil per output channel)</td><td>$(C_{\text{out}}, C_{\text{in}}, k_h, k_w)$</td><td>learned parameters</td></tr>
+        <tr><td>$b$</td><td>per-output-channel bias</td><td>$(C_{\text{out}})$</td><td>learned parameters</td></tr>
+        <tr><td>$k_h, k_w$</td><td>kernel height / width (the stencil size)</td><td>scalars, e.g. 3</td><td>hyperparameter</td></tr>
+        <tr><td>$s$</td><td>stride — how far the stencil hops each step</td><td>scalar, 1 or 2</td><td>hyperparameter</td></tr>
+        <tr><td>$p$</td><td>padding — zeros ringed around the input</td><td>scalar</td><td>hyperparameter</td></tr>
+        <tr><td>$C_{\text{in}}, C_{\text{out}}$</td><td>input / output channel counts</td><td>scalars</td><td>hyperparameter</td></tr>
+      </tbody>
+    </table>
+
+    <div class="cv-ribbon">shape ribbon (one conv layer, dilation d = 1):
+  x  (C_in , H , W)                         weight W  (C_out , C_in , k_h , k_w)
+  │  slide the C_out stencils, stride s, padding p
+  ▼
+  y  (C_out , H', W')      H' = ⌊ (H + 2p − k_h) / s ⌋ + 1 ,   W' likewise</div>
+
+    <p>Two count-formulas fall straight out and you should be able to write them without thinking:</p>
+    <p>$$P_{\text{conv}} = C_{\text{out}}\,(C_{\text{in}}\,k_h k_w + 1)\qquad\qquad
+      \text{FLOPs} = 2\,H'W'\,C_{\text{out}}\,C_{\text{in}}\,k_h k_w$$</p>
+    <p>The parameter count has <b>no $H$ and no $W$ in it.</b> The FLOP count has $H'W'$ front and center. There is
+      your PREDICT, in symbols.</p>
+
+    <div class="box key"><span class="box-title">🔑 The asymmetry</span>
+      A conv's <b>parameters are independent of $H,W$</b>; its <b>compute is proportional to $H'W'$</b>. Render at
+      $1024^2$ instead of $512^2$ and the U-Net is <em>not one weight bigger</em> — but it is ~4× slower, because
+      there are 4× as many output positions to visit. This is the "oh, <em>that's</em> why 1024 crawls" you have
+      already lived through in ComfyUI, now derivable rather than felt.
+    </div>
+
+    <!-- ===================== WORKED ===================== -->
+    <h2>A worked block from a real U-Net</h2>
+    <div class="box worked"><span class="box-title">✍️ Worked example</span>
+      A plausible SDXL-class interior conv: <code>Conv2d(320, 320, kernel=3, padding=1)</code> acting on a
+      $64\times64$ feature map. (A 512-px image lands at $64\times64$ in latent space — the VAE downsamples by a
+      factor of 8, $512/8 = 64$; you will meet that VAE on page 53. <span style="color:var(--text-dim)">[VAE factor 8 — diffusion track fact]</span>)
+      <br><br>
+      <b>Parameters:</b> $P = 320\,(320\cdot 9 + 1) = 320 \times 2881 = \mathbf{921{,}920}$.<br>
+      <b>Output size:</b> padding 1, stride 1, so $H' = W' = 64$ (unchanged — "same" convolution).<br>
+      <b>FLOPs:</b> $2 \cdot 64 \cdot 64 \cdot 320 \cdot 320 \cdot 9 = \mathbf{7{,}549{,}747{,}200} \approx 7.55\ \text{GFLOP}$
+      — <em>per conv, per denoising step.</em><br><br>
+      A U-Net has on the order of 40 such convs, and you run ~30 steps: order $10^{13}$ FLOP <em>before attention is
+      even in the room</em>. That is why sampling is slow, and every digit of it is arithmetic you can check against
+      <code>torch.FlopCounterMode</code> on your box.
+    </div>
+
+    <!-- ===================== RESOLUTION DEMO ===================== -->
+    <h2>Watch the two costs come apart</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag <b>image side</b> from 64 up to 1024. The <span style="color:var(--accent)">parameter</span> bar never
+      moves; the <span style="color:var(--accent2)">FLOP</span> bar climbs as the square of the side. Find 512 and
+      1024 on the axis and read the ratio in the caption — it lands on 4×, resolving the PREDICT.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Resolution vs cost · one <code>Conv2d(320,320,3,pad 1)</code> <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-res" height="300"></canvas>
+        <div class="controls" id="d-res-ctrls"></div>
+        <div class="readout" id="d-res-out"></div>
+      </div>
+    </div>
+
+    <!-- ===================== RECEPTIVE FIELD ===================== -->
+    <h2>The receptive field: how far a neuron can see</h2>
+    <p>Layer 1 sees a $3\times3$ patch. Nobody argues with that. The question that decides architecture is: after
+      stacking many layers, how large a region of the <em>original image</em> can one deep neuron be influenced by?
+      That region is the <b>receptive field</b>, and it grows by a recurrence:</p>
+    <p>$$r_0 = 1,\qquad r_\ell = r_{\ell-1} + (k_\ell - 1)\prod_{j<\ell} s_j$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$r_\ell$</td><td>receptive field (side length, in input pixels) after layer $\ell$</td><td>scalar px</td><td>recurrence</td></tr>
+        <tr><td>$r_0$</td><td>a single input pixel sees itself</td><td>1 px</td><td>base case</td></tr>
+        <tr><td>$k_\ell$</td><td>kernel size of layer $\ell$</td><td>scalar</td><td>the layer</td></tr>
+        <tr><td>$s_j$</td><td>stride of layer $j$</td><td>scalar</td><td>the layer</td></tr>
+        <tr><td>$\prod_{j<\ell} s_j$</td><td>cumulative stride (the "jump") — the input-pixel spacing one step feels</td><td>scalar</td><td>product of earlier strides</td></tr>
+      </tbody>
+    </table>
+
+    <p>The recurrence hides the whole story in that product term. With <b>every layer stride 1</b>, the jump stays 1
+      forever and reach grows <em>linearly</em>: $r_\ell = 2\ell + 1 = 3, 5, 7, 9, \dots$ To first cover a 224-px
+      object you would need <b>112 layers</b> ($2\cdot 112 + 1 = 225 \ge 224$). But the moment you put a
+      <b>stride-2 layer</b> in, the jump doubles, and every later layer's contribution to reach doubles with it —
+      the growth turns <em>geometric</em>. A U-Net encoder that downsamples every other layer walks this ladder:</p>
+
+    <div class="cv-ribbon">plain 3×3, stride 1:   r = 3, 5, 7, 9, 11, ... (linear, 2ℓ+1)   →  112 layers to reach 224 px
+U-Net encoder (s=2 every other layer):
+   r = 3, 5, 9, 13, 21, 29, 45, 61, 93, 125, 189, 253   →  exceeds 224 px at layer 12</div>
+
+    <p><b>112 layers versus 12.</b> That is the architectural reason a U-Net has a downsampling encoder — and it is
+      <em>not</em> "efficiency" or "compression." It is <b>reach</b>. Downsampling is how the network gets to see far
+      enough to relate the top of a face to the bottom of it. It is also exactly why SDXL bolts self-attention into
+      its low-resolution middle blocks (attention gives <em>global</em> reach in one hop — page 31), and why FLUX
+      abandoned the U-Net for a pure transformer (pages 31/35): once you can afford global mixing everywhere, you
+      stop needing the downsampling ladder to buy reach.</p>
+
+    <!-- ===================== RF GROWER DEMO ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Build a stack and watch the receptive field grow. <b>Flip one layer from s=1 to s=2</b> and the RF square jumps
+      (13→29 in the encoder preset). <b>Then load "Ten 1×1 convs"</b>: the RF stays pinned at 1 — a $1\times1$ conv
+      mixes <em>channels</em>, never <em>space</em> (this is precisely what the <code>proj_in</code>/<code>proj_out</code>
+      $1\times1$ convs around a U-Net's attention block do). The faint glow inside the square is the
+      <em>effective</em> RF — real path-counting, not the theoretical box.
+    </div>
+    <div class="demo">
+      <div class="demo-head">The Receptive-Field Grower <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="cv-grid">
+          <div>
+            <canvas id="d-rf" height="300"></canvas>
+            <div class="readout" id="d-rf-out"></div>
+          </div>
+          <div>
+            <div class="cv-btns" id="d-rf-presets">
+              <button class="btn secondary" data-preset="plain">All 3×3, s1</button>
+              <button class="btn secondary" data-preset="unet">U-Net encoder</button>
+              <button class="btn secondary" data-preset="ones">Ten 1×1 convs</button>
+            </div>
+            <div class="controls" id="d-rf-ctrls"></div>
+            <div class="cv-btns">
+              <button class="btn" id="d-rf-add">+ Add layer</button>
+            </div>
+            <div style="overflow-x:auto"><table class="cv-layers" id="d-rf-table"></table></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the effective receptive field is smaller than the theoretical one, and Gaussian</summary><div>
+      <p>The recurrence gives the <em>theoretical</em> RF — the outermost input pixels that <em>can</em> reach a
+        given output neuron. But not every input pixel inside that box matters equally. Count the <em>paths</em> from
+        each input pixel to the output neuron: a center pixel feeds through many stacked stencils, an edge pixel
+        through few. The path count is a repeated box-blur — a binomial — so it converges to a
+        <b>Gaussian falloff</b>. The demo computes this honestly: it starts a single unit of "influence" at the
+        traced output neuron and convolves backward through each layer (upsample by the stride, then a length-$k$
+        box), which is exactly the path count. The bright core is where influence concentrates; the theoretical box
+        is mostly dim margin. <span style="color:var(--text-dim)">[the Gaussian-falloff framing is a known empirical
+        result — label it as such, not a theorem]</span> The practical consequence: a net's <em>usable</em> reach is
+        a fraction of its nominal one, which is a second, quieter reason downsampling matters — it grows both.</p>
+    </div></details>
+
+    <!-- ===================== EQUIVARIANCE ===================== -->
+    <h2>Equivariance, invariance, and why generation keeps <em>where</em></h2>
+    <p>Shift the input; what happens to the output? A convolution <b>commutes</b> with translation:</p>
+    <p>$$\text{Conv}(\text{Shift}_\delta\,x) = \text{Shift}_\delta(\text{Conv}\,x)\qquad\text{(equivariant)}
+      \qquad\text{vs}\qquad \text{GlobalPool}(\text{Shift}_\delta\,x) = \text{GlobalPool}(x)\quad\text{(invariant)}$$</p>
+    <p>A classifier <em>wants</em> invariance — "cat" regardless of where the cat sits, so it ends in a global pool
+      that deliberately forgets position. A generative U-Net wants the opposite. It outputs an
+      <em>image-shaped thing</em>: shift the input noise and the predicted noise had better shift with it. Forgetting
+      <em>where</em> is fatal. So <b>diffusion U-Nets have no global pooling.</b> They downsample with
+      <em>strided convs</em> (learned, position-preserving) and upsample with transposed convs or — better —
+      nearest-neighbour upsample followed by a conv, which avoids the checkerboard artifacts that plague transposed
+      convolutions. Max-pooling is the old classifier way; it throws away <em>where</em>, and generation needs
+      <em>where</em>.</p>
+    <p>One sentence of honesty: even a conv's equivariance is <em>approximate</em>. Zero-padding breaks it at the
+      borders, and strided downsampling aliases. That is a real reason diffusion models sometimes misbehave at image
+      edges — it is not a bug in your prompt.</p>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Four traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "A kernel is 2-D."</span>
+      A single filter is <b>3-D</b> — $(C_{\text{in}}, k_h, k_w)$ — because it reads every input channel at once; the
+      full weight tensor is <b>4-D</b>, $(C_{\text{out}}, C_{\text{in}}, k_h, k_w)$. This is why the worked block has
+      921,920 parameters and not $320\times 9 = 2{,}880$. Compute it, then match <code>sum(p.numel())</code> and the
+      illusion dies.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Deep nets see the whole image from layer 1."</span>
+      Layer 1 sees $3\times3$. Full-image reach is <em>built</em>, layer by layer, by the recurrence above. Run the
+      grower with a plain stack and count how many layers it takes — it is a lot more than you would guess before you
+      see the linear crawl.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "<code>Conv2d</code> computes a convolution."</span>
+      It computes <em>cross-correlation</em> — no kernel flip. Mathematically it is a convolution with a flipped
+      kernel, but since the kernel is learned, the flip is absorbed and never matters in practice. Harmless; worth
+      knowing once so a signals background does not trip you.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Convolution is translation-<em>invariant</em>."</span>
+      It is <b>equivariant</b>, not invariant — shift in, shift out, not "same answer." And even that is broken at
+      borders by padding and by aliasing in strided downsampling. The distinction is the whole reason a U-Net keeps
+      spatial structure while a classifier discards it.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-26"></div>
+
+    <p style="margin-top:28px; color:var(--text-dim); font-size:.9rem">
+      Next door: page 27 turns the same "how much does this look like that?" question into the <em>dot product</em>
+      — the atom attention is built from. And every conv you counted here reappears in the diffusion track (pages
+      53–62) as the literal boxes in your ComfyUI graph.</p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO 1: Resolution vs cost — params flat, FLOPs quadratic ---- */
+  (function () {
+    const canvas = document.getElementById("d-res");
+    const out = document.getElementById("d-res-out");
+    // Fixed conv: Conv2d(320,320,3,pad1). Params are constant; FLOPs scale with side^2.
+    const Cin = 320, Cout = 320, k = 3;
+    const params = Cout * (Cin * k * k + 1);               // 921,920 — constant
+    const flopsAt = (side) => 2 * side * side * Cout * Cin * k * k;
+    const accent = () => vizUtils.cssVar("--accent", "#b48cff");
+    const accent2 = () => vizUtils.cssVar("--accent2", "#45e0b8");
+
+    const side = makeCtrl(document.getElementById("d-res-ctrls"),
+      { label: "image side (px)", min: 64, max: 1024, step: 64, value: 512, fmt: v => v.toFixed(0) });
+
+    function draw() {
+      const s = side.get();
+      const fl = flopsAt(s);
+      // Two bars on a shared log-y axis: params (flat) and FLOPs (grows).
+      const p = new Plot(canvas, { xmin: 0, xmax: 2, ymin: 1e5, ymax: 1e12, ylog: true, ylabel: "count (log)" });
+      p.clear(); p.grid();
+      const bar = (xc, val, color) => {
+        const xs = [xc - 0.32, xc - 0.32, xc + 0.32, xc + 0.32];
+        const ys = [1e5, val, val, 1e5];
+        p.trace(xs, ys, color, 2.5);
+      };
+      bar(0.6, params, accent());
+      bar(1.4, fl, accent2());
+      p.label(0.28, params * 1.5, "parameters", accent());
+      p.label(1.08, fl * 1.5, "FLOPs", accent2());
+      const ratio = fl / flopsAt(512);
+      out.innerHTML = `at <b>${s}²</b>: parameters <b>${eng(params)}</b> (unchanged) · FLOPs <b>${eng(fl, "F")}</b> ` +
+        `— that is <b>${ratio.toFixed(2)}×</b> the ${eng(flopsAt(512), "F")} at 512². ` +
+        (s === 1024 ? `<b>1024² costs 4× the compute of 512², at identical parameter count.</b>` :
+         s === 512 ? `(reference point.)` : ``);
+    }
+    side.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- DEMO 2: The Receptive-Field Grower (custom canvas + editable stack) ---- */
+  (function () {
+    const canvas = document.getElementById("d-rf");
+    const out = document.getElementById("d-rf-out");
+    const table = document.getElementById("d-rf-table");
+    const CHAN = 64;                 // channels assumed for the params/FLOPs readout
+    const INPUT = 128;               // input grid side, px
+
+    const PRESETS = {
+      plain: Array.from({ length: 5 }, () => ({ k: 3, s: 1 })),
+      unet:  [1, 2, 1, 2, 1, 2, 1, 2, 1, 2, 1, 2].map(s => ({ k: 3, s })),
+      ones:  Array.from({ length: 10 }, () => ({ k: 1, s: 1 })),
+    };
+    let layers = PRESETS.plain.map(l => ({ ...l }));
+    // Traced output neuron, as a fraction of the output grid (both axes tied for simplicity).
+    let posFrac = 0.5;
+
+    const posCtrl = makeCtrl(document.getElementById("d-rf-ctrls"),
+      { label: "traced output neuron (position)", min: 0, max: 1, step: 0.02, value: 0.5, fmt: v => (v * 100).toFixed(0) + "%" });
+    posCtrl.onInput(v => { posFrac = v; render(); });
+
+    // --- real math: recurrence + cumulative stride + effective (path-count) dist ---
+    function rfStats() {
+      let r = 1, jump = 1, side = INPUT;
+      const outSides = [];
+      for (const L of layers) {
+        r = r + (L.k - 1) * jump;    // recurrence uses the jump BEFORE this layer's stride
+        jump = jump * L.s;
+        side = Math.floor((side + 2 * Math.floor(L.k / 2) - L.k) / L.s) + 1;  // 'same'-ish
+        side = Math.max(1, side);
+        outSides.push(side);
+      }
+      return { rf: r, cumStride: jump, outSide: side, outSides };
+    }
+    // Backward path-count: start [1] at the output, upsample by stride then box-convolve by k.
+    function pathDist() {
+      let dist = [1];
+      for (let l = layers.length - 1; l >= 0; l--) {
+        const { k, s } = layers[l];
+        const up = [];
+        for (let i = 0; i < dist.length; i++) { up.push(dist[i]); if (i < dist.length - 1) for (let z = 0; z < s - 1; z++) up.push(0); }
+        const conv = new Array(up.length + k - 1).fill(0);
+        for (let i = 0; i < up.length; i++) for (let j = 0; j < k; j++) conv[i + j] += up[i];
+        dist = conv;
+      }
+      return dist;   // length === theoretical RF
+    }
+    function costs() {
+      let params = 0, flops = 0, side = INPUT;
+      for (const L of layers) {
+        const cin = CHAN, cout = CHAN;
+        params += cout * (cin * L.k * L.k + 1);
+        side = Math.max(1, Math.floor((side + 2 * Math.floor(L.k / 2) - L.k) / L.s) + 1);
+        flops += 2 * side * side * cout * cin * L.k * L.k;
+      }
+      return { params, flops };
+    }
+
+    function draw() {
+      const th = vizUtils.themeColors();
+      const { g, W, H } = vizUtils.fitCanvas(canvas, 300);
+      g.clearRect(0, 0, W, H);
+      const S = Math.min(W, H) - 8, ox = (W - S) / 2, oy = (H - S) / 2;
+      const cell = S / INPUT;
+      // faint input grid
+      g.fillStyle = th.bgCode; g.fillRect(ox, oy, S, S);
+      g.strokeStyle = th.border; g.lineWidth = 1; g.strokeRect(ox, oy, S, S);
+
+      const { rf, cumStride, outSide } = rfStats();
+      const dist = pathDist();
+      const maxD = Math.max(...dist, 1e-9);
+      // traced output index -> input center pixel
+      const outIdx = Math.min(outSide - 1, Math.round(posFrac * (outSide - 1)));
+      const center = Math.min(INPUT - 1, Math.max(0, Math.round(cumStride * outIdx + (cumStride - 1) / 2)));
+      const half = (rf - 1) / 2;
+      const lo = center - half;   // input-pixel index of RF's first cell (may be off-grid)
+
+      // effective RF falloff: fill each RF cell with alpha = distX*distY / maxD^2
+      const accentRgb = [180, 140, 255];
+      for (let a = 0; a < rf; a++) {
+        for (let b = 0; b < rf; b++) {
+          const ix = lo + a, iy = lo + b;
+          if (ix < 0 || ix >= INPUT || iy < 0 || iy >= INPUT) continue;
+          const alpha = 0.85 * (dist[a] * dist[b]) / (maxD * maxD);
+          if (alpha < 0.01) continue;
+          g.fillStyle = `rgba(${accentRgb[0]},${accentRgb[1]},${accentRgb[2]},${alpha.toFixed(3)})`;
+          g.fillRect(ox + ix * cell, oy + iy * cell, Math.ceil(cell), Math.ceil(cell));
+        }
+      }
+      // theoretical RF square outline
+      const sx = ox + Math.max(0, lo) * cell, sy = ox * 0 + oy + Math.max(0, lo) * cell;
+      const ex = ox + Math.min(INPUT, lo + rf) * cell, ey = oy + Math.min(INPUT, lo + rf) * cell;
+      g.strokeStyle = th.accent; g.lineWidth = 2; g.strokeRect(sx, sy, ex - sx, ey - sy);
+      // traced-neuron center marker
+      g.fillStyle = th.accent2;
+      g.beginPath(); g.arc(ox + (center + 0.5) * cell, oy + (center + 0.5) * cell, 3.2, 0, 2 * Math.PI); g.fill();
+      g.fillStyle = th.textDim; g.font = "10px system-ui"; g.textAlign = "left"; g.textBaseline = "bottom";
+      g.fillText(`${INPUT}×${INPUT} input · RF square = ${rf}px`, ox + 2, oy - 2);
+    }
+
+    function render() {
+      // rebuild the editable layer table
+      let html = `<tr><th>#</th><th>kernel k</th><th>stride s</th><th></th></tr>`;
+      layers.forEach((L, i) => {
+        html += `<tr><td>${i + 1}</td>` +
+          `<td><select data-i="${i}" data-f="k">${[1, 3, 5, 7].map(v => `<option value="${v}"${v === L.k ? " selected" : ""}>${v}×${v}</option>`).join("")}</select></td>` +
+          `<td><select data-i="${i}" data-f="s">${[1, 2].map(v => `<option value="${v}"${v === L.s ? " selected" : ""}>${v}</option>`).join("")}</select></td>` +
+          `<td><button class="rm" data-rm="${i}" title="remove">✕</button></td></tr>`;
+      });
+      table.innerHTML = html;
+      table.querySelectorAll("select").forEach(sel => sel.addEventListener("change", e => {
+        const i = +e.target.dataset.i, f = e.target.dataset.f;
+        layers[i][f] = +e.target.value; render();
+      }));
+      table.querySelectorAll("button[data-rm]").forEach(btn => btn.addEventListener("click", e => {
+        if (layers.length > 1) { layers.splice(+e.target.dataset.rm, 1); render(); }
+      }));
+
+      const { rf, cumStride, outSide } = rfStats();
+      const dist = pathDist();
+      const maxD = Math.max(...dist, 1e-9);
+      const marg = dist.map(v => v / maxD);
+      let first = marg.findIndex(v => v >= 0.05), last = marg.length - 1 - [...marg].reverse().findIndex(v => v >= 0.05);
+      const effRF = first < 0 ? 1 : (last - first + 1);
+      const { params, flops } = costs();
+      out.innerHTML = `layers <b>${layers.length}</b> · theoretical RF <b>${rf}px</b> · effective RF <b>${effRF}px</b> ` +
+        `· cumulative stride <b>${cumStride}×</b> · output grid <b>${outSide}²</b><br>` +
+        `<span class="cv-stat">params <b>${eng(params)}</b> · FLOPs <b>${eng(flops, "F")}</b></span> ` +
+        `<span style="color:var(--text-dim)">(at ${CHAN} channels, ${INPUT}² input)</span>`;
+      draw();
+    }
+
+    document.getElementById("d-rf-add").addEventListener("click", () => { layers.push({ k: 3, s: 1 }); render(); });
+    document.getElementById("d-rf-presets").querySelectorAll("button").forEach(btn =>
+      btn.addEventListener("click", () => {
+        layers = PRESETS[btn.dataset.preset].map(l => ({ ...l }));
+        document.getElementById("d-rf-presets").querySelectorAll("button").forEach(b => b.classList.remove("active"));
+        btn.classList.add("active");
+        render();
+      }));
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+    render();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz-26", [
+    {
+      q: "A <code>Conv2d(320, 320, kernel=3, padding=1)</code> layer has how many parameters (include the bias)?",
+      num: 921920, tol: 0,
+      why: "$P = C_{out}(C_{in}k^2 + 1) = 320(320\\cdot 9 + 1) = 320\\times 2881 = 921{,}920$. The filter bank is 4-D, which is why it is not $320\\times 9 = 2{,}880$."
+    },
+    {
+      q: "The same layer on a $64\\times64$ map does how many FLOPs? (count multiply and add separately)",
+      num: 7.55e9, tol: 0.1e9, unit: "FLOP",
+      why: "$2 H'W' C_{out}C_{in}k^2 = 2\\cdot 64\\cdot 64\\cdot 320\\cdot 320\\cdot 9 = 7{,}549{,}747{,}200 \\approx 7.55$ GFLOP — per conv, per step."
+    },
+    {
+      q: "You render at $1024^2$ instead of $512^2$. What changes?",
+      opts: [
+        "~4× more parameters, same compute",
+        "Same parameters, ~4× more compute",
+        "Both ~4× (parameters and compute)",
+        "Nothing — a conv is resolution-independent"
+      ],
+      a: 1,
+      why: "Conv parameters have no $H,W$ in them (unchanged); FLOPs $\\propto H'W'$, and $1024^2/512^2 = 4$. This is the params-vs-compute asymmetry — the PREDICT."
+    },
+    {
+      q: "A stack of plain $3\\times3$, stride-1 convs. What is the receptive field after 5 layers?",
+      num: 11, tol: 0,
+      why: "With stride 1 the jump stays 1, so $r_\\ell = 2\\ell + 1$: $3,5,7,9,\\mathbf{11}$. Linear growth — this is why plain stacks need ~112 layers to reach 224 px."
+    },
+    {
+      q: "Why do diffusion U-Nets have no global pooling layer?",
+      opts: [
+        "Global pooling is too slow at high resolution",
+        "They need equivariance (shift in → shift out), and pooling is invariant (it discards where)",
+        "Pooling would reduce the parameter count too far",
+        "Modern GPUs no longer support pooling kernels"
+      ],
+      a: 1,
+      why: "A generative net outputs an image-shaped thing; shift the noise and the predicted noise must shift too. Global pooling is translation-invariant — it forgets position — which is fatal for generation."
+    },
+    {
+      q: "Your generative CNN produces checkerboard artifacts every time it upsamples. Best fix?",
+      opts: [
+        "Add batch normalization after each upsample",
+        "Increase the kernel size to $7\\times7$",
+        "Replace transposed convolution with nearest-neighbour upsample + a conv",
+        "Lower the learning rate"
+      ],
+      a: 2,
+      why: "Checkerboarding comes from transposed-conv kernel overlap. NN-upsample-then-conv separates resizing from filtering and removes the artifact — the standard modern choice."
+    }
+  ], "Convolutions self-check");
+
+});
+</script>
+</body>
+</html>

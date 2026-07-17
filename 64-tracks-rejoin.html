@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>64. The Tracks Grew Back Together — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* The merge point: one banner carrying BOTH track colors, no single track
+     class on <body>. Recolors the standard .track-banner rule lines (llm on the
+     left, diffusion on the right) and gives the label a two-track gradient. */
+  .track-banner.merge::before { background: var(--track-llm); height: 2px; }
+  .track-banner.merge::after  { background: var(--track-diffusion); height: 2px; }
+  .track-banner.merge .track-label {
+    background: linear-gradient(90deg, var(--track-llm), var(--track-diffusion));
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    font-weight: 800;
+  }
+  .track-banner.merge .track-label::before { content: ""; }
+  /* the recurring-thread close tag */
+  .thread-tag {
+    display: inline-block; font: 700 10px/1.4 var(--mono, monospace);
+    letter-spacing: .4px; padding: 1px 7px; border-radius: 5px; margin-right: 6px;
+    border: 1px solid var(--border); color: var(--text-dim); vertical-align: 1px;
+  }
+  .xref { font-size: .92rem; color: var(--text-dim); }
+  .xref a { white-space: nowrap; }
+</style>
+</head>
+<body data-page="64-tracks-rejoin.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part VII · Capstone · the merge point</span>
+    <h1>The Tracks Grew Back Together</h1>
+    <p class="subtitle">You finished the LLM track. You finished the diffusion track.
+      Now open one config file on your own disk and watch them turn out to be the
+      same machine — your image model's prompt reader is a 40-layer Mistral.</p>
+
+    <div class="track-banner merge"><span class="track-label">🔤 LLM &nbsp;×&nbsp; Diffusion 🌀 — the two paths converge here</span></div>
+
+    <!-- ============================ PREDICT ============================ -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Your FLUX.2 model has to <em>read the prompt</em> before it can paint. Before you
+      look at anything: what kind of network do you think does that reading —
+      <b>a bag-of-words embedder, a CNN, an RNN, or a full transformer language
+      model?</b> And roughly how big is it <b>relative to the 32&nbsp;B image model itself</b>?
+      Commit to both answers, then open the config on your disk.
+    </div>
+
+    <p>You have spent one track learning to read an LLM's config — tokenization, GQA,
+      RoPE, the transformer block, a KV cache — and another learning to read a diffusion
+      model's — the VAE, flow matching, the DiT, cross-attention conditioning. This page
+      is the moment the two readings collide. Not by analogy. On the bytes in
+      <code>~/.cache/huggingface/hub/</code>.</p>
+
+    <!-- ============================ THE REVEAL ============================ -->
+    <div class="box key"><span class="box-title">🔑 What actually reads your prompt</span>
+      From <code>model_index.json</code> on your own FLUX.2-dev checkout&nbsp;[VP, on&#8209;disk]:
+      <div class="codeblock" data-lang="json" style="margin:10px 0">
+        <div class="codeblock-head"><span class="lang-tag">model_index.json</span><button class="copy-btn" type="button">Copy</button></div>
+        <pre><code><span class="line">"text_encoder": ["transformers", "Mistral3ForConditionalGeneration"]</span></code></pre>
+      </div>
+      Your image model's prompt reader is a <b>Mistral</b> — a <b>24&nbsp;B multimodal
+      VLM</b>, a full 40-layer transformer language model. Not a lookup table, not a
+      CNN, not an RNN. That answers your prediction's first half. The second half:
+      <b>24&nbsp;B is about 0.75× the size of the 32&nbsp;B image transformer it feeds —
+      and roughly twice the size of the entire old FLUX.1 model (12&nbsp;B)</b>&nbsp;[VP,
+      constants&nbsp;§9.6]. A whole language model, larger than yesterday's whole image
+      model, sits in front just to <em>read the prompt</em>.
+      <br><br>
+      "The tracks grew back together" stops being a metaphor: <b>the LLM track you
+      just finished is the manual for the front half of the diffusion model you just
+      fine-tuned.</b>
+    </div>
+
+    <!-- ============================ COMPONENT MATCH ============================ -->
+    <h2>Every field is something the course already taught you</h2>
+    <p>Read straight from <code>text_encoder/config.json</code> on your disk. There is
+      not one row here you have to take on faith, and not one row that is new:</p>
+
+    <div class="box rule"><span class="box-title">📐 The Mistral-3 encoder, decoded [VP, on&#8209;disk]</span>
+      <table class="ledger">
+        <thead><tr><th>Mistral-3 encoder field</th><th>Value</th><th>Where the course taught it</th></tr></thead>
+        <tbody>
+          <tr><td><code>hidden_size</code>&nbsp; $d$</td><td><b>5120</b></td><td>p.2 vectors &amp; shapes; §4.2 notation</td></tr>
+          <tr><td><code>num_hidden_layers</code>&nbsp; $L$</td><td><b>40</b></td><td>p.35 the transformer block, stacked</td></tr>
+          <tr><td><code>num_attention_heads</code>&nbsp; $H$</td><td><b>32</b></td><td>p.30 heads</td></tr>
+          <tr><td><code>num_key_value_heads</code>&nbsp; $H_{kv}$</td><td><b>8</b>&nbsp;→ GQA <b>4×</b></td><td>p.30/37 GQA — the same 4× as Qwen3-8B</td></tr>
+          <tr><td>$d_{head}=5120/32$</td><td><b>160</b></td><td>p.7 the shape ribbon</td></tr>
+          <tr><td><code>intermediate_size</code>&nbsp; $d_{ff}$</td><td><b>32768</b></td><td>p.35 FFN / SwiGLU</td></tr>
+          <tr><td><code>vocab_size</code>&nbsp; $V$</td><td><b>131072</b></td><td>p.44 tokenization</td></tr>
+          <tr><td><code>rope_theta</code>&nbsp; $b_{\text{rope}}$</td><td><b>1e9</b></td><td>p.33 RoPE</td></tr>
+          <tr><td><code>dtype</code></td><td><b>bf16</b></td><td>p.41 number formats</td></tr>
+          <tr><td>+ <code>vision_config</code> + <code>PixtralProcessor</code></td><td>—</td><td><b>multimodal</b> — it can read <em>images</em> as prompt too</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p><span class="thread-tag">THREAD · dot-product · beat FINAL</span>
+      The atom you met on p.3 — $\langle \mathbf q, \mathbf k\rangle$, one dot product per
+      attention row — is running inside <em>every one of this encoder's 40 layers</em>.
+      Reopen p.3 (the neuron's weighted sum) and p.29 (the first attention score): same
+      atom, now doing the reading that binds text to your image. The dot product's thread
+      ends here, inside your FLUX.2.</p>
+
+    <div class="box key"><span class="box-title">🎁 The GQA gift</span>
+      Qwen3-8B is <b>32 query heads / 8 KV heads</b>. Mistral-3 is <b>also 32 / 8</b>.
+      The exact GQA ratio you computed on p.30 — four query heads sharing each key/value
+      head, a 4× cut on the KV cache — recurs, unchanged, inside your image model
+      [VP, constants&nbsp;§1.1 vs §4.1]. You do not have to re-derive it. You already own it.
+    </div>
+
+    <p class="xref"><b>Translation note (notation §3.2):</b> the config writes
+      <code>num_key_value_heads</code>; papers write $n_{kv}$ or $H_{kv}$. The course
+      writes $H_{kv}$ — and the KV formula uses $H_{kv}$, <b>never</b> $H$. Using $H=32$
+      here is the field's single most common cache-sizing error.</p>
+
+    <!-- ============================ KV WORKED ============================ -->
+    <h2>Worked: the encoder's own KV cache</h2>
+    <p>Same formula as the LLM track, same warning — count $H_{kv}$, not $H$. First the
+      shape ribbon, so the bytes are inescapable:</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon · Mistral-3 encoder, one layer</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">x            (B, S, d=5120)</span>
+<span class="line">W_k          (H_kv·d_head = 8·160 = 1280,  5120)   # (out, in) — ALWAYS</span>
+<span class="line">k = x @ W_k.T                        (B, S, 1280)</span>
+<span class="line">reshape      (B, S, H_kv=8, d_head=160)</span>
+<span class="line">cache K,V per token per layer = 2 · H_kv · d_head · b</span>
+<span class="line">                              = 2 · 8 · 160 · 2 B = 5120 B = 5 KiB</span></code></pre>
+    </div>
+
+    <div class="box worked"><span class="box-title">✍️ KV per token, all 40 layers [DER]</span>
+      $$\text{KV bytes} = 2\,L\,H_{kv}\,d_{head}\,b\,S\,B$$
+      Per token, per layer: $2\times 8\times 160\times 2 = \mathbf{5120\ B = 5\ KiB}$.<br>
+      All 40 layers ($S=1$, $B=1$): $5120\times 40 = 204{,}800\ \text{B} = \mathbf{200\ KiB/token}$.<br><br>
+      Your <b>Qwen3-8B</b> anchor was $2\times 8\times 128\times 2\times 36 = 147{,}456\ \text{B}
+      = \mathbf{144\ KiB/token}$ [DER, constants&nbsp;§4]. So your image model's text
+      encoder carries a <b>heavier</b> per-token KV than the LLM you fine-tuned:
+      <b>200 vs 144 KiB/token</b> — not because it has more heads (both are $H_{kv}=8$),
+      but because it is deeper (40 vs 36 layers) and wider per head (160 vs 128).
+      <table class="ledger" style="margin-top:12px">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Value here</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$L$</td><td>number of layers</td><td>40</td><td><code>num_hidden_layers</code>, on disk</td></tr>
+          <tr><td>$H_{kv}$</td><td><b>key/value</b> heads (not $H$)</td><td>8</td><td><code>num_key_value_heads</code> — the GQA count</td></tr>
+          <tr><td>$d_{head}$</td><td>per-head width</td><td>160</td><td>$5120/32$, derived above</td></tr>
+          <tr><td>$b$</td><td>bytes per stored value</td><td>2</td><td>bf16 <code>dtype</code></td></tr>
+          <tr><td>$S$</td><td>sequence length (prompt tokens)</td><td>slider</td><td>the demo below</td></tr>
+          <tr><td>$B$</td><td>batch</td><td>1</td><td>one prompt at a time</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- ============================ JOINT ATTENTION ============================ -->
+    <h2>How the text talks to the image</h2>
+    <div class="box worked"><span class="box-title">✍️ The conditioning width [VP, on&#8209;disk]</span>
+      The FLUX.2 transformer's <code>joint_attention_dim</code> is <b>15360</b>, and
+      $$\frac{15360}{5120} = \mathbf{3}.$$
+      The DiT reads a conditioning tensor exactly <b>3× the Mistral hidden size</b> wide.
+      And its <code>in_channels</code> is <b>128</b> — verify it live:
+      $32 \times 2^2 = 32\times 4 = \mathbf{128}$ (32 latent channels from the VAE, ×
+      2×2 patch packing) [DER, constants&nbsp;§9.6]. The cross-attention that binds text
+      to image — the one the trunk taught you was mask-agnostic and first-class (p.31,
+      D-14) — takes its $K$ and $V$ from <em>this Mistral encoder</em>. A different
+      modality on the key/value side, which is exactly the case cross-attention exists
+      to handle. You did not learn a special "conditioning" mechanism for diffusion; you
+      learned cross-attention on the trunk, and it already covered this.
+    </div>
+
+    <p><span class="thread-tag">THREAD · memory-ledger</span>
+      The ledger you started on p.18 (16&nbsp;B/param) and carried through the KV cache on
+      p.37 reaches all the way into your image model: this encoder has <em>its own</em>
+      200&nbsp;KiB/token KV cache. The reality-check thread does not stop at the LLM.</p>
+
+    <!-- ============================ FLOW MATCHING VINDICATION ============================ -->
+    <div class="box key"><span class="box-title">🔑 Your scheduler, on your disk</span>
+      From <code>scheduler/scheduler_config.json</code>: your FLUX.2 sampler is a
+      <b><code>FlowMatchEulerDiscreteScheduler</code></b> [VP, on&#8209;disk] — the flow-match
+      Euler step the diffusion track derived (p.57), sitting on your machine.
+      Its <code>num_train_timesteps=1000</code> is <b>vestigial</b>: an indexing habit
+      inherited from DDPM tooling. Flow matching is continuous in $t\in[0,1]$; there is
+      no 1000-step chain to walk.
+    </div>
+
+    <p class="xref"><b>Translation note (notation §6):</b> a <code>num_train_timesteps</code>
+      of 1000 in a flow-matching config does <em>not</em> mean a 1000-step DDPM Markov
+      chain. Data is at $t=0$, noise at $t=1$, and you choose how many Euler steps to take
+      (your FLUX.2-dev-Turbo takes very few). The 1000 is a leftover integer, not a step count.</p>
+
+    <!-- ============================ MISCONCEPTION ============================ -->
+    <div class="box warn"><span class="box-title">⚠️ The belief this page kills</span>
+      <b>"The text encoder is just a CLIP-style embedding lookup, or a bag of words."</b>
+      That was true for CLIP, and half-true for T5. It is <em>false</em> for FLUX.2: the
+      prompt reader is a full 40-layer autoregressive-class transformer — multimodal, with
+      attention, RoPE, GQA, and a KV cache. This matters because a learner who thinks
+      $Q,K,V$ are "three memories" or that conditioning is a bespoke diffusion trick
+      <em>cannot</em> understand cross-attention, and therefore cannot understand
+      conditioning at all (D-14, the trunk's highest-stakes ask). This is where that belief
+      dies — not on a slide, but on the config in your own cache directory.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: FLUX.1 vs FLUX.2 — why the text encoder ballooned from 4.7 B to 24 B</summary><div>
+      <p><b>FLUX.1-dev:</b> a T5-XXL (4.7 B) plus a CLIP-L, encoder width $d=3072$,
+        12 B MMDiT, guidance-distilled. <b>FLUX.2-dev:</b> a <b>32 B</b> MMDiT plus a
+        <b>Mistral-3 24 B VLM</b> encoder, a 32-channel VAE at spatial factor $f=8$
+        (6.0× compression), 4096 latent tokens after 2×2 patchify at width 128 — all
+        [VP], constants&nbsp;§9.6.</p>
+      <p>The trend is unmistakable and it is the whole reason this page exists: <b>image
+        models are putting a complete language model in the front.</b> Reading the prompt
+        well turned out to be worth more parameters than the entire previous image model.
+        The reveal above stands without this history, but the history is the "why."</p>
+    </div></details>
+
+    <!-- ============================ DEMO ============================ -->
+    <h2>Demo — three blocks, one architecture</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Flip between your LLM anchor's block and your image model's two blocks. The picture
+      is the <em>same object at different scale</em>: 8 KV heads fanning out to 32 query
+      heads (GQA), a residual-stream width, a KV cache that grows with the prompt. Drag
+      the sequence length and watch each block's KV cache fill — recomputed live from
+      $2\,L\,H_{kv}\,d_{head}\,b\,S$, nothing baked.
+    </div>
+    <div class="demo">
+      <div class="demo-head">GQA fan-out &amp; the live KV cache <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <canvas id="d-blk" height="320"></canvas>
+        <div class="controls" id="d-blk-ctrls"></div>
+        <div class="readout" id="d-blk-out"></div>
+      </div>
+    </div>
+
+    <p><span class="thread-tag">THREAD · TN-1 · beat FINAL</span>
+      This is the spine's last stop. The 9-parameter network you ran with a pencil on p.6
+      became a JS demo, then PyTorch, then an autograd graph, then a single attention head,
+      then a LoRA target — and here it is, the <em>same block</em>, grown to 40 layers of
+      Mistral, reading your prompts. Reopen p.6 (TN-1 by hand) and p.35 (the block,
+      assembled): one object, six guises, one architecture. TN-1's thread ends inside the
+      thing you already use every day.</p>
+
+    <!-- ============================ CODE ARTIFACT ============================ -->
+    <h2>Verify it yourself, on your disk</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Two shell one-liners prove the reveal in ten seconds; <code>code/verify_flux2_encoder.py</code>
+      then computes the 200 KiB/token KV and prints it beside Qwen3-8B's 144 KiB/token.
+      Nothing is downloaded — it reads the FLUX.2-dev config already in your HF cache.
+    </div>
+
+    <div class="codeblock" data-lang="bash">
+      <div class="codeblock-head"><span class="lang-tag">bash</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">D=~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots</span>
+<span class="line">cat $D/*/model_index.json | python3 -c "import json,sys; print(json.load(sys.stdin)['text_encoder'])"</span>
+<span class="line"><span class="tok-com"># -> ['transformers', 'Mistral3ForConditionalGeneration']</span></span>
+<span class="line">cat $D/*/text_encoder/config.json | python3 -c "import json,sys; c=json.load(sys.stdin); t=c.get('text_config',c); print(t['hidden_size'], t['num_hidden_layers'], t['num_attention_heads'], t['num_key_value_heads'])"</span>
+<span class="line"><span class="tok-com"># -> 5120 40 32 8</span></span></code></pre>
+    </div>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/verify_flux2_encoder.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> json, glob, os</span>
+<span class="line"></span>
+<span class="line">root = os.path.expanduser(</span>
+<span class="line">    <span class="tok-str">"~/.cache/huggingface/hub/models--black-forest-labs--FLUX.2-dev/snapshots"</span>)</span>
+<span class="line">cfg_path = glob.glob(os.path.join(root, <span class="tok-str">"*"</span>, <span class="tok-str">"text_encoder"</span>, <span class="tok-str">"config.json"</span>))[<span class="tok-num">0</span>]</span>
+<span class="line"><span class="tok-kw">with</span> <span class="tok-fn">open</span>(cfg_path) <span class="tok-kw">as</span> f:</span>
+<span class="line">    c = json.<span class="tok-fn">load</span>(f)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># Mistral3ForConditionalGeneration nests the LM fields under text_config,</span></span>
+<span class="line"><span class="tok-com"># alongside vision_config. Fall back to the top level for text-only layouts.</span></span>
+<span class="line">t = c.<span class="tok-fn">get</span>(<span class="tok-str">"text_config"</span>, c)</span>
+<span class="line"><span class="tok-kw">for</span> key <span class="tok-kw">in</span> (<span class="tok-str">"hidden_size"</span>, <span class="tok-str">"num_hidden_layers"</span>, <span class="tok-str">"num_attention_heads"</span>,</span>
+<span class="line">            <span class="tok-str">"num_key_value_heads"</span>, <span class="tok-str">"rope_theta"</span>):</span>
+<span class="line">    <span class="tok-fn">print</span>(<span class="tok-str">f"{key:24s} {t.get(key)}"</span>)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">kv_kib_per_token</span>(L, H_kv, d_head, b=<span class="tok-num">2</span>):</span>
+<span class="line">    <span class="tok-kw">return</span> <span class="tok-num">2</span> * L * H_kv * d_head * b / <span class="tok-num">1024</span></span>
+<span class="line"></span>
+<span class="line">d_head = t[<span class="tok-str">"hidden_size"</span>] // t[<span class="tok-str">"num_attention_heads"</span>]   <span class="tok-com"># 5120 // 32 = 160</span></span>
+<span class="line">mistral = <span class="tok-fn">kv_kib_per_token</span>(t[<span class="tok-str">"num_hidden_layers"</span>], t[<span class="tok-str">"num_key_value_heads"</span>], d_head)</span>
+<span class="line">qwen    = <span class="tok-fn">kv_kib_per_token</span>(L=<span class="tok-num">36</span>, H_kv=<span class="tok-num">8</span>, d_head=<span class="tok-num">128</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"Mistral-3 encoder KV: {mistral:.0f} KiB/token"</span>)   <span class="tok-com"># 200</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"Qwen3-8B        KV: {qwen:.0f} KiB/token"</span>)         <span class="tok-com"># 144</span></span></code></pre>
+    </div>
+    <p class="xref">If a key is ever missing, print the whole config first rather than
+      hard-failing — some transformers versions flatten the layout. The
+      <code>c.get("text_config", c)</code> fallback handles both.</p>
+
+    <!-- ============================ QUIZ ============================ -->
+    <h2>Check your understanding</h2>
+    <div id="quiz64"></div>
+
+    <!-- ============================ CROSS-REFS ============================ -->
+    <h2>Where this connects</h2>
+    <p class="xref">
+      ← p.31 (self vs cross-attention, mask-agnostic, D-14) ·
+      ← p.30/37 (heads &amp; GQA) ·
+      ← p.33 (RoPE) ·
+      ← p.35 (the transformer block, assembled) ·
+      ← p.44 (tokenization / vocab) ·
+      ← p.57 (flow-match Euler) ·
+      ← p.62 (fine-tuning diffusion on your data — the finale that named this Mistral as the cliffhanger) ·
+      ← p.63 (the KV formula, your box) ·
+      → p.65 (where this goes next).
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* wire the copy buttons on the blocks we hand-wrote (course.js already ran
+     wireCodeblocks once at its own DOMContentLoaded; ours are static, so they
+     were already caught — but calling again is idempotent and safe). */
+  if (typeof wireCodeblocks === "function") wireCodeblocks();
+
+  /* ---- DEMO: three blocks, one architecture — real GQA fan-out + live KV ---- */
+  (function () {
+    // All dims READ FROM the frozen configs (constants §1.1/§4.1, hardware §4).
+    // d_model = H * d_head in every row (4096 = 32*128, 5120 = 32*160, 6144 = 48*128).
+    const BLOCKS = {
+      qwen: { name: "Qwen3-8B decoder block", d: 4096, L: 36, H: 32, Hkv: 8, dhead: 128, dff: 12288, rope: "1e6", kind: "decoder",
+        teach: "the LLM you fine-tuned (p.50)" },
+      mistral: { name: "FLUX.2 Mistral-3 encoder block", d: 5120, L: 40, H: 32, Hkv: 8, dhead: 160, dff: 32768, rope: "1e9", kind: "encoder",
+        teach: "your image model's prompt reader" },
+      dit: { name: "FLUX.2 DiT single-stream block", d: 6144, L: 48, H: 48, Hkv: 48, dhead: 128, dff: 18432, rope: "2000", kind: "dit",
+        teach: "the image transformer itself", cond: 15360 },
+    };
+
+    const canvas = document.getElementById("d-blk");
+    const out = document.getElementById("d-blk-out");
+    const ctrls = document.getElementById("d-blk-ctrls");
+
+    // block selector (a <select>, appended into the controls region)
+    const selWrap = document.createElement("div"); selWrap.className = "ctrl";
+    selWrap.innerHTML = `<label for="d-blk-sel">block: </label>
+      <select id="d-blk-sel">
+        <option value="qwen">Qwen3-8B decoder block</option>
+        <option value="mistral" selected>FLUX.2 Mistral-3 encoder block</option>
+        <option value="dit">FLUX.2 DiT single-stream block</option>
+      </select>`;
+    ctrls.appendChild(selWrap);
+    const sel = selWrap.querySelector("select");
+
+    // highlight selector
+    const hlWrap = document.createElement("div"); hlWrap.className = "ctrl";
+    hlWrap.innerHTML = `<label for="d-blk-hl">highlight: </label>
+      <select id="d-blk-hl">
+        <option value="gqa" selected>GQA fan-out</option>
+        <option value="resid">residual-stream width</option>
+        <option value="rope">RoPE base</option>
+        <option value="cross">cross-attention K,V source</option>
+      </select>`;
+    ctrls.appendChild(hlWrap);
+    const hlSel = hlWrap.querySelector("select");
+
+    // sequence-length slider (log 1 .. 40960)
+    const sSlider = makeCtrl(ctrls, {
+      label: "sequence length S (log)", min: 0, max: Math.log10(40960), step: 0.01, value: 0,
+      fmt: v => Math.round(Math.pow(10, v)).toLocaleString(),
+    });
+
+    const ng = new NetGraph(canvas, {
+      layers: [8, 32], weights: null, activations: null,
+      labels: null, maxNodes: 48, height: 320,
+    });
+
+    // GQA grouping matrix: query head q attaches to KV head floor(q / (H/Hkv)).
+    // NetGraph wants weights[0] with shape (layers[1] x layers[0]) = (H x Hkv).
+    function gqaWeights(H, Hkv) {
+      const group = H / Hkv;
+      const W = [];
+      for (let q = 0; q < H; q++) {
+        const row = new Array(Hkv).fill(0);
+        row[Math.floor(q / group)] = 1;
+        W.push(row);
+      }
+      return [W];
+    }
+
+    function draw() {
+      const b = BLOCKS[sel.value];
+      const v = sSlider.get();
+      // The log slider snaps to its 0.01 step, so it can't land exactly on the
+      // max; snap the very top to 40960 so Qwen3 confirms p.37's frozen 5.625 GiB.
+      const S = (v >= parseFloat(sSlider.input.max) - 0.005) ? 40960 : Math.round(Math.pow(10, v));
+      const hl = hlSel.value;
+
+      ng.setLayers([b.Hkv, b.H]);
+      ng.o.weights = gqaWeights(b.H, b.Hkv);
+      ng.o.labels = [null, null];
+      ng.draw();
+
+      // KV per token, all layers, bf16 (b=2). REAL arithmetic, live.
+      const kvPerTokB = 2 * b.L * b.Hkv * b.dhead * 2;      // bytes
+      const kvPerTokKiB = kvPerTokB / 1024;
+      const kvTotalB = kvPerTokB * S;                        // bytes at this S
+      const kvTotalGiB = kvTotalB / (1024 * 1024 * 1024);
+
+      const em = (cond, s) => cond ? `<b style="color:var(--accent2)">${s}</b>` : s;
+      const groupTxt = b.Hkv === b.H
+        ? `full MHA — one KV head per query head (no grouping)`
+        : `GQA <b>${b.H}/${b.Hkv} = ${b.H / b.Hkv}×</b> — ${b.H / b.Hkv} query heads share each KV head`;
+
+      let lines = [];
+      lines.push(`<div><b>${b.name}</b> &nbsp;<span style="color:var(--text-dim)">— ${b.teach}</span></div>`);
+      lines.push(em(hl === "resid", `d_model = <b>${b.d}</b>&nbsp; (H=${b.H} × d_head=${b.dhead})`));
+      lines.push(`L = <b>${b.L}</b> layers &nbsp;·&nbsp; d_ff = <b>${b.dff}</b>`);
+      lines.push(em(hl === "gqa", `H_kv = <b>${b.Hkv}</b> &nbsp;→ ${groupTxt}`));
+      lines.push(em(hl === "rope", `rope_theta = <b>${b.rope}</b>`));
+
+      if (b.kind === "dit") {
+        // Not autoregressive: no incremental KV cache. Show the honest thing.
+        lines.push(em(hl === "cross",
+          `cross-attention K,V ← conditioning width <b>joint_attention_dim = ${b.cond}</b> ` +
+          `= <b>3 × 5120</b> (the Mistral encoder's output)`));
+        lines.push(`<span style="color:var(--text-dim)">bidirectional denoiser — no autoregressive KV cache; ` +
+          `K,V are recomputed each Euler step, and the cross-attention keys come from the encoder above.</span>`);
+      } else {
+        lines.push(em(hl === "cross",
+          b.kind === "encoder"
+            ? `self-attention here; the DiT downstream pulls its cross-attention K,V <b>from this encoder's output</b>`
+            : `self-attention (causal) — the LLM attends to its own past tokens`));
+        lines.push(
+          `KV/token (all ${b.L} layers) = 2·L·H_kv·d_head·b ` +
+          `= 2·${b.L}·${b.Hkv}·${b.dhead}·2 = <b>${kvPerTokKiB.toFixed(0)} KiB/token</b>`);
+        lines.push(
+          `KV cache at S = <b>${S.toLocaleString()}</b>: ` +
+          `${kvPerTokKiB.toFixed(0)} KiB × ${S.toLocaleString()} = <b>${kvTotalGiB.toFixed(3)} GiB</b>`);
+      }
+      out.innerHTML = lines.join("<br>");
+    }
+
+    sel.addEventListener("change", draw);
+    hlSel.addEventListener("change", draw);
+    sSlider.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz64", [
+    {
+      q: "You read <code>model_index.json</code> off your own FLUX.2-dev. What is its text encoder?",
+      opts: [
+        "A CLIP-style embedding lookup",
+        "A T5 encoder only, no attention over the prompt",
+        "A 40-layer multimodal Mistral-3 transformer (attention, RoPE, GQA, KV cache)",
+        "A bag-of-words vectorizer"
+      ],
+      a: 2,
+      why: "<code>Mistral3ForConditionalGeneration</code>: a full 40-layer transformer LM, plus a vision_config — multimodal. CLIP/T5/bag-of-words are each real beliefs about how prompts get read, and each is wrong here."
+    },
+    {
+      q: "The Mistral-3 encoder has hidden_size 5120 and 32 attention heads. Its $d_{head}$ is:",
+      num: 160, tol: 0, unit: "",
+      why: "$d_{head} = 5120 / 32 = 160$ — read straight off the config."
+    },
+    {
+      q: "Its KV cache per token, summed over all 40 layers (bf16), is:",
+      num: 200, tol: 1, unit: "KiB",
+      why: "$2\\times H_{kv}\\times d_{head}\\times b\\times L = 2\\times 8\\times 160\\times 2\\times 40 = 204{,}800$ B $= 200$ KiB. Using $H=32$ instead of $H_{kv}=8$ gives 800 KiB — the field's #1 KV error."
+    },
+    {
+      q: "The transformer's <code>joint_attention_dim</code> is 15360 and the encoder's hidden_size is 5120. Their ratio is:",
+      num: 3, tol: 0, unit: "",
+      why: "$15360 / 5120 = 3$ — the DiT reads a conditioning tensor exactly 3× the Mistral hidden width [VP]."
+    },
+    {
+      q: "Qwen3-8B and Mistral-3 both report 32 attention heads and 8 key-value heads. That ratio means:",
+      opts: [
+        "4× more compute per layer",
+        "GQA 4× — four query heads share each KV head, cutting the KV cache 4×",
+        "The model uses 4 experts (MoE)",
+        "Four separate attention layers stacked"
+      ],
+      a: 1,
+      why: "$H/H_{kv} = 32/8 = 4$ is grouped-query attention: the KV cache shrinks 4× because 4 query heads reuse one key/value head. It is a memory win, not a compute multiplier."
+    },
+    {
+      q: "Your FLUX.2 scheduler is <code>FlowMatchEulerDiscreteScheduler</code> with <code>num_train_timesteps=1000</code>. That means:",
+      opts: [
+        "Sampling must take exactly 1000 DDPM steps",
+        "Flow matching, continuous in $t\\in[0,1]$; the 1000 is vestigial DDPM-tooling indexing",
+        "The model was trained for 1000 epochs",
+        "There are 1000 noise channels"
+      ],
+      a: 1,
+      why: "Flow matching is continuous — data at $t=0$, noise at $t=1$ — and you choose the number of Euler steps. The 1000 is a leftover integer inherited from DDPM tooling, not a step count (notation §6)."
+    },
+    {
+      q: "Which sentence states the course's thesis using the object on this page?",
+      opts: [
+        "LLMs and diffusion models are completely different architectures that happen to share some math",
+        "The same transformer block, trained to predict tokens, is an LLM; trained to read a prompt for an image model, it is a Mistral text encoder — the machine didn't change, the target did",
+        "Diffusion models are just LLMs with extra steps",
+        "The text encoder is the only shared component between the two tracks"
+      ],
+      a: 1,
+      why: "D-17, stated on the object in front of you: one block, two targets. The architecture converged; only what it was trained to predict differed. (The other options are the tidy-but-wrong versions the course warns against.)"
+    }
+  ], "The tracks rejoin — self-check");
+
+});
+</script>
+</body>
+</html>

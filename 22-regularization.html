@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>22. Generalization I: Regularization and Reading the Two Curves — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the six force-a-shape buttons above the live loss plot, and a
+   compact diagnostic table that doesn't need the (symbol/meaning/shape/source)
+   ledger layout — it's a lookup table, not a symbol list. */
+.rg-shapes { display: flex; flex-wrap: wrap; gap: 8px; margin: 2px 0 14px; }
+.rg-shapes .btn.active { outline: 2px solid var(--accent); outline-offset: 1px; }
+.rg-diag td:first-child { font-weight: 700; white-space: nowrap; }
+@media (max-width: 780px) {
+  .inner table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="22-regularization.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Generalization I: Regularization and Reading the Two Curves</h1>
+    <p class="subtitle">You now have a training loop that runs (page 17), a memory budget that fits (page 18), a
+      network that doesn't blow up at init (page 19), and an optimizer that stays well-conditioned through depth
+      (page 20–21). The next failure mode isn't "it won't train" — it's "it trains beautifully and still gets
+      worse." This page gives you the diagnostic you'll run on every fine-tune for the rest of the course: read the
+      train/val curve, name the shape, apply the one fix it calls for. Written for the regime you're actually in —
+      a few hundred to a few thousand examples, not ImageNet.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:MEM]</b>. Page 18 costed the trainable-parameter count in bytes (16 B/param, the memory ledger).
+      <em>What's new here:</em> a small trainable count isn't just cheaper — it's regularization. LoRA's rank
+      $r$ (page 39–40) restricts <em>how much</em> the model can move, which is exactly what stops it from
+      memorizing 500 examples. <em>Reopen:</em> the same parameter-count discipline, now read as a capacity knob
+      instead of a memory knob.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in "The regularizers" section immediately below, restated in the demo's
+         "Aha", and tested again in quiz Q4. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You fine-tune on 500 examples. After 3 epochs, train loss is near 0 and val loss has started rising. You have
+      four knobs on the table: <b>more epochs, weight decay, dropout, early stopping.</b> Before you read on, rank
+      them for <em>this</em> situation — which do you reach for first, and which is actively the wrong direction?
+    </div>
+
+    <!-- ===================== THE TWO CURVES ===================== -->
+    <h2>The two curves — your primary diagnostic</h2>
+    <p>Every training run you'll ever launch produces two numbers per checkpoint: the loss on the data you trained
+      on, and the loss on data you held out. Plotted against each other, that pair is the single most informative
+      readout in the whole loop — more informative than the train loss alone, which by itself cannot distinguish
+      "learning" from "memorizing."</p>
+
+    <div class="box rule"><span class="box-title">📐 Split by the right unit</span>
+      Before any curve means anything, the split has to be honest: <b>dedupe</b> (no row appears in both sets),
+      <b>no leakage</b> across the boundary, and for instruction data specifically, <b>split by source document,
+      not by row</b> — two rows drawn from the same document leak information about each other (shared phrasing,
+      shared facts) even if the rows themselves are never duplicated. A val curve computed over a leaky split isn't
+      measuring generalization; it's measuring how well the model memorized the training set, twice.
+    </div>
+
+    <p>Plot both curves on the same log-y axis, and draw the random-guess baseline as a horizontal reference line —
+      for a $V$-way classification problem the baseline is $\ln V$ nats (page 12); for the binary moons classifier
+      in the demo below, $V=2$ and the line sits at $\ln 2 = 0.6931$ nats. <b>Always plot the baseline.</b> A curve
+      that never gets meaningfully below it isn't learning — it's the underfitting shape, and no amount of staring
+      at the gap between train and val will tell you that; only the baseline will.</p>
+
+    <!-- ===================== SIX SHAPES ===================== -->
+    <h2>Six shapes, six diagnoses</h2>
+    <p>The two-curve plot has exactly six shapes worth recognizing. Each one names a different problem, and — this
+      is the point of memorizing the table — <b>each shape has exactly one fix.</b> Reading the wrong shape as
+      "overfitting" and reaching for weight decay when the real problem is a leaky split wastes a training run and
+      teaches you nothing.</p>
+
+    <table class="rg-diag">
+      <thead><tr><th>#</th><th>Shape</th><th>Diagnosis</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td>Both curves high, flat</td><td>Underfitting — LR too low or model too small</td><td>Raise capacity or LR (page 13, page 19)</td></tr>
+        <tr><td>2</td><td>Both curves low, small gap</td><td>Healthy</td><td>Stop when val flattens</td></tr>
+        <tr><td>3</td><td>Train → 0, val rises</td><td>Overfitting</td><td>Regularize / stop earlier / fewer epochs</td></tr>
+        <tr><td>4</td><td>Train ≫ val (val lower than train)</td><td>Leakage, or a val set too small/too easy</td><td>Fix the split</td></tr>
+        <tr><td>5</td><td>Both plateau high after a few steps</td><td>A wiring bug or dead LR — not a generalization problem</td><td>Page 24's overfit-one-batch test</td></tr>
+        <tr><td>6</td><td>Val jagged, no trend</td><td>Val set too small to estimate</td><td>Enlarge it, or smooth over a window (page 16)</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn"><span class="box-title">⚠️ "A rising val curve always means overfitting."</span>
+      Only if train is also low. Shape 4 (val <em>below</em> train) is leakage, not generalization; shape 5 (both
+      flat and high from the start) is a bug, not a capacity problem. <b>Read the shape, not just the direction of
+      one line.</b>
+    </div>
+
+    <!-- ===================== REGULARIZERS ===================== -->
+    <h2>The regularizers — and which ones you actually need</h2>
+    <p>Three standard tools sit under shape 3's fix. Here's what each one costs and buys, sized to a few-hundred to
+      few-thousand-example fine-tune rather than a from-scratch pretrain:</p>
+
+    <div class="box rule"><span class="box-title">📐 Weight decay, dropout, early stopping</span>
+      <p><b>Weight decay $\lambda$</b> — pulls every weight toward 0 each step; page 17 already gave you the
+        numbers and the mechanism (decoupled, i.e. AdamW): $\lambda=0.1$ for LLM fine-tuning, $\lambda=0.01$ for
+        diffusion, applied to weights only — never to biases, norm gains, or (usually) embeddings. Not re-derived
+        here; see page 17's ledger.</p>
+      <p><b>Dropout</b> — randomly zeroes activations during training so no single unit can be relied on. Standard
+        in 2010s vision nets; largely <em>off</em> in 2026 LLM fine-tuning (still seen in some vision / LoRA-dropout
+        setups). It solves a problem — co-adapted units in a huge, from-scratch, many-epoch training run — that a
+        small, low-rank, few-epoch fine-tune mostly doesn't have.</p>
+      <p><b>Early stopping</b> — evaluate every ~50 steps, keep the checkpoint with the best val loss, stop when it
+        stops improving. Costs nothing extra to compute (you were already running val) and directly targets shape
+        3's fix: it stops <em>before</em> the rise, rather than trying to prevent the rise from happening at all.</p>
+    </div>
+
+    <p><b>Resolving the PREDICT:</b> for a few-hundred-example fine-tune, <b>early stopping + fewer epochs + a low
+      rank/LR is the whole toolkit.</b> Weight decay helps a little at the margin; dropout is usually irrelevant in
+      2026 LLM fine-tuning; and <b>"more epochs" is the wrong direction entirely</b> — you're already past the peak
+      of shape 3, and every additional epoch pushes val higher. Page 23 explains <em>why</em> this is the right
+      toolkit for this regime, via the bias–variance decomposition; this page just gives you the toolkit.</p>
+
+    <!-- ===================== CATASTROPHIC FORGETTING ===================== -->
+    <h2 class="track-llm">Catastrophic forgetting — the failure the two-curve plot won't show you</h2>
+    <div class="box warn track-llm"><span class="box-title">⚠️ "Val loss looks fine, so fine-tuning is safe."</span>
+      The task's train/val curves can look perfect — low loss, small gap, textbook shape 2 — while the model gets
+      <b>measurably worse at everything it wasn't fine-tuned on.</b> This is catastrophic forgetting, and it does
+      <b>not</b> appear on the task's own two-curve plot, because that plot only ever measures the task. The only
+      way to see it is to also track loss on a held-out set of <em>general</em> data (not the fine-tuning task) and
+      watch that curve separately. Mitigations: mix in some general data, lower the rank/LR, fewer epochs — the
+      same knobs that reduce overfitting, deployed against a problem the overfitting plot can't detect.
+      (Developed fully on page 24, whose instrumentation panel logs both curves side by side.)
+    </div>
+
+    <h2>Three more traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "Dropout is essential regularization."</span>
+      In 2026 LLM fine-tuning it's usually off. Early stopping and a low rank do more work for less cost, and
+      dropout's noise can actively hurt a short, low-data fine-tune where every gradient signal is precious.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "More epochs will fix a rising val curve."</span>
+      It makes shape 3 worse, not better — every epoch past the val minimum is pure memorization of the training
+      set. If the curve is rising, the fix is to <em>stop earlier</em>, not train longer.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "A healthy task curve means the fine-tune is safe to ship."</span>
+      Not if you haven't checked catastrophic forgetting (above). A perfect shape-2 curve on the fine-tuning task is
+      necessary, not sufficient.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: force each shape on demand</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      A real MLP trains on a real train/val split below — every curve is a live <code>NN.Trainer</code> run, nothing
+      pre-drawn. Press each numbered button to <b>force</b> that row of the table onto the plot: watch the shape
+      appear, then check the readout against the diagnosis you just read. Then drag the sliders yourself and see
+      which shape your combination lands on.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Read the two curves · MLP on <code>moons</code> <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div class="rg-shapes" id="d-rg-shapes"></div>
+        <canvas id="d-rg-plot" height="320"></canvas>
+        <div class="controls" id="d-rg-ctrls"></div>
+        <div class="readout" id="d-rg-out">Ready.</div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/22_regularization.py</code> — trains a small model with and without weight decay and early
+      stopping on a noisy set, logs the two curves and the best-checkpoint step, and prints the leakage check
+      (train/val row-overlap count) so the split discipline above is concrete, not just asserted.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz22"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;12 gave the $\ln V$ baseline this page draws on every curve;
+      page&nbsp;17 owns the weight-decay numbers and the no-decay list; page&nbsp;16 established judging a noisy
+      curve's trend (shape 6's fix). → Page&nbsp;23 explains <em>why</em> this toolkit is the right one for this
+      regime, via bias–variance; page&nbsp;24's instrumentation panel logs exactly these two curves on his first
+      real fine-tune, plus the forgetting curve shape 2 alone can't show; the trunk's LoRA/SVD pages (39–40) make
+      rank itself the capacity knob this page treats informally.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: real train/val curves from NN.MLP + NN.Trainer + NN.trainTestSplit ---- */
+  (function () {
+    const { MLP, Adam, Trainer, RNG, makeDataset, trainTestSplit } = NN;
+    const canvas = document.getElementById("d-rg-plot");
+    const out = document.getElementById("d-rg-out");
+    const LN2 = Math.log(2);
+
+    // ---- the six forceable presets, matched 1:1 to the diagnostic table above ----
+    const SHAPES = [
+      { key: "underfit", label: "① Underfit",    name: "Underfitting",
+        diag: "model too small to fit the boundary — raise capacity or LR",
+        // hidden:1 caps capacity to a single linear split of the moons boundary, but
+        // lr:0.03 was still enough step size for Adam to visibly grind the loss down
+        // ~33% over 30 epochs — a smooth descent, not the table's "flat" signature.
+        // lr:0.001 is genuinely too low for a full-batch run to move in 30 steps: the
+        // curve sits within ~1% of the ln 2 baseline the whole time, i.e. exactly the
+        // "never gets meaningfully below the baseline" underfitting signature this
+        // page's own intro paragraph describes.
+        N: 200, lambda: 0.000, epochs: 30, valFrac: 0.30, hidden: 1, labelNoise: 0.00, leak: false, lrBug: false, lr: 0.001 },
+      { key: "healthy",  label: "② Healthy",      name: "Healthy",
+        diag: "small gap, both low — stop when val flattens",
+        N: 300, lambda: 0.010, epochs: 60, valFrac: 0.30, hidden: 8, labelNoise: 0.02, leak: false, lrBug: false, lr: 0.03 },
+      { key: "overfit",  label: "③ Overfit",      name: "Overfitting",
+        diag: "train → 0, val rises — regularize / stop earlier / fewer epochs",
+        N: 40,  lambda: 0.000, epochs: 60, valFrac: 0.30, hidden: 16, labelNoise: 0.14, leak: false, lrBug: false, lr: 0.08 },
+      { key: "leak",     label: "④ Leaky split",  name: "Leakage",
+        diag: "val duplicates part of train — val looks better than train; fix the split",
+        N: 200, lambda: 0.000, epochs: 20, valFrac: 0.30, hidden: 8, labelNoise: 0.05, leak: true, leakFrac: 0.6, lrBug: false, lr: 0.05 },
+      { key: "bug",      label: "⑤ Wiring bug",   name: "Wiring bug / dead LR",
+        diag: "flat from step 0 — not a generalization problem, go run page 24's overfit-one-batch test",
+        N: 200, lambda: 0.000, epochs: 30, valFrac: 0.30, hidden: 8, labelNoise: 0.03, leak: false, lrBug: true, lr: 0.03 },
+      { key: "tinyval",  label: "⑥ Tiny val set", name: "Val set too small",
+        diag: "jagged, no trend — enlarge it or smooth over a window (page 16)",
+        // The old lr:0.03/batch:8 pair wasn't noisy enough relative to how fast the
+        // model converged: the mini-batch wobble was ~0.01, dwarfed by a clean ~66%
+        // net descent — a smooth curve, not the table's "jagged, no trend". (NOTE:
+        // the val-split slider itself snaps to multiples of its 0.05 step starting at
+        // min 0.05 — see vfCtrl below — so a preset can't ask for anything finer than
+        // the already-tiny 10-row split; 0.05 is both the floor and the value used.)
+        // A higher lr:0.3 over a small batch:9 makes each step's mini-batch estimate
+        // noisy enough to swing the decision boundary meaningfully; a 10-row val
+        // average doesn't smooth that out the way the ~190-row train average still
+        // does. Numerically verified (harness in the QA notes): linear-fit R² on the
+        // 40-epoch val history is ~0.01 (no reliable trend — the curve dives, spikes,
+        // dives again, then wobbles) vs. R² ~0.52 on train (train keeps a real net
+        // descent despite its own mini-batch noise).
+        N: 200, lambda: 0.000, epochs: 40, valFrac: 0.05, hidden: 8, labelNoise: 0.05, leak: false, lrBug: false, lr: 0.3, batch: 9 },
+    ];
+
+    // ---- controls: N, weight decay λ, epochs cap, val-split fraction ----
+    const ctrlsHost = document.getElementById("d-rg-ctrls");
+    const nCtrl   = makeCtrl(ctrlsHost, { label: "dataset size N", min: 40, max: 500, step: 10, value: 200, fmt: v => v.toFixed(0) });
+    const lamCtrl = makeCtrl(ctrlsHost, { label: "weight decay λ", min: 0, max: 0.1, step: 0.005, value: 0.01, fmt: v => v.toFixed(3) });
+    const epCtrl  = makeCtrl(ctrlsHost, { label: "epochs cap", min: 5, max: 60, step: 5, value: 30, fmt: v => v.toFixed(0) });
+    const vfCtrl  = makeCtrl(ctrlsHost, { label: "val-split fraction", min: 0.05, max: 0.5, step: 0.05, value: 0.3, fmt: v => (v * 100).toFixed(0) + "%" });
+
+    // Extra knobs the six preset buttons drive but the four sliders above don't
+    // (the spec names N / λ / epochs / val-fraction as the sliders; capacity,
+    // label noise, leakage and the dead-LR bug are what the buttons force).
+    let extra = { hidden: 8, labelNoise: 0.03, leak: false, lrBug: false, lr: 0.03, batch: 0 };
+    let activeShape = null; // key of SHAPES, or null once the learner drags a slider
+
+    function setCtrl(ctrl, val) {
+      ctrl.input.value = val;
+    }
+    function syncLabel(ctrl, fmt, unit) {
+      const span = ctrl.input.parentElement.querySelector(".val");
+      if (span) span.textContent = fmt(ctrl.get()) + (unit ? " " + unit : "");
+    }
+
+    const shapesHost = document.getElementById("d-rg-shapes");
+    const btns = {};
+    for (const s of SHAPES) {
+      const b = document.createElement("button");
+      b.className = "btn secondary"; b.type = "button"; b.textContent = s.label;
+      b.addEventListener("click", () => applyShape(s.key));
+      shapesHost.appendChild(b); btns[s.key] = b;
+    }
+    function highlight(key) {
+      for (const k in btns) btns[k].classList.toggle("active", k === key);
+    }
+
+    function applyShape(key) {
+      const s = SHAPES.find(x => x.key === key);
+      setCtrl(nCtrl, s.N);     syncLabel(nCtrl, v => v.toFixed(0));
+      setCtrl(lamCtrl, s.lambda); syncLabel(lamCtrl, v => v.toFixed(3));
+      setCtrl(epCtrl, s.epochs);  syncLabel(epCtrl, v => v.toFixed(0));
+      setCtrl(vfCtrl, s.valFrac); syncLabel(vfCtrl, v => (v * 100).toFixed(0) + "%");
+      extra = { hidden: s.hidden, labelNoise: s.labelNoise, leak: s.leak, leakFrac: s.leakFrac, lrBug: s.lrBug, lr: s.lr, batch: s.batch || 0 };
+      activeShape = key;
+      highlight(key);
+      draw();
+    }
+
+    // Real training run: one NN.Trainer step per epoch (full-batch by default,
+    // mini-batch only for the "tiny val set" preset — see below). Returns the
+    // train/val loss history plus the best (early-stopping) checkpoint.
+    function run(N, lambda, epochsCap, valFrac, opts) {
+      const seed = 7;
+      const rngData = new RNG(seed);
+      const ds = makeDataset("moons", N, { rng: rngData, noise: 0.15, labelNoise: opts.labelNoise });
+      const split = trainTestSplit(ds, 1 - valFrac, new RNG(seed + 1));
+      const trainSet = split.train;
+      let valSet = split.test;
+      if (valSet.X.length < 1) valSet = { X: [trainSet.X[0]], y: [trainSet.y[0]] };
+
+      if (opts.leak) {
+        // Contaminate: overwrite a chunk of val with exact copies of train rows —
+        // the model has literally seen these "held-out" points during training.
+        const rngLeak = new RNG(seed + 2);
+        const nLeak = Math.max(1, Math.floor(valSet.X.length * (opts.leakFrac || 0.5)));
+        for (let i = 0; i < nLeak; i++) {
+          const vi = rngLeak.int(valSet.X.length), ti = rngLeak.int(trainSet.X.length);
+          valSet.X[vi] = trainSet.X[ti].slice();
+          valSet.y[vi] = trainSet.y[ti];
+        }
+      }
+
+      const rngModel = new RNG(seed + 3);
+      const model = new MLP([2, opts.hidden, 1], { act: "tanh", rng: rngModel });
+      const opt = new Adam(model.parameters(), { lr: opts.lrBug ? 1e-8 : (opts.lr || 0.03), weightDecay: lambda, decoupled: true });
+      // batchSize 0 (every preset but "tiny val set") is full-batch: deterministic
+      // descent, a smooth curve. The tiny-val preset trains on real size-9
+      // mini-batches (rng-sampled each step) — the same stochastic-gradient noise
+      // every real run has — then evaluates both full sets each epoch. A ~190-row
+      // train average smooths that noise out; a 10-row val average does not,
+      // which is exactly why shape 6 looks jagged (R²~0.01, no reliable trend,
+      // multiple up/down reversals) while shape-6's own train curve keeps a real
+      // net descent (R²~0.52), and shape-2/3's curves don't jag like this either.
+      const trainer = new Trainer({ model, X: trainSet.X, y: trainSet.y, loss: "bce", opt, batchSize: opts.batch || 0, rng: new RNG(seed + 4) });
+
+      const trainHist = [], valHist = [];
+      let bestVal = Infinity, bestEpoch = 0;
+      for (let e = 1; e <= epochsCap; e++) {
+        trainer.step();
+        const tl = trainer.evalLoss(trainSet.X, trainSet.y);
+        const vl = trainer.evalLoss(valSet.X, valSet.y);
+        trainHist.push(tl); valHist.push(vl);
+        if (vl < bestVal) { bestVal = vl; bestEpoch = e; }
+      }
+      return { trainHist, valHist, bestVal, bestEpoch };
+    }
+
+    const trainColor = () => vizUtils.cssVar("--accent2", "#45e0b8");
+    const valColor = () => vizUtils.cssVar("--accent", "#b48cff");
+    const baseColor = () => vizUtils.cssVar("--text-dim", "#8391ab");
+    const bestColor = () => vizUtils.cssVar("--good", "#5ce6a0");
+
+    function draw() {
+      const N = Math.round(nCtrl.get()), lambda = lamCtrl.get(), epochsCap = Math.round(epCtrl.get()), valFrac = vfCtrl.get();
+      const r = run(N, lambda, epochsCap, valFrac, extra);
+      const xs = r.trainHist.map((_, i) => i + 1);
+      const all = r.trainHist.concat(r.valHist).filter(isFinite).concat([LN2]);
+      const ymin = Math.max(1e-4, Math.min(...all) * 0.6);
+      const ymax = Math.max(...all) * 1.25;
+
+      const p = new Plot(canvas, { xmin: 1, xmax: epochsCap, ymin, ymax, ylog: true, xlabel: "epoch", ylabel: "loss (nats)" });
+      p.clear(); p.grid();
+      p.hline(LN2, baseColor(), [3, 3]);
+      p.trace(xs, r.trainHist, trainColor(), 2.5);
+      p.trace(xs, r.valHist, valColor(), 2.5);
+      p.vline(r.bestEpoch, bestColor(), [4, 3]);
+
+      const finalTrain = r.trainHist[r.trainHist.length - 1], finalVal = r.valHist[r.valHist.length - 1];
+      const gap = finalVal - finalTrain;
+      const gapStr = (gap >= 0 ? "+" : "") + gap.toFixed(3);
+
+      let shapeLine = `<br><span style="opacity:.8">drag a slider to try your own combination — read the fix off the table above.</span>`;
+      if (activeShape) {
+        const s = SHAPES.find(x => x.key === activeShape);
+        shapeLine = `<br><b style="color:${bestColor()}">Forced ${s.label} — ${s.name}:</b> ${s.diag}`;
+      }
+      out.innerHTML =
+        `<b style="color:${trainColor()}">train</b> <b>${finalTrain.toFixed(3)}</b> · ` +
+        `<b style="color:${valColor()}">val</b> <b>${finalVal.toFixed(3)}</b> · ` +
+        `gap (val−train) <b>${gapStr}</b> · ` +
+        `best val <b>${r.bestVal.toFixed(3)}</b> at epoch <b>${r.bestEpoch}</b> (early-stopping marker, green line) · ` +
+        `baseline ln 2 = <b>0.693</b>` + shapeLine;
+    }
+
+    for (const ctrl of [nCtrl, lamCtrl, epCtrl, vfCtrl]) {
+      ctrl.onInput(() => { activeShape = null; highlight(null); draw(); });
+    }
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz22", [
+    {
+      q: "On the two-curve plot, the overfitting signature is:",
+      opts: [
+        "Train loss falls toward 0 while val loss stops falling and rises (shape 3)",
+        "Both curves stay high and flat from the start (shape 5)",
+        "Val loss sits consistently below train loss (shape 4)",
+        "Val loss bounces with no trend (shape 6)"
+      ],
+      a: 0,
+      why: "Shape 3: train → 0, val rises. The other three options are named misconceptions — shape 5 is a wiring bug, shape 4 is leakage, shape 6 is an under-sized val set, and none of them is \"overfitting.\""
+    },
+    {
+      q: "Val loss is consistently and substantially <em>lower</em> than train loss, run after run. What does this pattern indicate?",
+      opts: [
+        "Leakage, or a val set that's too small / too easy (shape 4)",
+        "Great generalization — the model works better on unseen data",
+        "Underfitting (shape 1)",
+        "The random-guess baseline was drawn wrong"
+      ],
+      a: 0,
+      why: "A model should never systematically do <em>better</em> on held-out data than on the data it trained on. When that happens, suspect the split first: duplicated rows, near-duplicate rows from the same source document, or a val set small/easy enough to be beaten by luck. \"Great generalization\" is the trap answer — read the shape, not the direction of one line."
+    },
+    {
+      q: "The random-init baseline line to draw on every loss plot, for Qwen3-8B, is:",
+      num: 11.93, tol: 0.05, unit: "nats",
+      why: "$\\ln V=\\ln(151{,}936)=11.93$ nats (constants.md, [VP]) — page 12's number, the $V$-way generalization of this page's own $\\ln 2=0.693$ baseline for the binary moons demo."
+    },
+    {
+      q: "For this learner — fine-tuning on a few hundred examples — the actual regularization toolkit that does the work is:",
+      opts: [
+        "Early stopping + fewer epochs + a low rank/LR",
+        "Heavy dropout (p ≈ 0.5) throughout the network",
+        "Training for many more epochs so the model has time to generalize",
+        "BatchNorm, tuned per layer"
+      ],
+      a: 0,
+      why: "Dropout is largely off in 2026 LLM fine-tuning; more epochs pushes shape 3 further past its peak (a named misconception above); BatchNorm isn't even in the running for a transformer fine-tune (page 20). The cheap, effective toolkit at this scale is early stopping, fewer epochs, and a low rank/LR."
+    },
+    {
+      q: "Catastrophic forgetting — the model getting worse at everything except the fine-tuning task — shows up on the task's own two-curve plot:",
+      opts: [
+        "No — it hides behind a healthy task curve; you must track a separate held-out general-data loss",
+        "Yes — val loss on the task will rise",
+        "Yes — train loss on the task will plateau",
+        "No — but only if weight decay is set to 0"
+      ],
+      a: 0,
+      why: "The task's train/val curves can be a textbook shape 2 (healthy) while the model degrades on everything it wasn't fine-tuned on — because that plot only ever measures the task. Detecting forgetting requires a second, separate curve over general data (developed on page 24)."
+    },
+    {
+      q: "For instruction fine-tuning data, the val split should be drawn by:",
+      opts: [
+        "Source document — rows from the same document leak information about each other",
+        "Randomly, by row — every row is an independent unit",
+        "Alphabetically, by the first token",
+        "By label only, ignoring the input text"
+      ],
+      a: 0,
+      why: "Two rows drawn from the same source document can share phrasing and facts even when the rows themselves are never duplicated verbatim — splitting by row lets that shared information leak across the boundary and inflates the val score without real generalization."
+    }
+  ], "Regularization — self-check");
+
+});
+</script>
+</body>
+</html>

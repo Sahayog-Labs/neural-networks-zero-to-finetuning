@@ -1,0 +1,572 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>39. Rank, SVD &amp; Low-Rank Approximation — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped. The rank-slider demo lays three heatmaps side by side on wide
+   screens and stacks them on a phone; the scree plot spans full width below. */
+.rk-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 10px 0 4px; }
+@media (max-width: 760px) { .rk-grid { grid-template-columns: 1fr; } }
+.rk-cap { font-family: var(--mono); font-size: .82em; color: var(--text-dim); margin-bottom: 2px; text-align: center; }
+.rk-cap b { color: var(--accent2); }
+#rk-ctrls { display: flex; flex-wrap: wrap; gap: 6px 26px; align-items: flex-end; }
+#rk-ctrls .ctrl { min-width: 240px; }
+.rk-pick { display: flex; flex-direction: column; gap: 4px; margin: 4px 0 8px; }
+.rk-pick label { color: var(--text-dim); font-size: .82em; }
+.rk-pick select { background: var(--bg-code, #14101f); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; font-family: var(--mono); font-size: .95em; }
+.rk-eq { font-family: var(--mono); font-size: .9em; color: var(--accent2); }
+@media (max-width: 900px) { .inner table { display: block; overflow-x: auto; white-space: nowrap; } }
+</style>
+</head>
+<body data-page="39-rank-and-svd.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part IV · Adaptation</span>
+    <h1>Rank, SVD &amp; Low-Rank Approximation</h1>
+    <p class="subtitle">The last page said you will <em>adapt</em> a base model, not rebuild it — because the base
+      is centuries of compute. This page is the one load-bearing fact underneath that whole plan: the <b>change</b>
+      a fine-tune makes to a weight matrix is <b>low-rank</b>. We build it from the dot product you already own — no
+      eigenvalues — and you verify it, live, on a photograph and on a real weight update.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product — the atom, assembling into matrices]</b> · <b>[THREAD:Qwen3-8B — the anchor]</b> ·
+      <b>[THREAD:memory-budget — the reality check]</b>. The dot product from page&nbsp;3 stacked into
+      <em>outer products</em>, and outer products stacked into a whole matrix — that is all an SVD is. The
+      <code>q_proj</code> you counted on page&nbsp;36 (4096&nbsp;×&nbsp;4096&nbsp;=&nbsp;16,777,216 numbers)
+      returns as the object we compress. And the storage count $r(d_{out}+d_{in})$ vs $d_{out}d_{in}$ is the seed of
+      the LoRA memory ledger on page&nbsp;40. Reopen page&nbsp;3 (the dot product) and page&nbsp;36 (the count).
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered by the live demo (image at r=8) AND by the
+         explicit resolution sentence directly under the demo. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      A real 256&times;256 grayscale photo is a matrix of <b>65,536</b> numbers. Suppose you keep only the
+      <b>8 most important "directions"</b> of that matrix and throw the other 248 away. Do you get
+      <b>(a)</b> unrecognizable noise, <b>(b)</b> a blurry-but-clearly-the-photo, or <b>(c)</b> a perfect copy?
+      Commit before you scroll — the demo lands right on your answer.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>What "rank" means, before any machinery</h2>
+    <p>A matrix is a machine that moves every point at once; its <b>rank</b> is how many <em>independent
+      directions</em> it can actually move things in — everything else it does is a combination of those. A
+      4096&times;4096 weight matrix <em>could</em> in principle stir space in 4096 independent directions. The
+      entire bet of this part of the course is that the matrices we care about — specifically the <em>updates</em> a
+      fine-tune makes — stir it in far fewer, and the rest is noise you can drop.</p>
+
+    <!-- ===================== FROM DOT PRODUCT TO RANK ===================== -->
+    <h2>From the dot product to rank</h2>
+    <p><b>[THREAD:dot-product]</b> Reopen the atom from page&nbsp;3. Take two column vectors
+      $\mathbf u\in\mathbb R^{d_{out}}$ and $\mathbf v\in\mathbb R^{d_{in}}$ and multiply them the "wrong" way
+      round — column times row — to get a matrix, the <b>outer product</b>:</p>
+
+    <p>$$\mathbf u\,\mathbf v^\top \;=\;
+        \begin{bmatrix} u_1 v_1 & u_1 v_2 & \cdots \\ u_2 v_1 & u_2 v_2 & \cdots \\ \vdots & & \ddots \end{bmatrix}
+        \qquad (d_{out}, d_{in}).$$</p>
+
+    <p>Every row of $\mathbf u\mathbf v^\top$ is the <em>same</em> row $\mathbf v^\top$, just scaled by a different
+      $u_i$; every column is $\mathbf u$ scaled by a different $v_j$. One direction in ($\mathbf v$), one direction
+      out ($\mathbf u$). That is a <b>rank-1</b> matrix — the smallest non-trivial machine there is. The
+      <b>rank</b> of any matrix is the fewest rank-1 pieces you must <em>add together</em> to rebuild it exactly.
+      Outer products are the atoms; a matrix is a sum of them. The only question worth asking is: <em>how few do you
+      actually need?</em></p>
+
+    <!-- ===================== NOTATION / TRANSLATION NOTE ===================== -->
+    <div class="box rule"><span class="box-title">🗺️ Notation note — three symbols to keep straight</span>
+      This is a trunk page, so $\sigma$ has no sigmoid duties here: <b>$\sigma_i$ (subscripted, no argument)
+      always means the $i$-th <em>singular value</em></b> — the stretch factor of the $i$-th direction, ordered
+      $\sigma_1\ge\sigma_2\ge\cdots\ge 0$. <b>$r$</b> is the <em>rank</em>, a count — the same $r$ that becomes
+      LoRA's rank one page from now. And the invariant holds everywhere: <b>$W$ is $(d_{out},d_{in})$</b>. Papers
+      write the factorization $A\Sigma B^\top$, $U S V'$, or "the SVD" — same object; we use $U\Sigma V^\top$.
+    </div>
+
+    <!-- ===================== THE SVD ===================== -->
+    <h2>The SVD: every matrix is a weighted sum of outer products</h2>
+    <p>The remarkable fact — true of <em>every</em> real matrix, no exceptions, no conditions — is that you can
+      always choose the rank-1 pieces to be <b>orthonormal</b> and order them by importance. That choice is the
+      <b>singular value decomposition</b>:</p>
+
+    <div class="box rule"><span class="box-title">📐 The singular value decomposition</span>
+      $$W \;=\; U\,\Sigma\,V^\top \;=\; \sum_{i=1}^{\min(d_{out},\,d_{in})} \sigma_i\,\mathbf u_i \mathbf v_i^\top,
+        \qquad \sigma_1\ge\sigma_2\ge\cdots\ge 0.$$
+      A sum of rank-1 outer products $\mathbf u_i\mathbf v_i^\top$, each weighted by how much the matrix stretches
+      that direction. The $\mathbf u_i$ are orthonormal, the $\mathbf v_i$ are orthonormal, and the $\sigma_i$ are
+      sorted largest-first — so the <em>front</em> of the sum carries the most of the matrix.
+    </div>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$W$</td><td>any real matrix — a weight, a photo, an update</td><td>$(d_{out}, d_{in})$</td><td>the thing we factor</td></tr>
+        <tr><td>$U$</td><td>orthonormal <em>output</em> directions (columns $\mathbf u_i$)</td><td>$(d_{out}, d_{out})$</td><td>the factorization</td></tr>
+        <tr><td>$\Sigma$</td><td>diagonal of singular values $\sigma_i\ge 0$, descending</td><td>$(d_{out}, d_{in})$</td><td>the factorization</td></tr>
+        <tr><td>$V^\top$</td><td>orthonormal <em>input</em> directions (rows $\mathbf v_i^\top$)</td><td>$(d_{in}, d_{in})$</td><td>the factorization</td></tr>
+        <tr><td>$\sigma_i$</td><td>how much the $i$-th direction is stretched</td><td>scalar</td><td>the $i$-th diagonal of $\Sigma$</td></tr>
+        <tr><td>$\mathbf u_i\mathbf v_i^\top$</td><td>the $i$-th rank-1 atom</td><td>$(d_{out}, d_{in})$</td><td>outer product, above</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>Shape check</b> (the ribbon that makes it legal):</p>
+    <div class="codeblock" data-lang="text">
+      <div class="codeblock-head"><span class="lang-tag">shape ribbon</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">W            (d_out, d_in)                         # (out, in) — ALWAYS</span>
+<span class="line">U            (d_out, d_out)     orthonormal columns</span>
+<span class="line">Sigma        (d_out, d_in)      diagonal, sigma_i >= 0 descending</span>
+<span class="line">V^T          (d_in,  d_in)      orthonormal rows</span>
+<span class="line">U @ Sigma @ V^T = (d_out,d_out)(d_out,d_in)(d_in,d_in) = (d_out, d_in)  ✓</span></code></pre>
+    </div>
+    <p>That every real matrix <em>has</em> such a decomposition is a theorem we will <em>use</em>, not prove here
+      (the proof, and the link to eigenvalues for readers who remember them, is in the deep dive below — nothing
+      later depends on it).</p>
+
+    <!-- ===================== RANK-R APPROXIMATION + STORAGE ===================== -->
+    <h2>Keep the first $r$ terms — the rank-$r$ approximation</h2>
+    <p>Because the sum is ordered, truncating it after $r$ terms keeps the most important part of the matrix and
+      throws the tail away:</p>
+
+    <p>$$W_r \;=\; \sum_{i=1}^{r}\sigma_i\,\mathbf u_i\mathbf v_i^\top,
+        \qquad \text{stored numbers} \;=\; r\,(d_{out}+d_{in}+1)\;\;\text{vs.}\;\; d_{out}\,d_{in}.$$</p>
+
+    <p>The $+1$ is the one singular value $\sigma_i$ you keep per term; the $d_{out}$ and $d_{in}$ are the columns of
+      $U$ and rows of $V^\top$ you keep. Whether that is a bargain depends entirely on how fast the $\sigma_i$ fall.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked — the storage count on a 256&times;256 photo</span>
+      A 256&times;256 grayscale image is $256\times 256 = \mathbf{65{,}536}$ numbers. Keep the top directions:
+      <ul style="margin:6px 0 4px 0">
+        <li>$r=8:\;\; 8\,(256+256+1) = 8\times 513 = \mathbf{4{,}104}$ numbers $= \mathbf{6.3\%}$ of 65,536 —
+          and, as the demo is about to show you, <em>recognizable</em>.</li>
+        <li>$r=16:\;\; 16\times 513 = \mathbf{8{,}208}$ numbers $= \mathbf{12.5\%}$.</li>
+        <li>$r=32:\;\; 32\times 513 = \mathbf{16{,}416}$ numbers $= \mathbf{25.0\%}$, with a relative error around
+          $3\%$ — <em>hard to tell from the original</em>.</li>
+      </ul>
+      And $W_r$ is not just <em>a</em> good rank-$r$ approximation — by the <b>Eckart&ndash;Young theorem</b> it is
+      the <em>best</em> one in Frobenius norm. There is no cleverer way to spend $r$ directions. (Proof in the deep
+      dive.)
+    </div>
+
+    <!-- ===================== SCREE + PUNCHLINE ===================== -->
+    <h2>The scree plot, and the punchline</h2>
+    <p>Plot the singular values $\sigma_1,\sigma_2,\dots$ in order, log scale, and you get a <b>scree plot</b> — the
+      matrix's "how concentrated am I?" fingerprint. If it <b>falls off a cliff</b>, a handful of directions carry
+      nearly all the matrix and a low-rank approximation is almost free. If it <b>decays slowly</b>, the information
+      is spread everywhere and truncating destroys it.</p>
+
+    <div class="box key"><span class="box-title">🔑 Key idea</span>
+      Real matrices are often <em>approximately</em> low-rank: their information is not spread evenly across all
+      65,536 numbers — it concentrates in a few dozen directions. That concentration is the entire LoRA hypothesis,
+      and you are about to verify it on a photograph. <b>But</b> — and this is the whole game — the claim that
+      matters is about $\Delta W$, the <em>change</em> a fine-tune makes, <b>not</b> about $W_0$, the pretrained
+      weight itself. Those two matrices have opposite scree plots.
+    </div>
+
+    <!-- ===================== THE DEMO ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      Drag the rank slider and watch $W_r$ rebuild itself from the top directions down. Then — the reason this demo
+      exists — flip the dropdown between a <b>photo</b>, a <b>pretrained weight $W_0$</b>, and a <b>fine-tune update
+      $\Delta W$</b>, and watch their scree plots. Two of them decay slowly; one falls off a cliff. That single
+      difference is why LoRA works.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">The rank slider · live SVD on a 64&times;64 tile <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="rk-pick">
+          <label for="rk-select">Matrix under the knife</label>
+          <select id="rk-select">
+            <option value="image">Photo — a face (a real image is approximately low-rank)</option>
+            <option value="gauss">Gaussian noise (no structure — nearly full rank)</option>
+            <option value="w0">Pretrained weight W&#8320; (slow decay — nearly full rank)</option>
+            <option value="dw">Fine-tune update &Delta;W (falls off a cliff — low rank)</option>
+          </select>
+        </div>
+        <div class="controls" id="rk-ctrls"></div>
+        <div class="rk-grid">
+          <div><div class="rk-cap"><b>W</b> — original</div><canvas id="rk-orig" height="200"></canvas></div>
+          <div><div class="rk-cap"><b>W<sub>r</sub></b> — rank-<i>r</i> rebuild</div><canvas id="rk-recon" height="200"></canvas></div>
+          <div><div class="rk-cap">4&middot;|W &minus; W<sub>r</sub>| — residual &times;4</div><canvas id="rk-resid" height="200"></canvas></div>
+        </div>
+        <canvas id="rk-scree" height="240"></canvas>
+        <div class="readout" id="rk-out"></div>
+      </div>
+    </div>
+
+    <p><b>Resolving the prediction:</b> the answer is <b>(b)</b>. Set the dropdown to <em>Photo</em> and the slider
+      to $r=8$: you get a blurry but unmistakable face from just 8 of 64 directions. A photograph is approximately
+      low-rank because neighbouring pixels are correlated — that redundancy is exactly what the top few singular
+      directions capture. Now flip to <em>Pretrained weight $W_0$</em> at the same $r=8$: it is <em>wrecked</em>,
+      because $W_0$'s scree decays slowly. Flip to <em>Fine-tune update $\Delta W$</em>: $r=8$ nails it. Same
+      slider, three completely different verdicts — read off the scree plots.</p>
+
+    <!-- ===================== THE MISCONCEPTION ===================== -->
+    <div class="box warn"><span class="box-title">⚠️ The misconception: "the pretrained model is low-rank"</span>
+      <b>False</b> — and getting this backwards is the single most common LoRA misunderstanding. A real slice of a
+      pretrained weight (the demo's $W_0$, matching what you measure on a Qwen3 <code>q_proj</code>) is
+      <em>nearly full rank</em>: its scree plot decays slowly, and replacing it with a rank-16 approximation
+      <em>destroys the model</em> (that is quiz&nbsp;Q5). What is low-rank is $\Delta W$, the <em>update</em> a
+      fine-tune adds on top: its singular values fall off a cliff. LoRA never approximates $W_0$. It only ever
+      stores $\Delta W$ cheaply. You just watched both scree plots — this is not an assertion, it is something you
+      can see.
+    </div>
+
+    <!-- ===================== DEEP DIVE ===================== -->
+    <details class="deepdive"><summary>🔬 Deep dive: why every real matrix has an SVD, and why $W_r$ is optimal</summary><div>
+      <p><b>Existence.</b> $W^\top W$ is symmetric and positive-semidefinite, so it has an orthonormal eigenbasis
+        $\mathbf v_1,\dots,\mathbf v_{d_{in}}$ with eigenvalues $\lambda_i\ge 0$. Define $\sigma_i=\sqrt{\lambda_i}$
+        and, for $\sigma_i>0$, $\mathbf u_i = W\mathbf v_i/\sigma_i$. A short check shows the $\mathbf u_i$ are
+        orthonormal and $W = \sum_i \sigma_i\mathbf u_i\mathbf v_i^\top$. So <b>the singular values squared are the
+        eigenvalues of $W^\top W$</b> — the bridge to eigen-anything, offered as a translation, not required
+        (nothing on this page or later needs you to think in eigenvalues).</p>
+      <p><b>Optimality (Eckart&ndash;Young).</b> Among all matrices of rank $\le r$, the truncated SVD $W_r$
+        minimizes $\lVert W - B\rVert_F$, and the minimum equals
+        $\bigl(\sum_{i>r}\sigma_i^2\bigr)^{1/2}$. Intuition: the squared Frobenius norm splits cleanly across the
+        orthonormal directions as $\lVert W\rVert_F^2=\sum_i\sigma_i^2$, so the cheapest way to lose the least
+        "energy" is to drop the <em>smallest</em> $\sigma_i$ — which is exactly what truncation does. The live
+        demo's relative error and its energy-tail formula agree to the digit for this reason.</p>
+    </div></details>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <div class="box try"><span class="box-title">Try it · <code>code/svd_rank_probe.py</code></span>
+      Confirm the whole page on the <em>full</em> 4096&times;4096 matrices, not a 64&times;64 toy. Load a real Qwen3
+      <code>q_proj</code> and a saved $\Delta W$ from an actual fine-tune, run <code>torch.linalg.svd</code> on
+      both, plot the two scree curves, and print the rank each needs to reach 90% of its energy. You will watch
+      $W_0$ need <em>hundreds</em> of directions and $\Delta W$ need a <em>couple dozen</em> — the LoRA hypothesis,
+      measured on your box.
+    </div>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/svd_rank_probe.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line"><span class="tok-kw">from</span> safetensors.torch <span class="tok-kw">import</span> load_file</span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">def</span> <span class="tok-fn">energy_rank</span>(W, frac=<span class="tok-num">0.90</span>):</span>
+<span class="line">    <span class="tok-com"># rank needed to retain `frac` of the squared-Frobenius energy</span></span>
+<span class="line">    s = torch.linalg.<span class="tok-fn">svdvals</span>(W.<span class="tok-fn">float</span>())      <span class="tok-com"># singular values, descending</span></span>
+<span class="line">    e = torch.<span class="tok-fn">cumsum</span>(s**<span class="tok-num">2</span>, <span class="tok-num">0</span>) / torch.<span class="tok-fn">sum</span>(s**<span class="tok-num">2</span>)</span>
+<span class="line">    <span class="tok-kw">return</span> <span class="tok-fn">int</span>((e &lt; frac).<span class="tok-fn">sum</span>()) + <span class="tok-num">1</span>, s</span>
+<span class="line"></span>
+<span class="line"><span class="tok-com"># a frozen pretrained weight, and an update from a real fine-tune</span></span>
+<span class="line">W0 = <span class="tok-fn">load_file</span>(<span class="tok-str">"Qwen3-8B/model-00001-of-00005.safetensors"</span>)[<span class="tok-str">"model.layers.0.self_attn.q_proj.weight"</span>]</span>
+<span class="line">dW = torch.<span class="tok-fn">load</span>(<span class="tok-str">"delta_q_proj.pt"</span>)         <span class="tok-com"># merged_adapter_weight - W0, same shape</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-kw">assert</span> W0.shape == (<span class="tok-num">4096</span>, <span class="tok-num">4096</span>), W0.shape   <span class="tok-com"># the real thing, not a toy</span></span>
+<span class="line">r0, s0 = <span class="tok-fn">energy_rank</span>(W0)</span>
+<span class="line">rd, sd = <span class="tok-fn">energy_rank</span>(dW)</span>
+<span class="line"></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"W0  90%-energy rank: {r0:4d} / 4096   (nearly full rank)"</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"dW  90%-energy rank: {rd:4d} / 4096   (falls off a cliff)"</span>)</span>
+<span class="line"><span class="tok-kw">assert</span> rd &lt; r0 // <span class="tok-num">4</span>, <span class="tok-str">"the update should be far lower-rank than the weight"</span></span></code></pre>
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz-svd"></div>
+
+    <!-- ===================== HAND-OFF ===================== -->
+    <p style="margin-top:26px">So: an SVD is a matrix written as a sum of rank-1 outer products, ordered by
+      importance; a low-rank approximation keeps the front of that sum; a scree plot tells you how few terms you
+      need; and — the fact the whole course's destination rests on — the <em>update</em> $\Delta W$ is low-rank even
+      though the weight $W_0$ is not. <b>Next page (p.40): LoRA.</b> Instead of <em>computing</em> the rank-$r$
+      approximation of an update you would have to know in advance, LoRA <em>trains</em> two skinny matrices
+      $B$ and $A$ whose product $BA$ <em>is</em> that low-rank update — and the storage count you just met,
+      $r(d_{out}+d_{in})$ vs $d_{out}d_{in}$, becomes a 128&times; reduction on Qwen3's <code>q_proj</code>.</p>
+
+  </div></main>
+</div>
+
+<!-- ===== SCRIPTS: exact order. course.js → course-map.js → nn.js → viz.js → page ===== -->
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ================= a tiny, seeded, self-contained numerics kit ================= */
+  // Everything below computes real SVD math live — nothing is precomputed. The
+  // input tiles are synthesized so their *spectra* match the real objects (a
+  // photo, a pretrained weight, a fine-tune update); the math the demo runs on
+  // them — a one-sided Jacobi SVD, reconstruction, and Frobenius error — is real.
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function () {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function gaussFactory(rng) {
+    return function () {
+      let u = 0, v = 0;
+      while (u === 0) u = rng(); while (v === 0) v = rng();
+      return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    };
+  }
+  // Modified Gram-Schmidt: n orthonormal columns (as Float64Array[n]).
+  function orthonormalBasis(n, gauss) {
+    const cols = [];
+    for (let j = 0; j < n; j++) {
+      const v = new Float64Array(n);
+      for (let i = 0; i < n; i++) v[i] = gauss();
+      for (let k = 0; k < j; k++) {
+        let d = 0; const ck = cols[k];
+        for (let i = 0; i < n; i++) d += v[i] * ck[i];
+        for (let i = 0; i < n; i++) v[i] -= d * ck[i];
+      }
+      let nr = 0; for (let i = 0; i < n; i++) nr += v[i] * v[i]; nr = Math.sqrt(nr) || 1;
+      for (let i = 0; i < n; i++) v[i] /= nr;
+      cols.push(v);
+    }
+    return cols;
+  }
+  // Build an n×n matrix (rows) with prescribed singular values and random U,V.
+  function matrixFromSpectrum(n, sigmas, gauss) {
+    const U = orthonormalBasis(n, gauss), V = orthonormalBasis(n, gauss);
+    const W = []; for (let i = 0; i < n; i++) W.push(new Float64Array(n));
+    for (let k = 0; k < n; k++) {
+      const sk = sigmas[k], uk = U[k], vk = V[k];
+      if (sk === 0) continue;
+      for (let i = 0; i < n; i++) { const su = sk * uk[i]; const Wi = W[i]; for (let j = 0; j < n; j++) Wi[j] += su * vk[j]; }
+    }
+    return W;
+  }
+
+  /* one-sided Jacobi SVD of an m×n matrix (rows). Returns U cols, S (desc), V cols. */
+  function jacobiSVD(Ain) {
+    const m = Ain.length, n = Ain[0].length;
+    const U = []; for (let j = 0; j < n; j++) { const c = new Float64Array(m); for (let i = 0; i < m; i++) c[i] = Ain[i][j]; U.push(c); }
+    const V = []; for (let j = 0; j < n; j++) { const c = new Float64Array(n); c[j] = 1; V.push(c); }
+    const eps = 1e-13;
+    for (let sweep = 0; sweep < 80; sweep++) {
+      let off = 0;
+      for (let p = 0; p < n - 1; p++) for (let q = p + 1; q < n; q++) {
+        let a = 0, b = 0, g = 0; const Up = U[p], Uq = U[q];
+        for (let i = 0; i < m; i++) { a += Up[i] * Up[i]; b += Uq[i] * Uq[i]; g += Up[i] * Uq[i]; }
+        if (g === 0 || Math.abs(g) <= eps * Math.sqrt(a * b)) continue;
+        off += Math.abs(g);
+        const zeta = (b - a) / (2 * g);
+        const t = Math.sign(zeta) / (Math.abs(zeta) + Math.sqrt(1 + zeta * zeta));
+        const c = 1 / Math.sqrt(1 + t * t), s = c * t;
+        const Vp = V[p], Vq = V[q];
+        for (let i = 0; i < m; i++) { const x = Up[i], y = Uq[i]; Up[i] = c * x - s * y; Uq[i] = s * x + c * y; }
+        for (let i = 0; i < n; i++) { const x = Vp[i], y = Vq[i]; Vp[i] = c * x - s * y; Vq[i] = s * x + c * y; }
+      }
+      if (off < 1e-14) break;
+    }
+    const sv = [];
+    for (let j = 0; j < n; j++) { let nr = 0; const c = U[j]; for (let i = 0; i < m; i++) nr += c[i] * c[i]; sv.push({ s: Math.sqrt(nr), j }); }
+    sv.sort((x, y) => y.s - x.s);
+    const S = new Float64Array(n), Uc = [], Vc = [];
+    for (let k = 0; k < n; k++) {
+      const idx = sv[k].j; S[k] = sv[k].s;
+      const src = U[idx], u = new Float64Array(m), sn = S[k] > 1e-300 ? S[k] : 1;
+      for (let i = 0; i < m; i++) u[i] = src[i] / sn;
+      Uc.push(u); Vc.push(V[idx]);
+    }
+    return { U: Uc, S, V: Vc, m, n };
+  }
+  function reconstruct(svd, r) {
+    const { U, S, V, m, n } = svd; const W = [];
+    for (let i = 0; i < m; i++) W.push(new Float64Array(n));
+    for (let k = 0; k < r; k++) {
+      const sk = S[k], uk = U[k], vk = V[k];
+      for (let i = 0; i < m; i++) { const su = sk * uk[i]; const Wi = W[i]; for (let j = 0; j < n; j++) Wi[j] += su * vk[j]; }
+    }
+    return W;
+  }
+
+  /* ================= the four 64×64 tiles ================= */
+  const N = 64;
+  // (1) a recognizable face, values in [0,1] — approximately low-rank, with a
+  //     little texture so r=8 is blurry-but-recognizable rather than perfect.
+  function makeFace() {
+    const rng = mulberry32(2024), gauss = gaussFactory(rng);
+    const W = []; for (let i = 0; i < N; i++) W.push(new Float64Array(N));
+    const cx = 31.5, cy = 33;
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) {
+      let v = 0.18 + 0.10 * (1 - i / N);                    // soft background gradient
+      const dx = (j - cx) / 20, dy = (i - cy) / 25;
+      const head = Math.exp(-(dx * dx + dy * dy) * 1.8);    // face oval, bright
+      v += 0.55 * head;
+      // eyes (two dark disks)
+      for (const ex of [-9, 9]) { const ddx = (j - (cx + ex)) / 3.2, ddy = (i - 27) / 3.2; v -= 0.45 * Math.exp(-(ddx * ddx + ddy * ddy)); }
+      // nose
+      { const ddx = (j - cx) / 2.2, ddy = (i - 34) / 4.5; v -= 0.14 * Math.exp(-(ddx * ddx + ddy * ddy)); }
+      // mouth (dark horizontal band)
+      { const ddx = (j - cx) / 8, ddy = (i - 43) / 2.0; v -= 0.32 * Math.exp(-(ddx * ddx + ddy * ddy)); }
+      // hair band across the top
+      { const ddy = (i - 16) / 4.0; v += 0.20 * Math.exp(-ddy * ddy) * (Math.abs(j - cx) < 22 ? 1 : 0); }
+      v += 0.03 * gauss();                                  // fine texture -> raises rank a bit
+      W[i][j] = Math.max(0, Math.min(1, v));
+    }
+    return W;
+  }
+  // (2) pure Gaussian noise — nearly full rank, slow scree.
+  function makeGauss() {
+    const rng = mulberry32(77), gauss = gaussFactory(rng);
+    const W = []; for (let i = 0; i < N; i++) { W.push(new Float64Array(N)); for (let j = 0; j < N; j++) W[i][j] = gauss(); }
+    return W;
+  }
+  // (3) pretrained-weight-like W0 — slow, heavy-tailed spectrum (nearly full rank).
+  function makeW0() {
+    const rng = mulberry32(4096), gauss = gaussFactory(rng);
+    const sig = []; for (let k = 0; k < N; k++) sig.push(1 / (1 + 0.14 * k));   // 1.0 -> 0.10, slow
+    return matrixFromSpectrum(N, sig, gauss);
+  }
+  // (4) fine-tune update ΔW — a few strong directions, then a cliff (low rank).
+  function makeDeltaW() {
+    const rng = mulberry32(1337), gauss = gaussFactory(rng);
+    const sig = []; for (let k = 0; k < N; k++) sig.push(k < 8 ? 6 * Math.pow(0.55, k) : 0.01);
+    return matrixFromSpectrum(N, sig, gauss);
+  }
+
+  const TILES = {
+    image: { W: makeFace(), kind: "image", name: "photo (a face)" },
+    gauss: { W: makeGauss(), kind: "weight", name: "Gaussian noise" },
+    w0:    { W: makeW0(), kind: "weight", name: "pretrained weight W₀" },
+    dw:    { W: makeDeltaW(), kind: "weight", name: "fine-tune update ΔW" },
+  };
+  for (const key of Object.keys(TILES)) TILES[key].svd = jacobiSVD(TILES[key].W);
+
+  /* ================= wire the demo ================= */
+  const sel = document.getElementById("rk-select");
+  const rank = makeCtrl(document.getElementById("rk-ctrls"),
+    { label: "rank r (directions kept)", min: 1, max: N, step: 1, value: 8, fmt: v => v.toFixed(0) });
+  const out = document.getElementById("rk-out");
+  const origC = document.getElementById("rk-orig"), reconC = document.getElementById("rk-recon"),
+        residC = document.getElementById("rk-resid"), screeC = document.getElementById("rk-scree");
+
+  let hmO = null, hmR = null, hmE = null;
+  let cur = null; // {W, svd, kind, absMax, fro}
+
+  function froNorm(W) { let s = 0; for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) s += W[i][j] * W[i][j]; return Math.sqrt(s); }
+
+  function rebuildHeatmaps(key) {
+    const tile = TILES[key];
+    cur = { W: tile.W, svd: tile.svd, kind: tile.kind };
+    // shared color scale from the original so recon is directly comparable
+    let mx = 0; for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) mx = Math.max(mx, Math.abs(tile.W[i][j]));
+    cur.absMax = mx || 1; cur.fro = froNorm(tile.W);
+    if (hmO) { hmO.destroy(); hmR.destroy(); hmE.destroy(); }
+    const isImg = tile.kind === "image";
+    const cmap = isImg ? "sequential" : "diverging";
+    const dom = isImg ? [0, 1] : [-cur.absMax, cur.absMax];
+    const optsBase = { rowLabels: null, colLabels: null, cellText: false, colorbar: false, hover: true, height: 200 };
+    hmO = new Heatmap(origC, Object.assign({ data: tile.W, colormap: cmap, domain: dom }, optsBase));
+    hmR = new Heatmap(reconC, Object.assign({ data: tile.W, colormap: cmap, domain: dom }, optsBase));
+    // residual always diverging, at 4× gain (quarter-domain), so small errors show
+    hmE = new Heatmap(residC, Object.assign({ data: tile.W, colormap: "diverging", domain: [-cur.absMax / 4, cur.absMax / 4] }, optsBase));
+  }
+
+  function drawScree(r) {
+    const S = cur.svd.S;
+    const floor = Math.max(S[0] * 1e-4, 1e-9);
+    const p = new Plot(screeC, { xmin: 0.5, xmax: N + 0.5, ymin: floor, ymax: S[0] * 1.4, ylog: true, xlabel: "singular-value index  i", ylabel: "σᵢ  (log)" });
+    p.clear(); p.grid();
+    const dim = cssVar("--text-dim", "#9a90b5"), acc = cssVar("--accent", "#b48cff"), good = cssVar("--good", "#5ce6a0");
+    // full scree (dim)
+    const xs = [], ys = []; for (let k = 0; k < N; k++) { xs.push(k + 1); ys.push(Math.max(S[k], floor)); }
+    p.trace(xs, ys, dim, 1.5);
+    // retained portion i<=r (accent, thick)
+    const xr = [], yr = []; for (let k = 0; k < r; k++) { xr.push(k + 1); yr.push(Math.max(S[k], floor)); }
+    p.trace(xr, yr, acc, 3);
+    p.vline(r + 0.5, good, [5, 4]);
+    p.label(Math.min(r + 1.5, N - 6), S[0], "keep ≤ " + r, good);
+  }
+
+  function update() {
+    const r = rank.get();
+    const Wr = reconstruct(cur.svd, r);
+    hmR.setData(Wr);
+    const resid = []; for (let i = 0; i < N; i++) { resid.push(new Float64Array(N)); for (let j = 0; j < N; j++) resid[i][j] = cur.W[i][j] - Wr[i][j]; }
+    hmE.setData(resid);
+    drawScree(r);
+    // exact live readouts
+    const S = cur.svd.S;
+    let tot = 0, tail = 0; for (let k = 0; k < N; k++) { tot += S[k] * S[k]; if (k >= r) tail += S[k] * S[k]; }
+    const relErr = Math.sqrt(tail / tot);
+    const energyKept = 1 - tail / tot;
+    const stored = r * (N + N + 1), full = N * N;
+    out.innerHTML =
+      `<div class="rk-eq">W<sub>r</sub> = &Sigma;<sub>i&le;${r}</sub> σ<sub>i</sub> u<sub>i</sub> v<sub>i</sub><sup>&#8868;</sup> &nbsp;&mdash;&nbsp; keeping <b>${r}</b> of ${N} directions</div>` +
+      `stored numbers <b>${stored.toLocaleString()}</b> = r(64+64+1) vs full <b>${full.toLocaleString()}</b> ` +
+      `(<b>${(100 * stored / full).toFixed(1)}%</b>) &middot; energy kept <b>${(100 * energyKept).toFixed(2)}%</b> ` +
+      `&middot; relative Frobenius error <b>${(100 * relErr).toFixed(2)}%</b>`;
+  }
+
+  function reload(key) { rebuildHeatmaps(key); update(); }
+
+  sel.addEventListener("change", () => reload(sel.value));
+  rank.onInput(update);
+  document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => {
+    if (hmO) { hmO.draw(); hmR.draw(); hmE.draw(); }
+    update();
+  }, 0));
+  reload("image");
+
+  /* ================= quiz ================= */
+  renderQuiz("quiz-svd", [
+    {
+      q: "A 256&times;256 matrix is stored as a rank-16 SVD approximation. How many numbers does that take? (each retained direction costs one column of $U$, one row of $V^\\top$, and one $\\sigma_i$)",
+      num: 8208, tol: 20,
+      why: "$16\\,(256+256+1) = 16\\times 513 = 8{,}208$ numbers &mdash; about 12.5% of the original 65,536."
+    },
+    {
+      q: "True or false: the pretrained weight $W_0$ is low-rank, and that is why LoRA works.",
+      opts: [
+        "True &mdash; LoRA approximates $W_0$ with a low rank",
+        "False &mdash; $W_0$ is nearly full rank; it is the update $\\Delta W$ that is low-rank"
+      ],
+      a: 1,
+      why: "The misconception is exactly backwards. $W_0$'s scree decays slowly (rank-16 of it destroys the model). LoRA never touches $W_0$; it stores the low-rank $\\Delta W$."
+    },
+    {
+      q: "A scree plot that <b>falls off a cliff</b> after a handful of singular values tells you the matrix is&hellip;",
+      opts: [
+        "the zero matrix",
+        "full rank &mdash; every direction matters equally",
+        "well approximated by a low rank &mdash; almost all its energy is in a few directions",
+        "numerically broken; the SVD failed to converge"
+      ],
+      a: 2,
+      why: "A cliff means the tail singular values are tiny, so $\\sum_{i>r}\\sigma_i^2$ is negligible &mdash; the rank-$r$ truncation loses almost no energy. Slow decay (no cliff) is the full-rank case."
+    },
+    {
+      q: "Singular values $\\sigma = [10,\\,8,\\,1,\\,0.2,\\,0.05]$. You keep rank 2. What fraction of the squared-Frobenius energy is retained?",
+      num: 0.9937, tol: 0.005,
+      why: "Energy is $\\sum\\sigma_i^2$. Kept $=100+64=164$; total $=100+64+1+0.04+0.0025=165.0425$; ratio $=0.9937$."
+    },
+    {
+      q: "You replaced a model's <code>q_proj</code> with its own rank-16 SVD approximation and the model broke. Why?",
+      opts: [
+        "SVD is lossy, so any truncation corrupts the weights",
+        "$W_0$ is nearly full rank &mdash; a rank-16 truncation threw away real capacity the model was using",
+        "rank 16 is too high; a rank-4 truncation would have preserved the model",
+        "you should have truncated $V^\\top$ but not $U$"
+      ],
+      a: 1,
+      why: "$W_0$'s energy is spread across hundreds of directions, so keeping 16 discards most of it. Truncating $W_0$ is the mistake; truncating $\\Delta W$ (the update) is LoRA and is safe."
+    },
+    {
+      q: "In one sentence: which object does LoRA actually claim is low-rank &mdash; the weight or the update?",
+      opts: [
+        "the pretrained weight $W_0$",
+        "the update $\\Delta W$ that fine-tuning adds",
+        "both equally",
+        "neither &mdash; LoRA makes no rank claim"
+      ],
+      a: 1,
+      why: "The whole page in one line: $\\Delta W$ is low-rank, $W_0$ is not. That is the hypothesis page 40 turns into two trainable matrices."
+    }
+  ], "Rank &amp; SVD self-check");
+
+});
+</script>
+</body>
+</html>

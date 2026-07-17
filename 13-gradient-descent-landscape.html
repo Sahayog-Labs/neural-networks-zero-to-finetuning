@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>13. Downhill: Gradient Descent &amp; the Loss Landscape — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the demo pairs a contour map with a loss curve. On wide screens
+   they sit side by side; on a phone they stack. The math-bearing ledgers can be
+   wider than a phone — let each scroll inside its own box so the page body
+   never scrolls horizontally. Desktop is untouched. */
+.gd-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 760px) {
+  .gd-grid { grid-template-columns: 1fr; }
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="13-gradient-descent-landscape.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Downhill: Gradient Descent and the Loss Landscape</h1>
+    <p class="subtitle">Page 12 built the loss — a single number that is small when the model is right. This page
+      turns that number into a <em>landscape</em> over parameter space, and gives you the one rule the whole course
+      runs on: step downhill, a little, over and over. Then we find the exact learning rate at which "a little"
+      becomes "too much," and watch a network fly apart.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:CHAIN — the verb, beat 3]</b>. The rule below consumes a gradient $\mathbf g_k$. <em>What is new
+      here:</em> we take that gradient as given and ask what to <em>do</em> with it. <em>Reopen:</em> the derivative
+      as "steepest slope" from page&nbsp;5 — and note that page&nbsp;14 will assemble $\mathbf g_k$ itself, by hand,
+      with the chain rule. This page is the "descend"; page&nbsp;14 is the "how the direction is computed."
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in the "does it point at the minimum?" prose
+         immediately below the update rule, in the zigzag misconception box, and
+         landed visibly by the demo (the trajectory crosses the valley, not along it). -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Picture a long, narrow valley — steep walls, a gently sloping floor running its length. Drop a marble anywhere
+      on a wall. The gradient at that point points <em>downhill</em>. Before you scroll: does "downhill" point
+      <b>toward the bottom of the valley</b> (along the floor, to the minimum), or somewhere else? Sketch the arrow.
+    </div>
+
+    <!-- ===================== INTUITION ===================== -->
+    <h2>The loss is a landscape</h2>
+    <p>Fix a dataset. Every setting of the parameters $\theta$ produces one loss value $\mathcal L(\theta)$. Sweep
+      $\theta$ over all its possibilities and you trace out a surface: a height $\mathcal L$ above every point in
+      parameter space. Training is a marble on that surface, and the only move it knows is <b>roll downhill</b>.
+      For a real network the space has millions of axes; we will draw it with two, because the geometry that matters
+      — which way is down, how far to step — is already visible in two.</p>
+
+    <p>"Downhill" has a precise meaning. At a point $\theta$, the gradient $\nabla_\theta\mathcal L$ is the vector of
+      partial slopes; it points in the direction of steepest <em>increase</em>. So the steepest <em>decrease</em> is
+      the exact opposite, $-\nabla_\theta\mathcal L$. That single fact is the entire algorithm.</p>
+
+    <!-- ===================== UPDATE RULE ===================== -->
+    <h2>The update rule</h2>
+    <div class="box rule"><span class="box-title">📐 Gradient descent</span>
+      $$\theta_{k+1} \;=\; \theta_k \;-\; \eta\,\mathbf g_k, \qquad \mathbf g_k = \nabla_\theta\mathcal L(\theta_k)$$
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>Shape / range</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\theta_k$</td><td>all parameters at optimizer step $k$</td><td>$(P,)$</td><td>current state</td></tr>
+          <tr><td>$k$</td><td><b>the optimizer step</b> — a counter, $0,1,2,\dots$</td><td>scalar</td><td>index, not time</td></tr>
+          <tr><td>$\mathbf g_k$</td><td>the gradient of the loss at $\theta_k$</td><td>$(P,)$ — same shape as $\theta$</td><td>backprop (page 14)</td></tr>
+          <tr><td>$\eta$</td><td><b>the learning rate</b> — how far along $-\mathbf g_k$ to step</td><td>scalar, $[10^{-6},10^{-1}]$</td><td>you choose it</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">Read it left to right: take the gradient, flip its sign, scale it by $\eta$, add it
+        to where you are. Repeat. Every optimizer in Part II — momentum, Adam, AdamW — is a refinement of this one
+        line, and none of them changes its shape.</p>
+    </div>
+
+    <div class="box warn"><span class="box-title">🔤 Translation note (notation §3.2)</span>
+      Optimisation papers write this step index as $t$: $\theta_{t+1} = \theta_t - \eta\nabla\mathcal L(\theta_t)$.
+      <b>This course reserves $t$ for the diffusion timestep</b> (you will meet it in Part VI), so <b>our step index
+      is $k$</b>. When you read a paper, mentally map its $t$ to our $k$. A bonus falls out of this: because $k$
+      counts <em>optimizer steps</em>, "schedule by step, not by epoch" (page&nbsp;21) becomes something the symbols
+      themselves enforce.
+    </div>
+
+    <!-- ===================== STEEPEST DESCENT ===================== -->
+    <h2>Why $-\nabla\mathcal L$ is the steepest way down</h2>
+    <p>Take one small step $\mathbf u$ from $\theta$. A first-order Taylor expansion says the loss changes by</p>
+    <p>$$\mathcal L(\theta + \mathbf u) \;\approx\; \mathcal L(\theta) \;+\; \mathbf g^\top\mathbf u.$$</p>
+    <p>Among all steps $\mathbf u$ of a fixed length, which one makes $\mathbf g^\top\mathbf u$ as <em>negative</em>
+      as possible — i.e. drops the loss most? The dot product $\mathbf g^\top\mathbf u = \lVert\mathbf g\rVert\,
+      \lVert\mathbf u\rVert\cos\vartheta$ is smallest when $\cos\vartheta = -1$, that is, when $\mathbf u$ points
+      exactly <b>opposite</b> to $\mathbf g$. So the best direction is $-\mathbf g/\lVert\mathbf g\rVert$, and the
+      update rule steps that way. <b>[THREAD:CHAIN]</b> — this is the same dot-product-as-alignment fact from
+      page&nbsp;3, now choosing a search direction.</p>
+
+    <details class="deepdive"><summary>🔬 Deep dive: the Cauchy–Schwarz proof that $-\mathbf g/\lVert\mathbf g\rVert$ is the fastest-descending unit step</summary><div>
+      <p>We want the unit vector $\mathbf u$ ($\lVert\mathbf u\rVert = 1$) that minimises the first-order change
+        $\mathbf g^\top\mathbf u$. The Cauchy–Schwarz inequality bounds any dot product:</p>
+      <p>$$\lvert\mathbf g^\top\mathbf u\rvert \;\le\; \lVert\mathbf g\rVert\,\lVert\mathbf u\rVert \;=\; \lVert\mathbf g\rVert,$$</p>
+      <p>so $\mathbf g^\top\mathbf u$ lives in $[-\lVert\mathbf g\rVert,\, +\lVert\mathbf g\rVert]$. The lower end,
+        $-\lVert\mathbf g\rVert$, is reached exactly when $\mathbf u$ is antiparallel to $\mathbf g$, i.e.
+        $\mathbf u^\star = -\mathbf g/\lVert\mathbf g\rVert$. No other unit step lowers the loss as fast — that is
+        what "steepest descent" means, made precise.</p>
+      <table class="ledger">
+        <thead><tr><th>Symbol</th><th>Is</th><th>From</th></tr></thead>
+        <tbody>
+          <tr><td>$\mathbf g$</td><td>the gradient $\nabla_\theta\mathcal L$ at the current point</td><td>backprop</td></tr>
+          <tr><td>$\mathbf u$</td><td>a candidate step direction, constrained to unit length</td><td>what we optimise over</td></tr>
+          <tr><td>$\vartheta$</td><td>the geometric angle between $\mathbf g$ and $\mathbf u$</td><td>$\cos\vartheta = \mathbf g^\top\mathbf u/(\lVert\mathbf g\rVert\lVert\mathbf u\rVert)$</td></tr>
+          <tr><td>$\mathbf u^\star$</td><td>the minimiser — the steepest-descent direction</td><td>the result</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.4em 0 0"><em>Note $\vartheta$, not $\theta$:</em> the geometric angle gets its own letter so
+        it never collides with the parameters $\theta$ (notation §5.4).</p>
+    </div></details>
+
+    <!-- ===================== LR SIGNATURES ===================== -->
+    <h2>What the learning rate does — four signatures</h2>
+    <p>The direction is settled: always $-\mathbf g$. The only free choice left in the update rule is <em>how far</em>
+      — the scalar $\eta$. Get it wrong and the marble either crawls, chatters, or launches. Each failure has a
+      shape you can read straight off the loss curve, and page&nbsp;24 will use these four shapes as a debugging
+      table.</p>
+
+    <table class="ledger">
+      <thead><tr><th>$\eta$ regime</th><th>Loss-curve signature</th><th>What is happening</th></tr></thead>
+      <tbody>
+        <tr><td><b>Too small</b></td><td>smooth, monotone, glacial — barely tilts down</td><td>every step is safe but tiny; you will run out of patience before it converges</td></tr>
+        <tr><td><b>About right</b></td><td>brisk fall, then a plateau</td><td>fast progress into a basin, then diminishing returns near the bottom</td></tr>
+        <tr><td><b>Too big</b></td><td>drops, then bounces on a plateau and never settles</td><td>each step overshoots the bottom and lands on the far wall — oscillation</td></tr>
+        <tr><td><b>Unstable</b></td><td>rises, then <code>NaN</code> within a few steps</td><td>each step overshoots by <em>more</em> than the last; the error compounds and blows up</td></tr>
+      </tbody>
+    </table>
+
+    <p>The trap worth naming: <b>too-small</b> and a <b>dead network</b> look identical — both give a flat, unmoving
+      loss. The cure for one (raise $\eta$) is poison for the other. That ambiguity is exactly why the next section
+      pins down the boundary between "safe" and "unstable" with an actual number.</p>
+
+    <!-- ===================== WORKED NUMBER ===================== -->
+    <h2>The critical learning rate, exactly</h2>
+    <p>On a quadratic bowl the stability boundary is not folklore — it is a formula. Take the demo's ravine, a bowl
+      whose steepest-curving direction has curvature $\lambda_{\max} = 20$. Along that direction the error after one
+      step is multiplied by $\lvert 1 - \eta\lambda_{\max}\rvert$. Descent is stable only while that multiplier is
+      below 1, which happens for $0 < \eta < 2/\lambda_{\max}$.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked: $\eta_{\text{crit}}$ and the error multiplier ($\lambda_{\max}=20$)</span>
+      <p>The critical step (<code>constants.md</code> §9.3, [DER]):</p>
+      <p>$$\eta_{\text{crit}} \;=\; \frac{2}{\lambda_{\max}} \;=\; \frac{2}{20} \;=\; \mathbf{0.1}\ \text{ exactly.}$$</p>
+      <p>Per-step error multiplier $m(\eta) = \lvert 1 - \eta\lambda_{\max}\rvert$ in the stiff direction:</p>
+      <table class="ledger">
+        <thead><tr><th>$\eta$</th><th>$m = \lvert 1 - 20\eta\rvert$</th><th>Behaviour</th></tr></thead>
+        <tbody>
+          <tr><td>$0.05$</td><td>$\lvert 1 - 1.0\rvert = \mathbf{0.00}$</td><td>collapses to the axis in one step, then crawls in the shallow direction</td></tr>
+          <tr><td>$0.09$</td><td>$\lvert 1 - 1.8\rvert = \mathbf{0.80}$</td><td>converges — error shrinks 20% per step</td></tr>
+          <tr><td>$0.10$</td><td>$\lvert 1 - 2.0\rvert = \mathbf{1.00}$</td><td>marginal — oscillates forever at constant amplitude</td></tr>
+          <tr><td>$0.15$</td><td>$\lvert 1 - 3.0\rvert = \mathbf{2.00}$</td><td>diverges — error <em>doubles</em> every step</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.5em 0 0">Above $\eta_{\text{crit}} = 0.1$ the multiplier exceeds 1 and the iterate flies
+        apart — you will see this land <em>exactly</em> at 0.1 in the demo. This threshold reappears on page&nbsp;17,
+        where momentum lets you push past the naive limit.</p>
+    </div>
+
+    <!-- ===================== 2026 LANDSCAPE ===================== -->
+    <h2>What the landscape actually looks like at scale</h2>
+    <div class="box key"><span class="box-title">🔑 Saddles, not traps</span>
+      A generation of neural-net lore warned about "getting stuck in a bad local minimum." <b>At scale that fear is
+      largely obsolete.</b> In a high-dimensional loss surface, a point where <em>every</em> one of millions of axes
+      curves upward (a true local minimum) is astronomically rare; overwhelmingly, a flat spot is a <b>saddle</b> —
+      up in some directions, down in others — and there is always a way out. Moreover, the many minima that gradient
+      descent actually reaches on an overparameterised network are mostly <em>about equally good</em>. The real
+      obstacles are saddle plateaus that slow you down, ill-conditioning (the ravine you are about to see), and bad
+      learning rates — not a landscape full of traps. Say it plainly: you are not going to get stuck in a pit.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "The gradient points at the minimum."</span>
+      It does not. The gradient is <b>perpendicular to the local contour line</b>. On a stretched valley the contours
+      are long ellipses, and the perpendicular to a long ellipse points mostly <em>across</em> the valley, not along
+      it toward the bottom. <b>That resolves the PREDICT:</b> "downhill" is across the valley, so the marble zigzags
+      wall-to-wall while inching toward the minimum. This wasted cross-motion is precisely the problem momentum
+      (page&nbsp;17) is built to fix.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "A smaller learning rate is always safer."</span>
+      Safer against divergence, yes — but a too-small $\eta$ stalls indefinitely and produces a flat loss curve
+      that is <em>indistinguishable from a dead or broken network</em>. "Nothing is happening" is not a safe state;
+      it is a failure mode that merely looks calm.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Training gets stuck in bad local minima."</span>
+      Saddle points dominate high-dimensional surfaces; genuine local minima are rare, and the ones SGD finds on an
+      overparameterised model are mostly equivalent in quality. The 1990s intuition — from tiny networks — does not
+      transfer to the scale you will actually train at.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: gradient descent on a real ravine</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      The contour on the left is the anisotropic bowl $f(x,y) = \tfrac12\!\left(x^2 + 20\,y^2\right)$ — 20× steeper
+      across than along, a ravine. The dot starts at $(-4,\,3)$ and runs <b>real</b> gradient descent; the path is
+      computed live, step by step, from $\theta_{k+1} = \theta_k - \eta\nabla f(\theta_k)$. The right panel is the
+      loss along that path. Drag $\eta$ up from tiny: watch the smooth crawl become a zigzag, then — right at
+      $\eta = 0.1$ — watch it stop converging and blow up. You are seeing $\eta_{\text{crit}} = 2/\lambda_{\max}$
+      with your own eyes.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Gradient descent on $f(x,y)=\tfrac12(x^2+20y^2)$ <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="gd-grid">
+          <div><canvas id="d-surf" height="300"></canvas></div>
+          <div><canvas id="d-loss" height="300"></canvas></div>
+        </div>
+        <div class="controls" id="d-ctrls"></div>
+        <div class="readout" id="d-out"></div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/13_lr_sweep.py</code> — a 1-D quadratic that sweeps $\eta \in \{0.05,\ 0.1,\ 0.15\}$, prints whether
+      each converges or diverges, and confirms the $2/\lambda_{\max}$ threshold numerically on your own machine.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz13"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;12 built the loss that is this surface's height. → Page&nbsp;14
+      computes the gradient $\mathbf g_k$ this rule consumes, by hand. → Page&nbsp;17's momentum cures the ravine
+      zigzag and pushes past the naive $\eta_{\text{crit}}$. → Page&nbsp;43's roofline reuses this same contour
+      canvas for a very different surface.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- FLAGSHIP DEMO: real GD on an anisotropic quadratic ----
+     f(x,y) = 0.5*(x^2 + 20*y^2).  ∇f = (x, 20y).  λ_max = 20, so
+     η_crit = 2/20 = 0.1 exactly. Everything below is computed live —
+     no stored curves. */
+  (function () {
+    const A = 1, B = 20;                         // curvatures; λ_max = B = 20
+    const f = (x, y) => 0.5 * (A * x * x + B * y * y);
+    const START = [-4, 3];
+    const MAXSTEPS = 400;
+
+    // Run real gradient descent, returning the full trajectory + per-step loss
+    // and a status. Deterministic in η, so recompute wholesale on each tick.
+    function descend(eta) {
+      let x = START[0], y = START[1];
+      const pts = [[x, y]], losses = [f(x, y)];
+      let status = null, steps = MAXSTEPS;
+      for (let k = 0; k < MAXSTEPS; k++) {
+        const gx = A * x, gy = B * y;            // ∇f at the current point
+        x = x - eta * gx; y = y - eta * gy;      // the update rule, live
+        const fv = f(x, y);
+        pts.push([x, y]); losses.push(fv);
+        if (!isFinite(fv) || Math.abs(x) > 1e6 || Math.abs(y) > 1e6) { status = "diverged"; steps = k + 1; break; }
+        const gnorm = Math.hypot(A * x, B * y);  // ‖∇f‖ at the new point
+        if (gnorm < 1e-3) { status = "converged"; steps = k + 1; break; }
+      }
+      // Ran out of steps without diverging. Two very different reasons: it may
+      // be crawling downhill (η too small — glacial) or bouncing at constant
+      // amplitude (η at/above the marginal value — never settles). Tell them
+      // apart by whether the loss is still meaningfully falling at the end.
+      if (status === null) {
+        const end = losses[losses.length - 1], mid = losses[Math.floor(losses.length * 0.75)];
+        status = (end < 0.9 * mid) ? "crawling" : "oscillating";
+      }
+      return { pts, losses, status, steps };
+    }
+
+    const surf = new Surface3D(document.getElementById("d-surf"), {
+      fn: f, xmin: -5, xmax: 5, ymin: -4.2, ymax: 4.2, mode: "contour", levels: 12,
+    });
+    const lossCanvas = document.getElementById("d-loss");
+    const out = document.getElementById("d-out");
+    const eta = makeCtrl(document.getElementById("d-ctrls"),
+      { label: "learning rate η", min: 0.01, max: 0.2, step: 0.005, value: 0.09, fmt: v => v.toFixed(3) });
+
+    const accent = () => cssVar("--accent", "#b48cff");
+    const warnC = () => cssVar("--bad", "#ff6b6b");
+
+    function draw() {
+      const e = eta.get();
+      const run = descend(e);
+      surf.setTrajectory(run.pts);               // draws the path on the contour
+
+      // Loss curve (log-y). f starts at 98; a converged run reaches ~1e-6.
+      const p = new Plot(lossCanvas, {
+        xmin: 0, xmax: Math.max(20, run.steps), ymin: 1e-7, ymax: 200, ylog: true,
+        xlabel: "step k", ylabel: "loss f(θ_k)",
+      });
+      p.clear(); p.grid();
+      const xs = run.losses.map((_, i) => i);
+      const diverging = (run.status === "diverged");
+      p.trace(xs, run.losses, diverging ? warnC() : accent(), 2.5);
+
+      const m = Math.abs(1 - B * e);             // stiff-direction error multiplier
+      const verdict =
+        run.status === "converged" ? `<b style="color:var(--accent)">converged</b> in ${run.steps} steps` :
+        run.status === "diverged" ? `<b style="color:var(--bad)">DIVERGED</b> after ${run.steps} steps` :
+        run.status === "crawling" ? `<b style="color:var(--warn)">crawling</b> — still descending at ${MAXSTEPS} steps (η too small)` :
+        `<b style="color:var(--bad)">never settles</b> (oscillating at ${MAXSTEPS}+ steps)`;
+      out.innerHTML =
+        `update: &nbsp;θ<sub>k+1</sub> = θ<sub>k</sub> − <b>${e.toFixed(3)}</b>·∇f(θ<sub>k</sub>) ` +
+        `&nbsp;·&nbsp; error multiplier |1 − η·λ<sub>max</sub>| = |1 − ${(B * e).toFixed(2)}| = <b>${m.toFixed(2)}</b> ` +
+        `&nbsp;·&nbsp; ${verdict}. ` +
+        (e < 0.1 ? `Below η<sub>crit</sub> = 0.1.` : e === 0.1 ? `Exactly at η<sub>crit</sub> = 0.1 — the knife-edge.` : `Above η<sub>crit</sub> = 0.1.`);
+    }
+
+    eta.onInput(draw);
+    draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz13", [
+    {
+      q: "A quadratic bowl has maximum curvature $\\lambda_{\\max}=20$. The critical learning rate $\\eta_{\\text{crit}}=2/\\lambda_{\\max}$ is:",
+      num: 0.1, tol: 0.005,
+      why: "$\\eta_{\\text{crit}} = 2/\\lambda_{\\max} = 2/20 = 0.1$ exactly. Above it the per-step error multiplier $|1-\\eta\\lambda_{\\max}|$ exceeds 1 and the iterate diverges."
+    },
+    {
+      q: "Why is $-\\nabla\\mathcal{L}$ the direction of steepest descent?",
+      opts: [
+        "It is the straight line from the current point to the minimum",
+        "Among all unit steps, it makes the first-order loss change $\\mathbf{g}^\\top\\mathbf{u}$ most negative (Cauchy–Schwarz)",
+        "It is the direction of least curvature",
+        "It is whichever axis currently has the largest weight"
+      ],
+      a: 1,
+      why: "First-order Taylor gives $\\Delta\\mathcal{L}\\approx\\mathbf{g}^\\top\\mathbf{u}$; Cauchy–Schwarz makes this most negative at $\\mathbf{u}=-\\mathbf{g}/\\lVert\\mathbf{g}\\rVert$. It points at the minimum only on a perfectly round bowl — not on a ravine."
+    },
+    {
+      q: "A too-small learning rate produces a loss curve that is:",
+      opts: [
+        "Smooth, flat, and glacial — nearly indistinguishable from a dead network",
+        "Bouncing on a plateau, never settling",
+        "Rising to NaN within a few steps",
+        "A brisk fall followed by a clean plateau"
+      ],
+      a: 0,
+      why: "Too-small $\\eta$ stalls: a smooth, near-flat, monotone curve. The bouncing plateau is too-big; NaN-in-a-few-steps is unstable; the brisk-fall-then-plateau is the healthy regime."
+    },
+    {
+      q: "On a long narrow valley, gradient descent zigzags across the valley because:",
+      opts: [
+        "The learning rate is being changed each step",
+        "The gradient is perpendicular to the elongated contours, which points mostly across the valley, not along it",
+        "Floating-point rounding perturbs the direction",
+        "The loss surface has many local minima along the floor"
+      ],
+      a: 1,
+      why: "The gradient is $\\perp$ to the local contour. On a stretched valley the perpendicular points across, not toward the minimum — so the path zigzags. This is exactly what momentum (page 17) fixes."
+    },
+    {
+      q: "What dominates the flat regions of a high-dimensional loss surface at scale?",
+      opts: [
+        "Many bad local minima that trap training",
+        "Saddle points — up in some directions, down in others, always with a way out",
+        "Discontinuities where the gradient is undefined",
+        "Regions of exactly zero curvature in every direction"
+      ],
+      a: 1,
+      why: "A true local minimum needs every one of millions of axes to curve up — astronomically rare. Almost every flat spot is a saddle. The '1990s bad-local-minimum' fear does not transfer to scale."
+    },
+    {
+      q: "With $\\eta=0.15$ and $\\lambda_{\\max}=20$, the per-step error multiplier $|1-\\eta\\lambda_{\\max}|$ is:",
+      num: 2.0, tol: 0.1,
+      why: "$|1 - 0.15\\times 20| = |1 - 3| = 2.0$. The error more than doubles every step — the iterate diverges, because $\\eta > \\eta_{\\text{crit}}=0.1$."
+    }
+  ], "Gradient descent & the landscape — self-check");
+
+});
+</script>
+</body>
+</html>

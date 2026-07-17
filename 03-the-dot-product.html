@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3. The Dot Product — the Atom — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the ledger tables carry KaTeX that is wider than a phone; let
+   each scroll inside its own box so the page body never scrolls horizontally.
+   The two-panel demo grid collapses to one column below 720px. */
+@media (max-width: 900px) {
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+@media (max-width: 720px) {
+  .dot-two-panel { grid-template-columns: 1fr !important; }
+}
+</style>
+</head>
+<body data-page="03-the-dot-product.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part I · The Machine · ⚛️ The Atom</span>
+    <h1>The Dot Product — the Atom</h1>
+    <p class="subtitle">One operation — "how much of this is in that?" — that a neural network asks billions of
+      times. We meet it geometrically and algebraically, watch its two forms land on the same number, and see the
+      strange fact that in high dimensions almost everything is perpendicular to almost everything else.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:dot-product beat 1]</b> · <b>[THREAD:trig-payoff beat 1/3]</b>. On page&nbsp;1 you called a neuron
+      a <em>ruler</em> — "how much does an input point along a direction it cares about?" That ruler has a name:
+      the <b>dot product</b>. This page names it, gives it its trig, and follows it forward: it returns as the
+      <em>neuron</em> (page&nbsp;10), as <em>attention scores</em> (pages&nbsp;29–30), as <em>rotations that
+      compose</em> (RoPE, page&nbsp;33), and as the geometry of the <em>diffusion forward process</em> you already
+      steer in ComfyUI (page&nbsp;54). Same operation, four disguises. Watch for the tag.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered right under the demo, in the "Predict resolved" note. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Two random arrows in 2-D: the angle between them is all over the place — sometimes aligned, sometimes opposed.
+      Now two random arrows in <b>4096-D</b> (the width of the model you'll fine-tune). The angle between them is
+      almost always about <b>0°, 45°, or 90°?</b> Commit to one, then drag the dimension slider in the demo below.
+    </div>
+
+    <!-- ===================== TWO FORMS ===================== -->
+    <h2>Two forms, one number</h2>
+    <p>The dot product of two vectors has an <em>algebraic</em> definition (multiply componentwise, add it up) and a
+      <em>geometric</em> one (lengths times the cosine of the angle between them). They are the same number, always —
+      and holding both in your head at once is the whole payoff of this page.</p>
+
+    <p>$$\mathbf a\cdot\mathbf b \;=\; \sum_{i=1}^{d} a_i b_i \;=\; \lVert\mathbf a\rVert\,\lVert\mathbf b\rVert\,\cos\vartheta.$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf a,\ \mathbf b$</td><td>the two vectors being compared</td><td>$(d,1)$</td><td>the inputs</td></tr>
+        <tr><td>$a_i,\ b_i$</td><td>the $i$-th component of each (a scalar, <b>not</b> bold)</td><td>scalar</td><td>elements of $\mathbf a,\mathbf b$</td></tr>
+        <tr><td>$\lVert\mathbf a\rVert$</td><td>length, $\sqrt{\textstyle\sum_i a_i^2}$</td><td>scalar</td><td>computed from $\mathbf a$</td></tr>
+        <tr><td>$\vartheta$</td><td>the geometric angle between $\mathbf a$ and $\mathbf b$ — <b>your trig, cashed in</b></td><td>radians / degrees</td><td>the geometry</td></tr>
+        <tr><td>$d$</td><td>the dimension (how many components)</td><td>scalar</td><td>the space $\mathbb R^d$</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>Read it as a question.</b> A big positive dot product means the two vectors point the same way; zero means
+      perpendicular — unrelated; negative means opposed. Two derived quantities fall straight out:</p>
+    <p>$$\operatorname{proj}_{\mathbf b}(\mathbf a) = \frac{\mathbf a\cdot\mathbf b}{\lVert\mathbf b\rVert^2}\,\mathbf b
+      \quad(\text{the shadow } \mathbf a \text{ casts on } \mathbf b),\qquad
+      \cos\vartheta = \frac{\mathbf a\cdot\mathbf b}{\lVert\mathbf a\rVert\,\lVert\mathbf b\rVert}\in[-1,1]
+      \quad(\text{cosine similarity}).$$</p>
+    <p>Cosine similarity strips the lengths away and keeps only the alignment; the raw dot product keeps both. Which
+      you want depends on whether magnitude carries information — a distinction we cash in for real on the very next
+      slide, and again when we compare attention (raw dot product) to RAG retrieval (cosine).</p>
+
+    <div class="box key"><span class="box-title">🔑 The one sentence</span>
+      A dot product asks: <b>how much of this is in that?</b> Every neural network is that question, asked billions
+      of times, with the answers rearranged. If you leave this page with one thing, leave with that.
+    </div>
+
+    <p style="color:var(--text-dim);font-size:.92rem;border-left:2px solid var(--border);padding-left:12px">
+      <b>Translation (what papers call these).</b> The angle here is $\vartheta$ (vartheta). Almost every paper writes
+      it $\theta$ — but in this course $\theta$ means <em>learnable parameters</em> and nothing else, so the angle
+      gets its own letter. When you read $\cos\theta$ in a paper's attention or RoPE section, mentally swap in
+      $\vartheta$. Likewise the head dimension below, $d_{\text{head}}$, is written $d_k$ almost everywhere.
+    </p>
+
+    <!-- ===================== WHY IT RECURS ===================== -->
+    <h2>Why this one operation keeps coming back</h2>
+    <p>The reason the dot product is <em>the atom</em> is that four things you will build are all the same operation
+      wearing different clothes. Say them out loud now, so each later encounter is a reopening, not a surprise:</p>
+    <ul>
+      <li><b>A neuron is a dot product.</b> $z = \mathbf w\cdot\mathbf x + b$ — the weight vector $\mathbf w$ is a
+        <em>template</em>, and $z$ is the match score: how much of the input looks like the template. That reframing
+        is the whole of page&nbsp;10.</li>
+      <li><b>An attention score is a dot product.</b> $\text{score}_{ij} = \mathbf q_i\cdot\mathbf k_j / \sqrt{d_{\text{head}}}$
+        — a query asking each key "how much of you is in me?" This exact line returns on pages&nbsp;29–30.</li>
+      <li><b>Embeddings are compared by dot product.</b> "Is this document about my query?", "king − man + woman ≈
+        queen" — all dot-product geometry (page&nbsp;27).</li>
+      <li><b>An output logit is a dot product.</b> $h\cdot E_v$ — the hidden state against the vocabulary row for
+        token $v$, which is exactly what page&nbsp;9's softmax eats.</li>
+    </ul>
+    <p>And the <em>geometry itself</em> returns twice more as trig — as <b>rotations that compose</b> (RoPE,
+      page&nbsp;33, trig payoff&nbsp;#2) and as the <b>noise-schedule geometry</b> of the diffusion forward process
+      (page&nbsp;54, trig payoff&nbsp;#3). You'll recognize the second one from ComfyUI.</p>
+
+    <!-- ===================== WORKED ===================== -->
+    <h2>Worked to a number</h2>
+    <div class="box worked"><span class="box-title">✍️ Two vectors, both ways</span>
+      <p>Take $\mathbf a = [3,\ 4]$ and $\mathbf b = [4,\ 3]$.</p>
+      <table class="ledger">
+        <tbody>
+          <tr><td>Algebraic</td><td>$\mathbf a\cdot\mathbf b = 3\cdot4 + 4\cdot3$</td><td>$= \mathbf{24}$</td></tr>
+          <tr><td>Lengths</td><td>$\lVert\mathbf a\rVert = \lVert\mathbf b\rVert = \sqrt{9+16} = \sqrt{25}$</td><td>$= 5$</td></tr>
+          <tr><td>Cosine</td><td>$\cos\vartheta = \dfrac{24}{5\cdot5} = \dfrac{24}{25}$</td><td>$= \mathbf{0.96}$</td></tr>
+          <tr><td>Angle</td><td>$\vartheta = \arccos(0.96)$</td><td>$\approx \mathbf{16.26^\circ}$ — nearly aligned</td></tr>
+        </tbody>
+      </table>
+      <p style="margin:.6em 0 0">Now swap $\mathbf b$ for $\mathbf c = [-4,\ 3]$: &nbsp;
+        $\mathbf a\cdot\mathbf c = 3(-4) + 4(3) = -12 + 12 = \mathbf{0} \Rightarrow \vartheta = \mathbf{90^\circ}$.
+        The two are <b>orthogonal</b> — geometrically perpendicular, and, in the language a network speaks,
+        <em>unrelated</em>. "Unrelated concepts are perpendicular" starts right here; it becomes the seed of how a
+        4096-wide model stores far more than 4096 ideas.</p>
+    </div>
+
+    <!-- ===================== sqrt(d_head) ===================== -->
+    <h2>The $\sqrt{d_{\text{head}}}$ every transformer divides by</h2>
+    <p>Here is a two-line derivation you can do yourself — and it explains the mysterious $1/\sqrt{d_k}$ in every
+      attention diagram you've ever squinted at. It is nothing but a dot product plus one fact about variance.</p>
+    <p>Suppose the query and key entries are independent, mean-0, variance-1 numbers (roughly true after
+      normalization). Then the score $\mathbf q\cdot\mathbf k = \sum_{i=1}^{d_{\text{head}}} q_i k_i$ is a sum of
+      $d_{\text{head}}$ independent mean-0 terms, so:</p>
+    <p>$$\mathbb E[\mathbf q\cdot\mathbf k] = 0, \qquad
+      \operatorname{Var}(\mathbf q\cdot\mathbf k) = \sum_{i=1}^{d_{\text{head}}}\operatorname{Var}(q_i k_i) = d_{\text{head}},
+      \qquad \operatorname{std}(\mathbf q\cdot\mathbf k) = \sqrt{d_{\text{head}}}.$$</p>
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathbf q,\ \mathbf k$</td><td>a query and a key vector</td><td>projections of a token</td></tr>
+        <tr><td>$q_i,\ k_i$</td><td>their $i$-th components, mean-0 &amp; variance-1</td><td>assumed (normalized inputs)</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head dimension</td><td>architecture: <b>128</b> for Qwen3-8B</td></tr>
+        <tr><td>$\mathbb E,\ \operatorname{Var}$</td><td>expectation, variance</td><td>probability (page&nbsp;8 formalizes)</td></tr>
+      </tbody>
+    </table>
+    <div class="box worked"><span class="box-title">✍️ The magic constant</span>
+      <b>[THREAD:Qwen3-8B beat 2]</b> Qwen3-8B has $d_{\text{head}} = 128$ (<code>constants.md</code> §1.1). So a
+      raw attention score has a standard deviation of $\sqrt{128} = \mathbf{11.3137}$
+      (<code>constants.md</code> §5). Scores of $\pm11$ fed into a softmax come out almost one-hot — a hard argmax
+      with almost no gradient. Dividing by $\sqrt{d_{\text{head}}}$ rescales the scores back to $O(1)$ so the softmax
+      stays soft and gradients keep flowing. <em>That</em> is the whole reason the divide-by-$\sqrt{d_k}$ exists;
+      page&nbsp;30 puts it to work.
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Two traps</h2>
+    <div class="box warn"><span class="box-title">⚠️ "A high dot product means similar magnitude."</span>
+      The raw dot product entangles magnitude <em>and</em> angle: $\lVert\mathbf a\rVert\lVert\mathbf b\rVert\cos\vartheta$.
+      A long vector at a wide angle can out-score a short one that's perfectly aligned. If you only care about
+      <em>direction</em>, use cosine similarity, which divides the lengths out. Attention deliberately keeps the raw
+      dot product (magnitude reads as confidence); RAG retrieval usually uses cosine (it treats magnitude as noise).
+      Same formula, opposite choice — because they want different things from the length.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "2-D intuition survives into high dimensions."</span>
+      It does not. Two random unit vectors in $\mathbb R^{4096}$ have a cosine that is distributed like
+      $\mathcal N(0,\ 1/4096)$ — standard deviation $\approx 0.0156$. They are <b>essentially always orthogonal</b>.
+      Far from a bug, that is <em>why</em> a 4096-dimensional space can hold vastly more than 4096 near-orthogonal
+      "concepts" — the phenomenon called superposition. The demo below lets you watch the collapse happen.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>The Dot Product Dial</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      <b>Left:</b> drag $\mathbf b$'s length and angle and watch the two forms of $\mathbf a\cdot\mathbf b$ — algebraic
+      and geometric — land on the identical number, every frame, with the equation printed and substituted. Push the
+      angle past $90^\circ$ and the dot product goes negative; the shadow flips behind the origin.
+      <b>Right:</b> drag the dimension from 2 up to 4096 and watch thousands of real random-vector cosines collapse
+      from "spread everywhere" to a spike at zero (the readout prints the exact sample count each time). Both panels
+      compute live — nothing is stored.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">Dot product — geometry &amp; the high-dimensional collapse <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="dot-two-panel" style="display:grid;grid-template-columns:1fr 1fr;gap:18px">
+          <div>
+            <canvas id="d-geo" height="340"></canvas>
+            <div class="controls" id="d-geo-ctrls"></div>
+            <div class="readout" id="d-geo-out"></div>
+          </div>
+          <div>
+            <canvas id="d-hist" height="340"></canvas>
+            <div class="controls" id="d-hist-ctrls"></div>
+            <div class="readout" id="d-hist-out"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="box predict"><span class="box-title">🔮 Predict resolved</span>
+      The histogram spike sits at cosine $\approx 0$ — that is $\vartheta \approx 90^\circ$. So the PREDICT answer is
+      <b>90°</b>: two random arrows in 4096-D are almost certainly perpendicular. At $d=2$ the cosines scatter across
+      the whole range; by $d=64$ they already pile up near zero; by $d=4096$ the empirical standard deviation is the
+      $1/\sqrt{d} = 0.0156$ the warn box promised. High-dimensional space is <em>mostly right angles</em>.
+    </div>
+
+    <details class="deepdive"><summary>🔬 Deep dive: why the variances add, so $\operatorname{Var}(\mathbf q\cdot\mathbf k) = d_{\text{head}}$</summary><div>
+      <p>The score is $\mathbf q\cdot\mathbf k = \sum_{i} q_i k_i$. Because the $d_{\text{head}}$ terms $q_i k_i$ are
+        <em>independent</em>, the variance of their sum is the sum of their variances — that is the one property of
+        variance that only holds under independence. Each term has
+        $\operatorname{Var}(q_i k_i) = \mathbb E[q_i^2 k_i^2] - (\mathbb E[q_i k_i])^2
+        = \mathbb E[q_i^2]\,\mathbb E[k_i^2] - 0 = 1\cdot1 = 1$ (using independence again, and mean-0, variance-1
+        inputs). Summing $d_{\text{head}}$ ones gives $\operatorname{Var} = d_{\text{head}}$, hence
+        $\operatorname{std} = \sqrt{d_{\text{head}}}$. The <em>result</em> is load-bearing and lives above the fold;
+        this is just the machinery, which page&nbsp;8 makes rigorous. The same "variances add" fact is exactly why
+        the cosine of two random unit vectors has variance $1/d$ — try to see it.</p>
+    </div></details>
+
+    <div class="box try"><span class="box-title">Try it — your first measurement of superposition</span>
+      <code>code/orthogonality.py</code> — sample two random unit vectors in $\mathbb R^{4096}$ with
+      <code>torch</code>, print their cosine (you'll see $\approx 0.01$–$0.02$); then loop 10,000 times and print the
+      empirical standard deviation, which lands on $1/\sqrt{4096} = 0.0156$. Runs on CPU in under a second. You just
+      measured why a 4096-wide model isn't limited to 4096 ideas.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz3"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  const cvar = (n, f) => (window.vizUtils ? vizUtils.cssVar(n, f) : (window.cssVar ? cssVar(n, f) : f));
+
+  /* ---------------- LEFT PANEL: the 2-D geometry, on a raw square canvas ----
+     Plot can't guarantee a 1:1 aspect (its plot area is wider than tall), which
+     would visually distort angles — fatal for a geometry demo. So this panel is
+     a bespoke square-mapped canvas: vector a is pinned at [1,0], b is set by two
+     sliders, and every frame recomputes a·b two ways and checks they agree. */
+  (function () {
+    const canvas = document.getElementById("d-geo");
+    const out = document.getElementById("d-geo-out");
+    const lenB = makeCtrl(document.getElementById("d-geo-ctrls"),
+      { label: "‖b‖ (length of b)", min: 0.2, max: 3, step: 0.05, value: 2.3, fmt: v => v.toFixed(2) });
+    const angB = makeCtrl(document.getElementById("d-geo-ctrls"),
+      { label: "angle of b", min: -180, max: 180, step: 1, value: 37, unit: "°", fmt: v => v.toFixed(0) });
+
+    const RANGE = 3.4; // data half-width; b up to length 3 fits with margin
+
+    function draw() {
+      const { g, W, H } = vizUtils.fitCanvas(canvas, 340);
+      g.clearRect(0, 0, W, H);
+      const th = {
+        grid: cvar("--plot-grid", "#243049"), border: cvar("--plot-border", "#3b4a6b"),
+        dim: cvar("--text-dim", "#8391ab"), text: cvar("--text", "#e4e0f2"),
+        aCol: cvar("--accent2", "#45e0b8"), bCol: cvar("--accent", "#b48cff"),
+        proj: cvar("--warn", "#ffd166")
+      };
+      const s = Math.min(W, H) / (2 * RANGE);
+      const cx = W / 2, cy = H / 2;
+      const X = x => cx + x * s, Y = y => cy - y * s;
+
+      // grid
+      g.save(); g.strokeStyle = th.grid; g.lineWidth = 1;
+      for (let k = -3; k <= 3; k++) {
+        g.beginPath(); g.moveTo(X(k), Y(-RANGE)); g.lineTo(X(k), Y(RANGE)); g.stroke();
+        g.beginPath(); g.moveTo(X(-RANGE), Y(k)); g.lineTo(X(RANGE), Y(k)); g.stroke();
+      }
+      // axes
+      g.strokeStyle = th.border; g.lineWidth = 1.4;
+      g.beginPath(); g.moveTo(X(-RANGE), Y(0)); g.lineTo(X(RANGE), Y(0)); g.stroke();
+      g.beginPath(); g.moveTo(X(0), Y(-RANGE)); g.lineTo(X(0), Y(RANGE)); g.stroke();
+      g.restore();
+
+      const ax = 1, ay = 0;                         // a pinned at [1,0]
+      const r = lenB.get(), phi = angB.get() * Math.PI / 180;
+      const bx = r * Math.cos(phi), by = r * Math.sin(phi);
+      const dot = ax * bx + ay * by;                // = bx
+      const normA = 1, normB = r;
+      const cos = normB > 1e-9 ? dot / (normA * normB) : 0;
+      const angBetween = Math.abs(angB.get());      // angle between a and b, in [0,180]
+
+      // projection foot of a onto b: (a·b / ‖b‖²) b
+      const t = normB > 1e-9 ? dot / (normB * normB) : 0;
+      const fx = t * bx, fy = t * by;
+
+      const arrow = (x0, y0, x1, y1, col, wdt) => {
+        g.save(); g.strokeStyle = col; g.fillStyle = col; g.lineWidth = wdt; g.lineJoin = "round";
+        g.beginPath(); g.moveTo(X(x0), Y(y0)); g.lineTo(X(x1), Y(y1)); g.stroke();
+        const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1;
+        const ux = dx / L, uy = dy / L, hb = 0.22, ca = Math.cos(0.45), sa = Math.sin(0.45);
+        const b1x = X(x1) + (-ux * ca + uy * sa) * hb * s, b1y = Y(y1) - (-uy * ca - ux * sa) * hb * s;
+        const b2x = X(x1) + (-ux * ca - uy * sa) * hb * s, b2y = Y(y1) - (-uy * ca + ux * sa) * hb * s;
+        g.beginPath(); g.moveTo(X(x1), Y(y1)); g.lineTo(b1x, b1y);
+        g.moveTo(X(x1), Y(y1)); g.lineTo(b2x, b2y); g.stroke();
+        g.restore();
+      };
+
+      // shadow: the component of a along b (origin -> foot), plus a drop line
+      g.save();
+      g.strokeStyle = th.proj; g.lineWidth = 5; g.globalAlpha = 0.55;
+      g.beginPath(); g.moveTo(X(0), Y(0)); g.lineTo(X(fx), Y(fy)); g.stroke();
+      g.globalAlpha = 1; g.lineWidth = 1.2; g.setLineDash([4, 4]);
+      g.beginPath(); g.moveTo(X(ax), Y(ay)); g.lineTo(X(fx), Y(fy)); g.stroke();
+      g.setLineDash([]);
+      g.fillStyle = th.proj; g.beginPath(); g.arc(X(fx), Y(fy), 3.5, 0, 2 * Math.PI); g.fill();
+      g.restore();
+
+      arrow(0, 0, bx, by, th.bCol, 3);              // b (draggable)
+      arrow(0, 0, ax, ay, th.aCol, 3);              // a (pinned)
+
+      // labels
+      g.save(); g.font = "bold 13px system-ui"; g.textAlign = "center";
+      g.fillStyle = th.aCol; g.fillText("a", X(ax) + 10, Y(ay) - 8);
+      g.fillStyle = th.bCol; g.fillText("b", X(bx) + 12 * Math.sign(bx || 1), Y(by) - 8);
+      g.restore();
+
+      out.innerHTML =
+        `a = [1.00, 0.00],&nbsp; b = [${bx.toFixed(2)}, ${by.toFixed(2)}]` +
+        `<br><b>Geometric:</b> a·b = ‖a‖·‖b‖·cos&nbsp;ϑ = 1.00 · ${normB.toFixed(2)} · cos(${angBetween.toFixed(0)}°) = <b>${dot.toFixed(3)}</b>` +
+        `<br><b>Algebraic:</b> a·b = a₁b₁ + a₂b₂ = 1.00·${bx.toFixed(2)} + 0.00·${by.toFixed(2)} = <b>${dot.toFixed(3)}</b>` +
+        `<br>cos&nbsp;ϑ = <b>${cos.toFixed(3)}</b> &nbsp;·&nbsp; ϑ = <b>${angBetween.toFixed(0)}°</b> &nbsp;` +
+        `<span style="color:var(--good,#5ce6a0)">✓ same number, two ways</span>`;
+    }
+
+    lenB.onInput(draw); angB.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- RIGHT PANEL: high-dimensional cosine collapse ----------
+     Sample real random vectors in R^d (seeded), compute their cosine directly,
+     histogram it, and overlay the theoretical Gaussian N(0, 1/d). Everything is
+     computed live: no stored curve. ----------------------------------------- */
+  (function () {
+    const { RNG } = NN;
+    const canvas = document.getElementById("d-hist");
+    const out = document.getElementById("d-hist-out");
+    const DIMS = [2, 8, 64, 512, 4096];
+    const idx = makeCtrl(document.getElementById("d-hist-ctrls"),
+      { label: "dimension d", min: 0, max: 4, step: 1, value: 0, fmt: v => String(DIMS[v | 0]) });
+
+    const NBINS = 41;
+
+    function sampleCosines(d) {
+      const rng = new RNG(7);                         // reseed: identical every draw
+      const nPairs = Math.max(500, Math.min(5000, Math.round(2.5e6 / d)));
+      const cosines = new Float64Array(nPairs);
+      for (let p = 0; p < nPairs; p++) {
+        let dp = 0, n1 = 0, n2 = 0;
+        for (let i = 0; i < d; i++) {
+          const u = rng.normal(0, 1), v = rng.normal(0, 1);
+          dp += u * v; n1 += u * u; n2 += v * v;      // cos of Gaussians = cos of the unit vectors
+        }
+        const denom = Math.sqrt(n1 * n2);
+        cosines[p] = denom > 0 ? dp / denom : 0;
+      }
+      return cosines;
+    }
+
+    function draw() {
+      const d = DIMS[idx.get() | 0];
+      const cosines = sampleCosines(d);
+      const n = cosines.length;
+
+      // histogram over [-1,1] as a density
+      const bw = 2 / NBINS, counts = new Float64Array(NBINS);
+      let mean = 0;
+      for (let i = 0; i < n; i++) {
+        const c = cosines[i]; mean += c;
+        let b = Math.floor((c + 1) / bw); if (b < 0) b = 0; if (b >= NBINS) b = NBINS - 1;
+        counts[b]++;
+      }
+      mean /= n;
+      let vv = 0; for (let i = 0; i < n; i++) { const dlt = cosines[i] - mean; vv += dlt * dlt; }
+      const empStd = Math.sqrt(vv / n);
+      const theoStd = 1 / Math.sqrt(d);
+
+      const xs = [], ys = []; let maxDens = 0;
+      for (let b = 0; b < NBINS; b++) {
+        const dens = counts[b] / (n * bw);
+        const cx = -1 + (b + 0.5) * bw;
+        xs.push(cx); ys.push(dens);
+        if (dens > maxDens) maxDens = dens;
+      }
+      // theoretical Gaussian N(0, 1/d)
+      const gx = [], gy = [];
+      const s = theoStd, k = 1 / (s * Math.sqrt(2 * Math.PI));
+      for (let t = -1; t <= 1.00001; t += 0.01) { const yv = k * Math.exp(-t * t / (2 * s * s)); gx.push(t); gy.push(yv); if (yv > maxDens) maxDens = yv; }
+
+      const p = new Plot(canvas, { xmin: -1, xmax: 1, ymin: 0, ymax: maxDens * 1.12 || 1, xlabel: "cosine similarity", ylabel: "density" });
+      p.clear(); p.grid();
+      p.vline(0, cvar("--plot-border", "#3b4a6b"), [3, 3]);
+      // empirical histogram as a stepped outline
+      const stepX = [], stepY = [];
+      for (let b = 0; b < NBINS; b++) { const l = -1 + b * bw, r = l + bw; stepX.push(l, r); stepY.push(ys[b], ys[b]); }
+      p.trace(stepX, stepY, cvar("--accent", "#b48cff"), 2);
+      p.trace(gx, gy, cvar("--accent2", "#45e0b8"), 2);
+
+      out.innerHTML =
+        `d = <b>${d}</b> &nbsp;·&nbsp; empirical std of cosine = <b>${empStd.toFixed(4)}</b> &nbsp;·&nbsp; ` +
+        `theory 1/√d = <b>${theoStd.toFixed(4)}</b> &nbsp;·&nbsp; mean ≈ ${mean.toFixed(4)}` +
+        `<br><span style="color:var(--accent,#b48cff)">▮</span> ${n} sampled cosines &nbsp; ` +
+        `<span style="color:var(--accent2,#45e0b8)">▬</span> Gaussian N(0, 1/d) &nbsp;— ` +
+        (d <= 8 ? "at low d the Gaussian is only a rough guide; the spread is real."
+                : "tight spike at 0: nearly every pair is orthogonal.");
+    }
+
+    idx.onInput(draw); draw();
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(draw, 0));
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz3", [
+    {
+      q: "For $\\mathbf a = [3,4]$ and $\\mathbf b = [4,3]$, what is $\\cos\\vartheta$ (to 2 d.p.)?",
+      num: 0.96, tol: 0.01,
+      why: "$\\mathbf a\\cdot\\mathbf b = 24$, $\\lVert\\mathbf a\\rVert = \\lVert\\mathbf b\\rVert = 5$, so $\\cos\\vartheta = 24/25 = 0.96$ — nearly aligned ($\\vartheta \\approx 16.26^\\circ$)."
+    },
+    {
+      q: "With mean-0, variance-1 entries and $d_{\\text{head}} = 128$, the standard deviation of a raw attention score $\\mathbf q\\cdot\\mathbf k$ is (to 2 d.p.):",
+      num: 11.3137, tol: 0.05,
+      why: "$\\operatorname{Var}(\\mathbf q\\cdot\\mathbf k) = d_{\\text{head}} = 128$, so $\\operatorname{std} = \\sqrt{128} = 11.3137$ (constants §5). Dividing scores by this keeps the softmax soft (page 30)."
+    },
+    {
+      q: "Attention scores before the $1/\\sqrt{d_k}$ divide run about $\\pm 11$. If you dropped the divide, the softmax over them would:",
+      opts: ["Flow gradients more freely", "Saturate to a near one-hot argmax and kill the gradient", "Be unaffected — the scale factor is cosmetic"],
+      a: 1,
+      why: "Scores of $\\pm 11$ make softmax nearly one-hot, where its gradient $\\approx p(1-p) \\to 0$. The divide is not cosmetic; it rescales scores to $O(1)$ so learning can happen."
+    },
+    {
+      q: "Two random unit vectors in $\\mathbb R^{4096}$: their cosine similarity is most likely near:",
+      opts: ["1 (aligned)", "0 (orthogonal)", "$-1$ (opposed)"],
+      a: 1,
+      why: "The cosine is distributed $\\mathcal N(0, 1/4096)$, std $\\approx 0.0156$: overwhelmingly near 0. High-dimensional vectors are almost always perpendicular — the basis of superposition."
+    },
+    {
+      q: "In $z = \\mathbf w\\cdot\\mathbf x + b$, the dot product $\\mathbf w\\cdot\\mathbf x$ measures:",
+      opts: ["The length of $\\mathbf x$", "How much $\\mathbf x$ resembles the template $\\mathbf w$", "The number of inputs"],
+      a: 1,
+      why: "A neuron is a dot product: $\\mathbf w$ is a template and $z$ is the match score. It is not summing the inputs for their own sake — it is scoring alignment with $\\mathbf w$ (page 10)."
+    },
+    {
+      q: "RAG retrieval typically uses cosine similarity while attention uses the raw dot product because:",
+      opts: ["Cosine is faster to compute", "Attention wants magnitude as a confidence signal, while RAG wants magnitude treated as noise", "They are mathematically identical"],
+      a: 1,
+      why: "Raw dot product keeps magnitude (attention reads it as confidence); cosine divides magnitude out (RAG cares only about direction). Same formula, opposite choice about the length."
+    }
+  ], "The dot product — self-check");
+
+});
+</script>
+</body>
+</html>

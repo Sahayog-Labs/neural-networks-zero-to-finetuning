@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>16. Batch, Mini-Batch & Noise — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the explorer pairs a loss curve with a contour of the loss
+   surface itself. Side by side on wide screens, stacked on a phone — and the
+   ledger scrolls inside its own box rather than widening the page. */
+.mb-grid { display: grid; grid-template-columns: 1.1fr 1fr; gap: 16px; align-items: start; }
+@media (max-width: 760px) {
+  .mb-grid { grid-template-columns: 1fr; }
+  .inner table.ledger { display: block; overflow-x: auto; white-space: nowrap; }
+}
+</style>
+</head>
+<body data-page="16-minibatch-and-noise.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part II · How It Learns</span>
+    <h1>Batch, Mini-Batch, Stochastic — and Why Noise Is a Feature</h1>
+    <p class="subtitle">Page 15's <code>zero_grad()</code> demo already trained on mini-batches without saying so out
+      loud. This page says it out loud: every step you've taken since page 14 has secretly been a choice about
+      <em>how many</em> examples to average before you move — and that choice is not just an efficiency knob. The
+      noise it introduces is one of the reasons neural networks generalize at all.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:CHAIN — the verb, still the same rule]</b>. Nothing about backprop changes: you still compute
+      $\nabla_\theta\mathcal L$ for each example the same way page 14 did by hand and page 15 watched PyTorch do.
+      <em>What's new</em> is what you average <em>before</em> you step — one example, a few dozen, or all of them.
+      <em>Reopen:</em> the accumulation footgun from page 15's <code>zero_grad()</code> demo — that demo used
+      mini-batches the whole time; this page names the mechanism. <b>[THREAD:MEM]</b> — held for page 18: a smaller
+      batch is also a smaller activation footprint per step, which is exactly the lever the memory ledger will turn.
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution: answered in "Why noise is a FEATURE" below and landed
+         live by the batch-size explorer's own numbers. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      You can compute the <em>exact</em> gradient over your whole dataset every step (full batch), or a noisy
+      estimate from just 32 examples (mini-batch). Which one trains a <b>better</b> model — and which one trains
+      <b>faster</b>? Commit to an answer for each before you keep reading.
+    </div>
+
+    <!-- ===================== INTUITION: THREE REGIMES ===================== -->
+    <h2>Three regimes, one update rule</h2>
+    <p>The update rule from page 13 never changed — $\theta_{k+1} = \theta_k - \eta\,\mathbf g_k$ — only <em>what
+      $\mathbf g_k$ is an average over</em> changes:</p>
+    <ul>
+      <li><b>Full batch.</b> $\mathbf g_k$ is the exact gradient over all $N$ examples. One step costs a full pass;
+        one step per epoch. Expensive, and — you'll see below — not actually the fastest way to train.</li>
+      <li><b>Stochastic (SGD, literally).</b> $\mathbf g_k$ is the gradient of a <em>single</em> example. Maximal
+        noise, maximal steps per epoch.</li>
+      <li><b>Mini-batch.</b> The universal compromise: $B$ examples, typically $B\in[8,\ \text{a few}\times10^3]$.
+        Almost everything you will ever train — including your LoRA runs later in this course — uses this regime.</li>
+    </ul>
+
+    <div class="box rule"><span class="box-title">📐 Epoch ≠ step</span>
+      An <b>epoch</b> is one full pass over the dataset. A <b>step</b> is one optimizer update. With batch size $B$
+      and $N$ examples, one epoch is $\lceil N/B\rceil$ steps — so the two only coincide at full batch. LLM
+      pretraining runs are frequently <b>less than one epoch</b> over a trillion-token corpus (there is no "second
+      pass" to speak of), which is exactly why every schedule in this course — warmup, cosine decay, page 21 — is
+      indexed by <b>step $k$</b>, never by epoch. "Epoch" is a batch-size-1990s habit that stops meaning much once
+      the dataset is bigger than any number of epochs you can afford.
+    </div>
+
+    <!-- ===================== L vs J ===================== -->
+    <h2>Where the $1/B$ lives</h2>
+    <p>Notation §2, stated once and held for the rest of the course: $\mathcal L$ is the loss of <em>one</em>
+      example; $J$ is what you actually minimize each step, the average over the batch. The gradient you step with
+      is the average of the per-example gradients — not their sum:</p>
+    <p>$$J = \frac{1}{B}\sum_{b=1}^{B}\mathcal L_b, \qquad \mathbf g_k=\nabla_\theta J=\frac{1}{B}\sum_{b=1}^{B}\nabla_\theta\mathcal L_b$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Shape / units</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$\mathcal L_b$</td><td>the loss of one example, index $b$, inside the batch</td><td>scalar (nats)</td><td>notation §2 · page 12</td></tr>
+        <tr><td>$B$</td><td>batch size — how many examples you average before stepping</td><td>scalar (a hyperparameter you choose)</td><td>this page</td></tr>
+        <tr><td>$b$</td><td>index of one example within the current batch</td><td>$1..B$</td><td>—</td></tr>
+        <tr><td>$J$</td><td>batch-averaged loss — the thing the optimizer actually sees</td><td>scalar (nats)</td><td>notation §2</td></tr>
+        <tr><td>$\mathbf g_k$</td><td>the gradient used at optimizer step $k$; $=\nabla_\theta J$ for this batch</td><td>same shape as $\theta$</td><td>notation §3 · page 13</td></tr>
+      </tbody>
+    </table>
+
+    <p><b>This $1/B$ is where a very common learning-rate bug is born.</b> If a framework accidentally
+      <em>sums</em> the per-example losses instead of averaging them, the gradient it hands the optimizer is $B$
+      times too large — and the step behaves as if you'd quietly multiplied your learning rate by $B$.</p>
+
+    <div class="box worked"><span class="box-title">✍️ Worked example — the summed-loss trap</span>
+      With $B$ example losses, $\nabla_\theta J=\frac1B\sum_b\nabla_\theta\mathcal L_b$, but a summed loss
+      $S=\sum_b\mathcal L_b$ gives $\nabla_\theta S=\sum_b\nabla_\theta\mathcal L_b = B\cdot\nabla_\theta J$ — exactly
+      $B$ times larger, for any $B$. So a step $\theta\leftarrow\theta-\eta\nabla_\theta S$ moves exactly as far as
+      a correct step with an inflated learning rate $\eta_{\text{eff}}=\eta B$. Concretely: intend $\eta=0.001$,
+      batch $B=32$, and sum instead of mean — every step actually behaves like
+      $\eta_{\text{eff}} = 0.001 \times 32 = \mathbf{0.032}$, thirty-two times too large. This is precisely why
+      PyTorch's built-in losses default to <code>reduction='mean'</code>.
+    </div>
+
+    <!-- ===================== WHY NOISE HELPS ===================== -->
+    <h2>Why noise is a FEATURE</h2>
+    <p>The instinct is to treat mini-batch noise as a tax you pay for not affording full batch. It is worse than
+      that instinct suggests, and better: <b>pure full-batch gradient descent on a neural net typically generalizes
+      worse</b>, not just trains slower. Three separate, real mechanisms are why.</p>
+    <ol>
+      <li><b>It escapes saddles and sharp minima.</b> A stochastic gradient is the true gradient plus noise. On a
+        saddle plateau the true gradient is nearly zero in some direction; the noise isn't, so a stochastic kick
+        pushes the iterate off the plateau where exact, quiet full-batch GD can sit for a very long time.</li>
+      <li><b>Implicit regularization.</b> SGD's noise biases the search toward <em>flatter</em> minima — regions of
+        parameter space that tolerate a nudge without the loss jumping — and flatter minima tend to generalize
+        better to data the model hasn't seen. Full-batch GD has no such bias; it goes wherever the exact gradient
+        points, sharp minima included.</li>
+      <li><b>Throughput.</b> More, cheaper, slightly-wrong steps beat fewer, expensive, exact ones. A full-batch
+        step over $N=256$ examples costs 256 forward/backward passes for <em>one</em> update; the same compute
+        buys 256 single-example updates. More updates per unit of compute usually wins, even though each one is
+        noisier.</li>
+    </ol>
+    <p>All three are real and independent — name them separately rather than folding them into one vague "noise
+      helps" shrug.</p>
+
+    <h2>Reading a noisy curve</h2>
+    <p>A mini-batch loss curve is jagged <em>by construction</em> — every step is a different, small, biased sample
+      of the true loss. That is not a sign of trouble. Judge the <b>trend over a window</b> of steps, not the
+      step-to-step wiggle. (Page 24 sharpens this into a diagnostic: a spike that lands on the <em>same</em> step
+      across different random seeds is data — a bad example, a numerical edge case; a spike that moves when you
+      change the seed is just noise doing what noise does.)</p>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <div class="box warn"><span class="box-title">⚠️ "Bigger batch is strictly better."</span>
+      Larger $B$ means less noise — but less noise means less of all three mechanisms above, often <em>worse</em>
+      generalization, and diminishing returns on wall-clock time. It also silently changes the effective learning
+      rate (see the worked example above) if you're not careful about mean-vs-sum. Bigger is not free.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Noise is a necessary evil we tolerate for speed."</span>
+      It is a <b>feature</b> with three separate, real mechanisms (saddle-escape, implicit regularization,
+      throughput) — not a compromise. Pure full-batch GD on a neural net typically generalizes <em>worse</em>, even
+      given unlimited compute.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ "Epoch and step are interchangeable — just different names."</span>
+      They coincide only at full batch. Schedules (warmup, decay — page 21) are indexed by <b>step $k$</b>; on a
+      trillion-token pretraining run, "epoch" barely applies at all.
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <h2>See it: the batch-size / noise explorer</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      A real <code>MLP([2,16,1])</code> trains live on the <code>moons</code> dataset (256 points) with
+      <code>NN.Trainer</code> and Adam. Drag the batch-size slider — the model always starts from the <em>same</em>
+      initial weights, so the comparison is fair, and the training budget is always <b>10 epochs</b> of data, so
+      $B{=}1$ gets far more (noisier) updates than $B{=}256$ gets exact ones. Left: the real loss curve, mini-batch
+      values as reported by the optimizer. Right: the actual loss surface sliced through two of this network's real
+      weights (everything else held at its current value, recomputed as training moves), with the live trajectory
+      of those two weights drawn on top — not a cartoon bowl, this network's own landscape.
+    </div>
+    <div class="demo">
+      <div class="demo-head">Batch size vs. loss curve vs. trajectory <span class="demo-tag">Live training</span></div>
+      <div class="demo-body">
+        <div class="controls" id="mb-ctrls"></div>
+        <div class="mb-grid">
+          <div><canvas id="mb-loss" height="280"></canvas></div>
+          <div><canvas id="mb-surf" height="280"></canvas></div>
+        </div>
+        <p style="margin:12px 0 0"><button class="btn secondary" id="mb-reset">Reset (new random init)</button></p>
+        <div class="readout" id="mb-out">Starting…</div>
+      </div>
+    </div>
+
+    <div class="box try"><span class="box-title">Try it on your box</span>
+      <code>code/16_batch_regimes.py</code> — the same MLP trained at $B\in\{1,8,32,\text{full}\}$; logs steps-to-a
+      -target-loss and final validation loss, and shows the mean-vs-sum effective-learning-rate effect from the
+      worked example above.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz16"></div>
+
+    <p style="color:var(--text-dim);font-size:.9rem;margin-top:2em">
+      <b>Where this connects.</b> ← Page&nbsp;13 introduced the landscape a noisy gradient has to navigate (saddles
+      included). ← Page&nbsp;15's <code>zero_grad()</code> demo was already mini-batched. → Page&nbsp;17's
+      optimizers spend their whole design averaging these noisy gradients <em>over time</em> (momentum, Adam's
+      $\hat v$). → Page&nbsp;21 schedules the learning rate by step $k$, not epoch, for exactly the reason above.
+      → Page&nbsp;24 turns "judge the trend, not the wiggle" into a real debugging tool.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- Batch-size / noise explorer ----
+     A real MLP([2,16,1]) trains on a real moons dataset via NN.Trainer at a
+     user-chosen batch size. Left: the actual (noisy) loss curve. Right: a
+     live contour of this network's OWN loss surface, sliced through two real
+     weight coordinates, with the live parameter trajectory drawn on it.
+     Nothing here is pre-baked: every loss value, every contour cell, and
+     every trajectory point comes from a live forward (and, for training,
+     backward) pass through the real engine. */
+  (function () {
+    const { MLP, Adam, Trainer, RNG, makeDataset, bceWithLogits } = NN;
+
+    const lossCanvas = document.getElementById("mb-loss");
+    const surfCanvas = document.getElementById("mb-surf");
+    const out = document.getElementById("mb-out");
+    const resetBtn = document.getElementById("mb-reset");
+
+    // Fixed dataset for the whole demo — only the batch size and the model's
+    // random init change between runs, so the comparison is apples to apples.
+    const N = 256;
+    const data = makeDataset("moons", N, { rng: new RNG(11), noise: 0.2 });
+
+    // Fixed 43-point evaluation subsample for the contour (every 6th example
+    // — moons' first half is class 0 and second half class 1, so a stride
+    // keeps both classes represented). Recomputing a 21x21 contour against
+    // the full 256 points every few steps would be needless work for a
+    // background visual; this subsample is still REAL data, just fewer of it
+    // — itself a small mini-batch, fittingly.
+    const evalIdx = []; for (let i = 0; i < N; i += 6) evalIdx.push(i);
+    const evalX = evalIdx.map(i => data.X[i]);
+    const evalY = evalIdx.map(i => data.y[i]);
+
+    // Two real weight coordinates to slice through: the first hidden unit's
+    // first input weight (param index 0), and the output layer's weight
+    // from that same hidden unit (param index 16*3 + 0 = 48). Both have a
+    // direct, visible effect on the loss.
+    const I0 = 0, I1 = 48;
+
+    function surfaceLoss(model, vx, vy) {
+      const base = model.getParameters();
+      const arr = base.slice();
+      arr[I0] = vx; arr[I1] = vy;
+      model.setParameters(arr);
+      let s = 0;
+      for (let i = 0; i < evalX.length; i++) {
+        s += bceWithLogits(model.forward(evalX[i]), [evalY[i]]).data;
+      }
+      model.setParameters(base); // restore — this is a read-only slice, not a step
+      return s / evalX.length;
+    }
+
+    const BATCH_VALS = [1, 8, 32, 256];
+    const EPOCH_BUDGET = 10;
+    const THRESHOLD = 0.4; // below ln(2)=0.693 random-guess baseline
+
+    let model, opt, trainer, surf, timeline;
+    let totalSteps, stepsPerEpoch, recomputeEvery, evalEvery;
+    let lastRecompute, lastEval, thresholdStep, lastFullLoss, raf = null;
+    let modelSeed = 5;
+
+    const batchCtrl = makeCtrl(document.getElementById("mb-ctrls"), {
+      label: "batch size B", min: 0, max: 3, step: 1, value: 2,
+      fmt: v => String(BATCH_VALS[Math.round(v)])
+    });
+
+    function fmtPct(x) { return (x * 100).toFixed(0) + "%"; }
+
+    function readout(miniLoss) {
+      const step = trainer.step_;
+      const epoch = (step / stepsPerEpoch).toFixed(2);
+      const thStr = thresholdStep == null
+        ? "not yet"
+        : `step <b>${thresholdStep}</b> (epoch <b>${(thresholdStep / stepsPerEpoch).toFixed(2)}</b>)`;
+      out.innerHTML =
+        `B = <b>${trainer.batchSize || N}</b> · steps/epoch = <b>${stepsPerEpoch}</b> · ` +
+        `step <b>${step}</b>/${totalSteps} (epoch <b>${epoch}</b>/${EPOCH_BUDGET}) · ` +
+        `mini-batch loss <b>${isFinite(miniLoss) ? miniLoss.toFixed(3) : "—"}</b> · ` +
+        `full-data loss <b>${isFinite(lastFullLoss) ? lastFullLoss.toFixed(3) : "—"}</b> · ` +
+        `first crossed loss &lt; ${THRESHOLD} at ${thStr}`;
+    }
+
+    function build() {
+      if (raf != null) { cancelAnimationFrame(raf); raf = null; }
+      const idx = Math.round(batchCtrl.get());
+      const B = BATCH_VALS[idx];
+
+      model = new MLP([2, 16, 1], { act: "tanh", rng: new RNG(modelSeed) });
+      opt = new Adam(model.parameters(), { lr: 0.05 });
+      trainer = new Trainer({ model, X: data.X, y: data.y, loss: "bce", opt, batchSize: B === N ? 0 : B, rng: new RNG(7000 + modelSeed) });
+
+      stepsPerEpoch = Math.ceil(N / B);
+      totalSteps = EPOCH_BUDGET * stepsPerEpoch;
+      recomputeEvery = Math.max(1, Math.round(totalSteps / 20));
+      evalEvery = Math.max(1, Math.round(totalSteps / 40));
+      lastRecompute = 0; lastEval = 0; thresholdStep = null; lastFullLoss = trainer.evalLoss(data.X, data.y);
+
+      if (!surf) {
+        surf = new Surface3D(surfCanvas, {
+          fn: (x, y) => surfaceLoss(model, x, y),
+          xmin: -3, xmax: 3, ymin: -3, ymax: 3, mode: "contour", levels: 12, resolution: 20,
+        });
+      } else {
+        surf.setFn((x, y) => surfaceLoss(model, x, y)); // rebinds to the NEW model + recomputes
+        surf.clearTrajectory();
+      }
+
+      // Left panel: the REAL mini-batch loss curve, log-y (Timeline(canvas,
+      // {ylog,...}) — thin Plot wrapper). One push per animation frame in
+      // run() below, same convention as 40-lora.html / TEMPLATE-example.html.
+      if (!timeline) {
+        timeline = new Timeline(lossCanvas, { ylog: true, ylabel: "mini-batch loss", xlabel: "step" });
+      } else {
+        timeline.reset(); // new batch size / new init — start the curve over
+      }
+      const theta0 = model.getParameters();
+      surf.addPoint(theta0[I0], theta0[I1]); // starting point, same for every batch size
+
+      readout(NaN);
+    }
+
+    function run() {
+      const K = Math.max(1, Math.round(totalSteps / 120)); // native steps per animation frame
+      const loop = () => {
+        const miniLoss = trainer.steps(K);
+        const theta = model.getParameters();
+        surf.addPoint(theta[I0], theta[I1]);
+        timeline.push(trainer.step_, miniLoss); // the real, noisy mini-batch loss — not a cartoon curve
+
+        if (trainer.step_ - lastRecompute >= recomputeEvery) {
+          lastRecompute = trainer.step_;
+          surf.recompute(); // re-slice the REAL surface at the current other-63 weights
+        }
+        if (trainer.step_ - lastEval >= evalEvery || trainer.step_ >= totalSteps) {
+          lastEval = trainer.step_;
+          lastFullLoss = trainer.evalLoss(data.X, data.y); // true, non-noisy signal
+          if (thresholdStep == null && lastFullLoss < THRESHOLD) {
+            thresholdStep = trainer.step_;
+            timeline.addMarker(thresholdStep, "threshold");
+          }
+        }
+        readout(miniLoss);
+
+        if (trainer.step_ < totalSteps) raf = requestAnimationFrame(loop);
+        else raf = null;
+      };
+      raf = requestAnimationFrame(loop);
+    }
+
+    batchCtrl.onInput(() => { build(); run(); });
+    resetBtn.addEventListener("click", () => { modelSeed = (modelSeed + 37) % 100000; build(); run(); });
+    document.getElementById("theme-toggle")?.addEventListener("click", () => setTimeout(() => { surf && surf.draw(); timeline && timeline.draw(); }, 0));
+
+    build();
+    run();
+  })();
+
+  /* ---------------- QUIZ ---------------- */
+  renderQuiz("quiz16", [
+    {
+      q: "The factor $1/B$ that averages a batch's gradient lives in:",
+      opts: [
+        "$J$, the batch-averaged loss — not $\\mathcal L$",
+        "$\\mathcal L$, the per-example loss — not $J$",
+        "Neither; the optimizer applies it after computing the gradient",
+        "Both equally"
+      ],
+      a: 0,
+      why: "$\\mathcal L_b$ is per-example and carries no $1/B$. $J=\\frac1B\\sum_b\\mathcal L_b$ is where the average — and the $1/B$ — is defined."
+    },
+    {
+      q: "A loss is <b>summed</b>, not averaged, over a batch of $B=32$. The effective learning rate is off by a factor of:",
+      num: 32, tol: 1, unit: "×",
+      why: "$\\nabla_\\theta S = B\\cdot\\nabla_\\theta J$, so a step with the summed gradient moves like a correctly-averaged step at $\\eta_{\\text{eff}}=\\eta B = \\eta\\times32$ — thirty-two times too large."
+    },
+    {
+      q: "Which of these is <b>not</b> one of the three real reasons mini-batch noise helps?",
+      opts: [
+        "It can kick the iterate off a saddle plateau that exact full-batch GD sits on",
+        "It biases the search toward flatter, better-generalizing minima (implicit regularization)",
+        "More, cheaper, slightly-wrong steps beat fewer, exact ones for the same compute (throughput)",
+        "It prevents floating-point overflow in the loss"
+      ],
+      a: 3,
+      why: "Saddle-escape, implicit regularization, and throughput are the three named mechanisms. Overflow prevention is unrelated — that's what a numerically stable softmax/log-sum-exp (page 9) is for."
+    },
+    {
+      q: "Learning-rate schedules (warmup, cosine decay — page 21) are indexed by:",
+      opts: ["Epoch", "Step $k$", "Wall-clock time", "Batch size $B$"],
+      a: 1,
+      why: "Epoch and step only coincide at full batch, and a large pretraining run may not even complete one epoch. Every schedule in this course is indexed by the optimizer step $k$."
+    },
+    {
+      q: "You're watching a mini-batch training loss and it jumps around step to step without any clear downward trend over the last 50 steps. What should you conclude?",
+      opts: [
+        "The run is diverging — cut the learning rate immediately",
+        "This is normal mini-batch jaggedness; judge the trend over a window, and 50 flat, noisy steps is a real signal worth investigating — but the jaggedness itself is not evidence of divergence",
+        "The model has a bug in the loss function",
+        "Batch size is too large"
+      ],
+      a: 1,
+      why: "Step-to-step jaggedness is expected and not itself a problem — but a flat trend held over a real window (not 2-3 steps) is a legitimate signal (plateau, saturated LR, etc.) worth chasing, which page 24 turns into a systematic checklist."
+    },
+    {
+      q: "Compared to a small batch, a much larger batch size, all else equal, tends to:",
+      opts: [
+        "Strictly improve generalization, with no downside",
+        "Reduce gradient noise, which often <em>worsens</em> generalization, gives diminishing wall-clock returns, and silently changes the effective learning rate if losses aren't correctly averaged",
+        "Have no effect on noise or generalization",
+        "Only ever speed up training with no tradeoff"
+      ],
+      a: 1,
+      why: "Larger B trades away exactly the noise that does useful work (saddle-escape, implicit regularization, throughput) — it is not a free upgrade."
+    }
+  ], "Batch, mini-batch & noise — self-check");
+
+});
+</script>
+</body>
+</html>

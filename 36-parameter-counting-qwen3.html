@@ -1,0 +1,565 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>36. Parameter Counting on Qwen3-8B — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+/* Page-scoped: the parameter-derivation tables and the config JSON carry long
+   integers and KaTeX that overflow a phone. Let each wide block scroll inside
+   its own box so the page body never scrolls horizontally. Desktop is untouched. */
+@media (max-width: 900px) {
+  .inner table { display: block; overflow-x: auto; white-space: nowrap; }
+}
+/* The config-counter demo lays its sliders out two-up on wide screens. */
+#pc-ctrls { display: grid; grid-template-columns: 1fr 1fr; gap: 4px 22px; }
+@media (max-width: 620px) { #pc-ctrls { grid-template-columns: 1fr; } }
+.pc-presets { margin: 4px 0 12px; display: flex; gap: 8px; flex-wrap: wrap; }
+.pc-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px 18px; margin-top: 6px; }
+.pc-grid .cell { border-bottom: 1px solid var(--border); padding: 6px 2px; }
+.pc-grid .cell .k { color: var(--text-dim); font-size: .8em; text-transform: uppercase; letter-spacing: .4px; }
+.pc-grid .cell .v { font-family: var(--mono); color: var(--accent2); font-size: 1.05em; font-weight: 700; }
+.pc-sub { font-family: var(--mono); font-size: .92em; margin-top: 10px; color: var(--text); }
+.lock { color: var(--good); font-weight: 700; }
+</style>
+</head>
+<body data-page="36-parameter-counting-qwen3.html">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part III · Architecture · 🚩 Milestone</span>
+    <h1>Parameter Counting on Qwen3-8B — Closed Twice</h1>
+    <p class="subtitle">You assembled the block on the last page. Now we count it. Four numbers from a
+      <code>config.json</code> — 4096, 36, 12288, 151936 — become <b>8,190,735,360</b> exactly, and we confirm it
+      two independent ways: from the formula, and from the checkpoint's own byte total, halved. Nothing about this
+      model is hidden. You can compute it.</p>
+
+    <div class="box key"><span class="box-title">🧵 Thread</span>
+      <b>[THREAD:Qwen3-8B — the anchor, the climax]</b> · <b>[THREAD:memory-budget — the reality check]</b>. Every
+      page since 25 has leaned on the fourteen frozen Qwen3-8B numbers. This is where they close: the whole model,
+      to the byte. Then the memory-budget thread — 16&nbsp;B/param from page&nbsp;18, the KV cache you'll size on
+      page&nbsp;37 — lands on the one question this course exists to answer: <em>does a full fine-tune fit on the box
+      you own?</em> Reopen page&nbsp;35 (the block, 192,946,432 params) and page&nbsp;18 (the 16-byte ledger).
+    </div>
+
+    <!-- ===================== PREDICT ===================== -->
+    <!-- on-page-resolution rule: answered in "The verification" section below,
+         and restated in the resolution note directly after it. -->
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Qwen3-8B's model card says <b>“8.2B total, 6.95B non-embedding.”</b> From four numbers in the config —
+      <code>4096</code> (width), <code>36</code> (layers), <code>12288</code> (FFN inner), <code>151936</code>
+      (vocab) — can you recover that count <b>exactly, to the byte</b>, or only to a rough 5%? Commit before you
+      scroll.
+    </div>
+
+    <!-- ===================== THE GENERAL FORMULA ===================== -->
+    <h2>The formula, before the arithmetic</h2>
+    <p>A transformer's parameters live in exactly three places per block, plus the vocabulary at the two ends. Every
+      one is a matrix whose size you already know from page&nbsp;35. Per block:</p>
+
+    <p>$$P_{\text{attn}} = 2\,d\,d_{\text{head}}(H + H_{kv}), \qquad
+        P_{\text{ffn}} = 3\,d\,d_{\text{ff}}, \qquad
+        P_{\text{norm}} = 2d + 2\,d_{\text{head}}$$</p>
+
+    <p>and the whole model stacks $L$ of them between an input embedding and an output head:</p>
+
+    <p>$$P_{\text{total}} \;=\; \underbrace{Vd}_{\text{embed}} \;+\; L\cdot P_{\text{block}} \;+\;
+        \underbrace{d}_{\text{final norm}} \;+\; \underbrace{Vd\cdot\mathbb{1}[\neg\text{tied}]}_{\text{lm\_head}}$$</p>
+
+    <table class="ledger">
+      <thead><tr><th>Symbol</th><th>Is</th><th>Value (Qwen3-8B)</th><th>From</th></tr></thead>
+      <tbody>
+        <tr><td>$d$</td><td>residual-stream width (<code>hidden_size</code>)</td><td>4096</td><td>config</td></tr>
+        <tr><td>$L$</td><td>number of blocks (<code>num_hidden_layers</code>)</td><td>36</td><td>config</td></tr>
+        <tr><td>$H$</td><td>query heads (<code>num_attention_heads</code>)</td><td>32</td><td>config</td></tr>
+        <tr><td>$H_{kv}$</td><td>key/value heads (<code>num_key_value_heads</code>)</td><td>8</td><td>config — the GQA number</td></tr>
+        <tr><td>$d_{\text{head}}$</td><td>per-head dim (<code>head_dim</code>)</td><td>128</td><td>config</td></tr>
+        <tr><td>$d_{\text{ff}}$</td><td>FFN inner width (<code>intermediate_size</code>)</td><td>12288 $=3d$</td><td>config — page&nbsp;35</td></tr>
+        <tr><td>$V$</td><td>vocabulary size (<code>vocab_size</code>)</td><td>151936</td><td>config</td></tr>
+        <tr><td>$P_{\text{block}}$</td><td>parameters in one transformer block</td><td>192,946,432</td><td>page&nbsp;35, verified below</td></tr>
+        <tr><td>$\mathbb{1}[\neg\text{tied}]$</td><td>1 if <code>lm_head</code> is a separate matrix</td><td>1 (<code>tie_word_embeddings: false</code>)</td><td>config</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box rule"><span class="box-title">📐 Two things that are <em>not</em> in the formula — and why</span>
+      <p><b>No positional-embedding table.</b> RoPE (page&nbsp;33) rotates $Q$ and $K$ by pure geometry — <b>zero
+        parameters</b>. There is no learned position table to count.</p>
+      <p><b>No biases.</b> <code>attention_bias: false</code>, and the SwiGLU FFN has none either — with RMSNorm
+        carrying a learned gain, biases are redundant (page&nbsp;35). Every matrix above is weight-only.</p>
+    </div>
+
+    <div class="box rule"><span class="box-title">🗺️ Translation note — our symbols vs the config keys</span>
+      Papers and configs spell these a dozen ways. Course-wide we write $d$ (papers: $d_{\text{model}}$,
+      <code>hidden_size</code>), $L$ (<code>num_hidden_layers</code>, papers' $N$), $H$
+      (<code>num_attention_heads</code>), $H_{kv}$ (<code>num_key_value_heads</code>, $n_{kv}$), $d_{\text{head}}$
+      ($d_k$, <code>head_dim</code>), $V$ (<code>vocab_size</code>, sometimes $K$). Open the config alongside this
+      page and the mapping is one-to-one.
+    </div>
+
+    <!-- ===================== THE CONFIG ===================== -->
+    <h2>The config we're counting — fetched, not remembered</h2>
+    <div class="codeblock" data-lang="json">
+      <div class="codeblock-head"><span class="lang-tag">Qwen3-8B/config.json</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line">{<span class="tok-str">"hidden_size"</span>: <span class="tok-num">4096</span>, <span class="tok-str">"num_hidden_layers"</span>: <span class="tok-num">36</span>, <span class="tok-str">"num_attention_heads"</span>: <span class="tok-num">32</span>,</span>
+<span class="line"> <span class="tok-str">"num_key_value_heads"</span>: <span class="tok-num">8</span>, <span class="tok-str">"head_dim"</span>: <span class="tok-num">128</span>, <span class="tok-str">"intermediate_size"</span>: <span class="tok-num">12288</span>,</span>
+<span class="line"> <span class="tok-str">"vocab_size"</span>: <span class="tok-num">151936</span>, <span class="tok-str">"tie_word_embeddings"</span>: <span class="tok-kw">false</span>, <span class="tok-str">"rms_norm_eps"</span>: <span class="tok-num">1e-06</span>,</span>
+<span class="line"> <span class="tok-str">"rope_theta"</span>: <span class="tok-num">1000000</span>, <span class="tok-str">"max_position_embeddings"</span>: <span class="tok-num">40960</span>, <span class="tok-str">"hidden_act"</span>: <span class="tok-str">"silu"</span>,</span>
+<span class="line"> <span class="tok-str">"attention_bias"</span>: <span class="tok-kw">false</span>, <span class="tok-str">"torch_dtype"</span>: <span class="tok-str">"bfloat16"</span>}</span></code></pre>
+    </div>
+
+    <!-- ===================== WORKED, EXACTLY ===================== -->
+    <h2>Worked, exactly — the arithmetic <em>is</em> the lesson</h2>
+    <p>Every multiplication below is a shape you can read off the config. Carry them all; the point is that nothing
+      is estimated.</p>
+
+    <p><b>Attention, per block</b> — four projection matrices, each $(d_{\text{out}}, d_{\text{in}})$:</p>
+    <table>
+      <thead><tr><th>Tensor</th><th>Shape (out × in)</th><th>Params</th></tr></thead>
+      <tbody>
+        <tr><td><code>q_proj</code></td><td>4096 × 4096</td><td>16,777,216</td></tr>
+        <tr><td><code>k_proj</code></td><td>1024 × 4096</td><td>4,194,304</td></tr>
+        <tr><td><code>v_proj</code></td><td>1024 × 4096</td><td>4,194,304</td></tr>
+        <tr><td><code>o_proj</code></td><td>4096 × 4096</td><td>16,777,216</td></tr>
+        <tr><td colspan="2"><b>attention subtotal</b> &nbsp; $2\,d\,d_{\text{head}}(H+H_{kv})$</td><td><b>41,943,040</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box worked"><span class="box-title">✍️ The GQA dividend, in parameters</span>
+      Because $H_{kv}=8$, not 32, <code>k_proj</code> and <code>v_proj</code> are $1024\times4096$, not
+      $4096\times4096$. Multi-head attention (MHA, $H_{kv}=H$) would make each 16,777,216, a subtotal of
+      <b>67,108,864</b>. GQA saves $67{,}108{,}864 - 41{,}943{,}040 = \mathbf{25{,}165{,}824}$ per block —
+      <b>37.5%</b> of the MHA attention block. And that is <em>before</em> the 4× KV-cache saving you'll count on
+      page&nbsp;37: two wins from one config field.
+    </div>
+
+    <p><b>FFN, per block</b> — three matrices (SwiGLU: gate, up, down), each $4096\times12288$:</p>
+    <table>
+      <thead><tr><th>Tensor</th><th>Shape</th><th>Params</th></tr></thead>
+      <tbody>
+        <tr><td><code>gate_proj</code></td><td>12288 × 4096</td><td>50,331,648</td></tr>
+        <tr><td><code>up_proj</code></td><td>12288 × 4096</td><td>50,331,648</td></tr>
+        <tr><td><code>down_proj</code></td><td>4096 × 12288</td><td>50,331,648</td></tr>
+        <tr><td colspan="2"><b>FFN subtotal</b> &nbsp; $3\,d\,d_{\text{ff}}$</td><td><b>150,994,944</b></td></tr>
+      </tbody>
+    </table>
+
+    <div class="box key"><span class="box-title">🔑 The FFN is 78% of the block</span>
+      $150{,}994{,}944 / 192{,}946{,}432 = \mathbf{78.26\%}$. The page-35 claim, verified. Attention gets all the
+      attention; the feed-forward network holds most of the weights — which is exactly why MoE (page&nbsp;38)
+      sparsifies the FFN and not attention.
+      <br><span style="color:var(--text-dim)">Careful with denominators: 78.26% is the FFN's share of one
+      <em>block</em>. Of the <em>whole model</em> it's 66.4% (different denominator — both are true). Never the
+      retired “~70%,” which was a Llama-3.1 figure with $d_{\text{ff}}=3.5d$.</span>
+    </div>
+
+    <p><b>Norms, per block</b> — two RMSNorms on the residual stream (page&nbsp;34) plus QK-Norm (page&nbsp;30):</p>
+    <table>
+      <tbody>
+        <tr><td><code>input_layernorm</code> + <code>post_attention_layernorm</code></td><td>2 × 4096</td><td>8,192</td></tr>
+        <tr><td><code>q_norm</code> + <code>k_norm</code> (QK-Norm, over $d_{\text{head}}$)</td><td>2 × 128</td><td>256</td></tr>
+        <tr><td><b>norm subtotal</b></td><td>$2d + 2d_{\text{head}}$</td><td><b>8,448</b></td></tr>
+      </tbody>
+    </table>
+
+    <p>So one block is $41{,}943{,}040 + 150{,}994{,}944 + 8{,}448 = \mathbf{192{,}946{,}432}$, and there are 36 of
+      them: $192{,}946{,}432 \times 36 = \mathbf{6{,}946{,}071{,}552}$ — the <b>non-embedding</b> parameters.
+      Now the two ends:</p>
+
+    <table>
+      <thead><tr><th>Tensor</th><th>Shape</th><th>Params</th></tr></thead>
+      <tbody>
+        <tr><td>36 blocks</td><td>$L\cdot P_{\text{block}}$</td><td>6,946,071,552</td></tr>
+        <tr><td><code>embed_tokens</code></td><td>151936 × 4096</td><td>622,329,856</td></tr>
+        <tr><td><code>lm_head</code> (untied)</td><td>151936 × 4096</td><td>622,329,856</td></tr>
+        <tr><td><code>model.norm</code> (final)</td><td>4096</td><td>4,096</td></tr>
+        <tr><td><b>TOTAL</b></td><td></td><td><b>8,190,735,360</b></td></tr>
+      </tbody>
+    </table>
+
+    <p>$6{,}946{,}071{,}552 + 622{,}329{,}856 + 622{,}329{,}856 + 4{,}096 = \mathbf{8{,}190{,}735{,}360}$. That is
+      the entire model. No rounding entered anywhere.</p>
+
+    <!-- ===================== THE VERIFICATION ===================== -->
+    <h2>✅ The verification — closed twice</h2>
+    <p>A formula that lands on a suspiciously round “8.2B” could be coincidence. It isn't — and here is how you
+      know, two independent ways that never touch each other.</p>
+
+    <div class="box rule"><span class="box-title">Route 1 — the model card</span>
+      Qwen's card publishes <b>8.2B total</b> and <b>6.95B non-embedding</b>. Our non-embedding
+      $6{,}946{,}071{,}552 = 6.95\text{B}$ exact; our total $8{,}190{,}735{,}360 = 8.19\text{B} \to$ “8.2B” exact.
+      Every published figure matches.
+    </div>
+
+    <div class="box rule"><span class="box-title">Route 2 — the checkpoint's own bytes (the independent route)</span>
+      The checkpoint ships a <code>model.safetensors.index.json</code> with a field <code>total_size</code> =
+      <b>16,381,470,720</b> bytes. All 399 tensors are bf16 — 2 bytes each. So the parameter count is just
+      $$16{,}381{,}470{,}720 \,/\, 2 \;=\; \mathbf{8{,}190{,}735{,}360}.$$
+      <b>The exact same integer — from the checkpoint itself, not from any formula.</b> Two roads, one number.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 Nothing about this model is hidden</span>
+      We derived, from four numbers in a config and nothing else, a count that matches the official card to every
+      significant figure they publish — and the checkpoint's own byte total, halved, lands on the same integer.
+      This is the most empowering fact in the unit: <b>open any HuggingFace config and you can predict the
+      parameter count to a rounding error.</b> <span class="lock">Prediction resolved: exactly, to the byte — not
+      to a rough 5%.</span>
+    </div>
+
+    <!-- ===================== LoRA RECONCILIATION ===================== -->
+    <h2>A trap you'll hit in Part IV — the LoRA-target subtotal</h2>
+    <p>When you configure LoRA (page&nbsp;40) to target “all linear layers,” the tooling reports a base count of
+      <b>6,945,767,424</b> — 7 linear matrices per layer, times 36. That is <em>not</em> the model's parameter
+      count, and a learner who confuses the two spends an afternoon confused. It's smaller because it <b>omits the
+      norms</b> (norms aren't LoRA targets — correctly) and both embedding matrices. It reconciles to the full
+      count exactly when you add them back:</p>
+
+    <div class="box worked"><span class="box-title">✍️ It closes to the byte</span>
+      $$6{,}945{,}767{,}424 \;+\; \underbrace{36 \times 8{,}448}_{304{,}128\ \text{block norms}} \;+\;
+        \underbrace{4{,}096}_{\text{final norm}} \;+\; \underbrace{2 \times 622{,}329{,}856}_{\text{embed + lm\_head}}
+        \;=\; \mathbf{8{,}190{,}735{,}360}.$$
+      <b>Exact.</b> Not “closes to three significant figures” — it closes to the byte, and saying so is the point.
+    </div>
+
+    <!-- ===================== THE THREE DOWNSTREAM NUMBERS ===================== -->
+    <h2>The three numbers you can now produce for any model</h2>
+    <p>Once you have $P$, three memory numbers fall out by multiplication. These are the numbers that decide what
+      you can run.</p>
+
+    <p><b>(1) Weights in memory</b> $= P \times b_W$. At bf16 (2 bytes):
+      $8{,}190{,}735{,}360 \times 2 = 16{,}381{,}470{,}720\ \text{B} = \mathbf{16.38\ GB}$. At fp8, 8.19 GB;
+      at int4, ~4.1 GB (plus scales); at fp32, 32.8 GB (nobody does this for inference).</p>
+
+    <p><b>(2) KV cache</b> (sized fully on page&nbsp;37): <b>144 KiB/token</b>, and <b>5.625 GiB</b> at the full
+      40,960-token context. That is $2 \cdot L \cdot H_{kv} \cdot d_{\text{head}} \cdot 2\text{ B} = 147{,}456$ B
+      per token — note $H_{kv}=8$, not $H=32$; the same GQA field, paying a second time.</p>
+
+    <p><b>(3) Full fine-tune memory</b> — the memory-budget thread's climax. Standard bf16 mixed precision with
+      AdamW stores <b>16 bytes per parameter</b> (the ledger you built on page&nbsp;18 — reopen it for the
+      <em>why</em> of each row):</p>
+
+    <table class="ledger">
+      <thead><tr><th>Item</th><th>Precision</th><th>B/param</th><th>Qwen3-8B</th></tr></thead>
+      <tbody>
+        <tr><td>weights</td><td>bf16</td><td>2</td><td>16.38 GB</td></tr>
+        <tr><td>gradients</td><td>bf16</td><td>2</td><td>16.38 GB</td></tr>
+        <tr><td>fp32 master weights</td><td>fp32</td><td>4</td><td>32.76 GB</td></tr>
+        <tr><td>Adam $m$</td><td>fp32</td><td>4</td><td>32.76 GB</td></tr>
+        <tr><td>Adam $v$</td><td>fp32</td><td>4</td><td>32.76 GB</td></tr>
+        <tr><td><b>total state</b></td><td></td><td><b>16</b></td><td><b>131.05 GB = 122.05 GiB</b></td></tr>
+      </tbody>
+    </table>
+
+    <p>$8{,}190{,}735{,}360 \times 16\text{ B} = 131{,}051{,}765{,}760\text{ B} = \mathbf{131.05\ GB}$ (decimal)
+      $= \mathbf{122.05\ GiB}$ (binary). <b>Memorize 16P.</b></p>
+
+    <div class="box warn"><span class="box-title">⚠️ This is STATE ONLY — activations are a separate line</span>
+      The 122.05 GiB above is weights + gradients + optimizer state. <b>Activations are counted separately,
+      always.</b> With gradient checkpointing at $B=1, S=2048$ they add an estimated <b>2–6 GB</b> [EST] on top;
+      without checkpointing, far more. Never fold activations silently into the state number — it's the mistake
+      that makes two blog posts look like they contradict each other.
+    </div>
+
+    <!-- ===================== THE DGX-SPARK BEAT ===================== -->
+    <h2>Does it fit on <em>your</em> box? Measure it.</h2>
+    <p>This is the question the whole course points at, and the honest version does not assert a budget — it hands
+      you a script. Step one of it is one line:</p>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">Python</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> torch</span>
+<span class="line">free, total = torch.cuda.<span class="tok-fn">mem_get_info</span>()   <span class="tok-com"># bytes, on your GB10</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"usable now: {free/2**30:.2f} GiB of {total/2**30:.2f} GiB"</span>)</span>
+<span class="line">state = <span class="tok-num">8_190_735_360</span> * <span class="tok-num">16</span>            <span class="tok-com"># full-FT state, bytes</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"full-FT state: {state/2**30:.2f} GiB"</span>)  <span class="tok-com"># 122.05</span></span></code></pre>
+    </div>
+
+    <div class="box warn"><span class="box-title">⚠️ Published capacity is never usable capacity</span>
+      Measured on the learner's own DGX Spark (2026-07-16) <b>[MEA-DEV]</b>: usable <code>MemTotal</code> =
+      <b>121.6875 GiB</b>, not the 128 on the box. A firmware carveout eats <b>6.3125 GiB (4.9%)</b> of the
+      physical 128 GiB before a single byte is allocated. So the comparison the script prints for you is
+      $$122.05\ \text{GiB (state)} \;-\; 121.6875\ \text{GiB (usable)} \;=\; \mathbf{-0.36\ GiB}.$$
+      <b>A full fine-tune of an 8B model does not fit — by 0.3%, before activations.</b> Not by a comfortable
+      margin, not with room to spare: by a hair. You find this out by measuring, not by trusting the spec sheet —
+      which is off by 4.9% before you start.
+    </div>
+
+    <div class="box key"><span class="box-title">🔑 The hand-off to Part IV</span>
+      Full fine-tuning your 8B: 122&nbsp;GiB of state, misses your box by a hair, before activations. LoRA:
+      ~16&nbsp;GB state, fits many times over. State-to-state that's <b>131.05&nbsp;GB → 17.08&nbsp;GB = 7.67×</b>;
+      counting only the <em>trainable</em> state it's <b>114.67&nbsp;GB → 0.61&nbsp;GB = 187×</b> — and 187 is
+      exactly the parameter ratio $8{,}190{,}735{,}360 / 43{,}646{,}976 = 187.7$. That gap is the entire reason this
+      course's destination is reachable on hardware you own. The next Part is how.
+    </div>
+
+    <!-- ===================== DECODE CEILING ===================== -->
+    <h2>A bonus number: your decode speed ceiling</h2>
+    <p>At decode you read <em>every weight for every token</em>. The Spark's memory bandwidth is
+      <b>273 GB/s [VP]</b>, so the time to stream 16.38&nbsp;GB of bf16 weights once is the floor on one token:</p>
+    <div class="box worked"><span class="box-title">✍️ 16.67 tok/s, and why quantizing quadruples it</span>
+      $16.38\ \text{GB} / 273\ \text{GB/s} = 60\ \text{ms/token} \Rightarrow \mathbf{16.67\ tok/s}$ — the
+      <em>ceiling</em>. Realistic expectation is about <b>10.8 tok/s</b> ($\times0.65$; the ceiling is 16.67, the
+      expectation is 10.8 — say which is which). This is page&nbsp;28's irony made numeric: at decode a transformer
+      has RNN economics, bandwidth-bound. It's also why int4 (~4.10&nbsp;GB → ~66.6 tok/s ceiling) roughly
+      quadruples decode speed <em>even though it changes nothing about the FLOPs</em>. You've watched your tok/s
+      jump when you quantize in ComfyUI — now you can predict it with one division. (Measured for real on
+      page&nbsp;43.)
+    </div>
+
+    <!-- ===================== MISCONCEPTIONS ===================== -->
+    <h2>Three ways the count gets misread</h2>
+    <div class="box warn"><span class="box-title">⚠️ “An 8B model needs 8 GB”</span>
+      That's roughly int8 <em>weights only</em>. bf16 inference is 16.4&nbsp;GB + KV + activations; a full fine-tune
+      is <b>131.05&nbsp;GB</b>. The multiplier from “the name” to “the memory” runs from ~0.5× (int4 weights) to 16×
+      (full-FT state). The name tells you almost nothing until you multiply.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ “Parameter count tells you compute cost”</span>
+      For a dense model, roughly. For an MoE, catastrophically false — Kimi&nbsp;K2 is 1T parameters but activates
+      ~32B per token. <b>Compute tracks <em>active</em> parameters; memory tracks <em>total</em>.</b> That's why the
+      “397B-A17B” notation exists, and why you can't read FLOPs off a headline count (page&nbsp;38).
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ “Embedding params matter as much as the rest”</span>
+      The embeddings are 15.20% of Qwen3-8B, but they're a pure lookup table — <b>$O(1)$ compute per token</b>, not
+      a matmul over the sequence. They cost memory, not FLOPs. That's exactly why $C \approx 6ND$ uses
+      <em>non-embedding</em> $N$, and why cards report “non-embedding params” as a separate line (page&nbsp;38).
+    </div>
+
+    <!-- ===================== DEMO ===================== -->
+    <div class="box try"><span class="box-title">Try it</span>
+      The config-file parameter counter below runs the exact per-block and whole-model formulas live. It's loaded
+      with Qwen3-8B — confirm the total locks onto <b>8,190,735,360</b> and the FFN share onto <b>78.26%</b>. Then
+      flip <b>tied ⇄ untied</b> and watch the total jump by exactly 622,329,856 (the <code>lm_head</code>). Drag
+      <b>$V$</b> down and watch the total drop while <em>non-embedding</em> doesn't move. Load the 70B preset and
+      read its full-FT state against your 121.69&nbsp;GiB box.
+    </div>
+
+    <div class="demo">
+      <div class="demo-head">The config-file parameter counter <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <div class="pc-presets">
+          <button class="btn" id="pc-qwen">Load Qwen3-8B</button>
+          <button class="btn secondary" id="pc-llama">Load Llama-3.3-70B</button>
+          <button class="btn secondary" id="pc-tie">Toggle tied / untied embeddings</button>
+        </div>
+        <div class="controls" id="pc-ctrls"></div>
+        <div class="pc-grid" id="pc-out"></div>
+        <div class="pc-sub" id="pc-sub"></div>
+      </div>
+    </div>
+
+    <!-- ===================== CODE ARTIFACT ===================== -->
+    <div class="box try"><span class="box-title">Try it · <code>code/count_params.py</code></span>
+      Run the whole beat on your box: load Qwen3-8B's <code>config.json</code>, compute 8,190,735,360 from the
+      formula, read <code>model.safetensors.index.json</code>'s <code>total_size</code> and divide by 2 to confirm
+      the same integer, then print all three downstream numbers and run <code>mem_get_info()</code> so the
+      122.05-GiB-vs-your-box comparison is <em>your</em> measurement.
+    </div>
+
+    <div class="codeblock" data-lang="python">
+      <div class="codeblock-head"><span class="lang-tag">code/count_params.py</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"><span class="tok-kw">import</span> json, torch</span>
+<span class="line"></span>
+<span class="line">cfg = json.<span class="tok-fn">load</span>(<span class="tok-fn">open</span>(<span class="tok-str">"Qwen3-8B/config.json"</span>))</span>
+<span class="line">d, L = cfg[<span class="tok-str">"hidden_size"</span>], cfg[<span class="tok-str">"num_hidden_layers"</span>]</span>
+<span class="line">H, Hkv = cfg[<span class="tok-str">"num_attention_heads"</span>], cfg[<span class="tok-str">"num_key_value_heads"</span>]</span>
+<span class="line">dh, dff, V = cfg[<span class="tok-str">"head_dim"</span>], cfg[<span class="tok-str">"intermediate_size"</span>], cfg[<span class="tok-str">"vocab_size"</span>]</span>
+<span class="line">tied = cfg[<span class="tok-str">"tie_word_embeddings"</span>]</span>
+<span class="line"></span>
+<span class="line">p_attn = <span class="tok-num">2</span> * d * dh * (H + Hkv)          <span class="tok-com"># 41,943,040</span></span>
+<span class="line">p_ffn  = <span class="tok-num">3</span> * d * dff                     <span class="tok-com"># 150,994,944</span></span>
+<span class="line">p_norm = <span class="tok-num">2</span> * d + <span class="tok-num">2</span> * dh                 <span class="tok-com"># 8,448</span></span>
+<span class="line">p_block = p_attn + p_ffn + p_norm         <span class="tok-com"># 192,946,432</span></span>
+<span class="line">P = V * d + L * p_block + d + (<span class="tok-num">0</span> <span class="tok-kw">if</span> tied <span class="tok-kw">else</span> V * d)</span>
+<span class="line"><span class="tok-kw">assert</span> P == <span class="tok-num">8_190_735_360</span>, P          <span class="tok-com"># route 1: the formula</span></span>
+<span class="line"></span>
+<span class="line">idx = json.<span class="tok-fn">load</span>(<span class="tok-fn">open</span>(<span class="tok-str">"Qwen3-8B/model.safetensors.index.json"</span>))</span>
+<span class="line">total_bytes = idx[<span class="tok-str">"metadata"</span>][<span class="tok-str">"total_size"</span>]   <span class="tok-com"># 16,381,470,720</span></span>
+<span class="line"><span class="tok-kw">assert</span> total_bytes // <span class="tok-num">2</span> == P              <span class="tok-com"># route 2: the checkpoint itself</span></span>
+<span class="line"></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"params        {P:,}"</span>)</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"bf16 weights  {P*2/1e9:.2f} GB"</span>)                 <span class="tok-com"># 16.38</span></span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"full-FT 16P   {P*16/1e9:.2f} GB = {P*16/2**30:.2f} GiB"</span>)  <span class="tok-com"># 131.05 / 122.05</span></span>
+<span class="line">free, total = torch.cuda.<span class="tok-fn">mem_get_info</span>()</span>
+<span class="line"><span class="tok-fn">print</span>(<span class="tok-str">f"your box      {total/2**30:.4f} GiB usable"</span>)   <span class="tok-com"># measure it</span></span></code></pre>
+    </div>
+
+    <!-- ===================== MILESTONE ===================== -->
+    <div class="milestone" data-progress="57">
+      <span class="milestone-flag">Milestone</span>
+      You can now open any model card and derive every number on it — parameter count, weight memory, KV cache, and
+      the full fine-tune ledger — closing to the byte.
+      <span class="milestone-pct">57%</span> of the course.
+    </div>
+
+    <!-- ===================== QUIZ ===================== -->
+    <h2>Check your understanding</h2>
+    <div id="quiz36"></div>
+
+    <p style="margin-top:2em;color:var(--text-dim)">
+      <b>Where this goes:</b> the 187× and the 16P ledger hand off to <b>Part IV — LoRA &amp; QLoRA</b>
+      (pages&nbsp;40–41); the 16-byte <em>why</em> lives on the memory-ledger page (page&nbsp;18); the decode
+      ceiling gets measured on the <b>roofline</b> (page&nbsp;43); the KV cache is sized in full on <b>page&nbsp;37</b>;
+      and MoE decoupling memory from compute opens <b>Part IV</b> on page&nbsp;38.
+    </p>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ---- DEMO: the config-file parameter counter (live formulas) ---- */
+  (function () {
+    const host = document.getElementById("pc-ctrls");
+    const out = document.getElementById("pc-out");
+    const sub = document.getElementById("pc-sub");
+    let untied = true;   // tie_word_embeddings: false
+
+    // makeCtrl(parent, {label,min,max,step,value,unit,fmt}) -> {input, get(), onInput(fn)}
+    const cD  = makeCtrl(host, { label: "d — hidden_size",        min: 512,  max: 8192,  step: 128, value: 4096 });
+    const cL  = makeCtrl(host, { label: "L — num_hidden_layers",  min: 1,    max: 100,   step: 1,   value: 36 });
+    const cH  = makeCtrl(host, { label: "H — attention heads",    min: 1,    max: 128,   step: 1,   value: 32 });
+    const cHk = makeCtrl(host, { label: "H_kv — KV heads",        min: 1,    max: 128,   step: 1,   value: 8 });
+    const cDh = makeCtrl(host, { label: "d_head",                 min: 32,   max: 256,   step: 32,  value: 128 });
+    const cDf = makeCtrl(host, { label: "d_ff — intermediate",    min: 512,  max: 32768, step: 256, value: 12288 });
+    const cV  = makeCtrl(host, { label: "V — vocab_size",         min: 32000,max: 262144,step: 64,  value: 151936, fmt: v => v.toLocaleString("en-US") });
+
+    const ctrls = [cD, cL, cH, cHk, cDh, cDf, cV];
+    const gib = 1024 * 1024 * 1024;
+    const commas = n => Math.round(n).toLocaleString("en-US");
+
+    function cell(k, v, hot) {
+      return `<div class="cell"><div class="k">${k}</div><div class="v"${hot ? ' style="color:var(--good)"' : ''}>${v}</div></div>`;
+    }
+
+    function draw() {
+      const d = cD.get(), L = cL.get(), H = cH.get();
+      const Hkv = Math.min(cHk.get(), H);           // KV heads can't exceed query heads
+      const dh = cDh.get(), dff = cDf.get(), V = cV.get();
+
+      const pAttn = 2 * d * dh * (H + Hkv);
+      const pFfn  = 3 * d * dff;
+      const pNorm = 2 * d + 2 * dh;
+      const pBlock = pAttn + pFfn + pNorm;
+      const blocks = L * pBlock;                    // == non-embedding (frozen convention)
+      const embed = V * d;
+      const lmHead = untied ? V * d : 0;
+      const finalNorm = d;
+      const total = embed + blocks + finalNorm + lmHead;
+
+      const ffnShare = pFfn / pBlock * 100;
+      const gqaSave = 2 * d * dh * (H - Hkv);        // MHA - GQA attention subtotal
+      const embPct = (embed + lmHead) / total * 100;
+      const bf16GB = total * 2 / 1e9;
+      const kvKiB = 2 * L * Hkv * dh * 2 / 1024;      // bf16, per token, all layers
+      const ftGB = total * 16 / 1e9;
+      const ftGiB = total * 16 / gib;
+
+      // sig-fig policy: frozen numbers displayed at their frozen precision.
+      const isQwen = (d===4096 && L===36 && H===32 && Hkv===8 && dh===128 && dff===12288 && V===151936 && untied);
+
+      out.innerHTML =
+        cell("total params", commas(total), isQwen) +
+        cell("non-embedding", commas(blocks)) +
+        cell("per block", commas(pBlock)) +
+        cell("FFN share of block", ffnShare.toFixed(2) + " %") +
+        cell("GQA saving / block", commas(gqaSave)) +
+        cell("embedding %", embPct.toFixed(2) + " %") +
+        cell("bf16 weights", bf16GB.toFixed(2) + " GB") +
+        cell("KV cache", kvKiB.toFixed(0) + " KiB/token") +
+        cell("full-FT state (16P)", ftGB.toFixed(2) + " GB / " + ftGiB.toFixed(2) + " GiB");
+
+      const tie = untied ? "untied (separate lm_head)" : "tied (embed = lm_head)";
+      sub.innerHTML =
+        `P_block = ${commas(pAttn)} + ${commas(pFfn)} + ${commas(pNorm)} = <b>${commas(pBlock)}</b><br>` +
+        `P_total = ${commas(embed)} (embed) + ${commas(blocks)} (${L}&times;block) + ${commas(finalNorm)} (norm)` +
+        `${untied ? " + " + commas(lmHead) + " (lm_head)" : ""} = <b>${commas(total)}</b>` +
+        `<br><span style="color:var(--text-dim)">embeddings: ${tie} &nbsp;·&nbsp; full-FT vs a 121.69 GiB box: ` +
+        `<b style="color:${ftGiB > 121.6875 ? 'var(--bad,#e06c75)' : 'var(--good)'}">` +
+        `${(121.6875 - ftGiB).toFixed(2)} GiB ${ftGiB > 121.6875 ? '(does NOT fit)' : '(fits)'}</b></span>`;
+    }
+
+    // Set a control's slider to a value and fire its update (label + redraw).
+    function setCtrl(c, v) { c.input.value = v; }
+    function apply(cfg) {
+      setCtrl(cD, cfg.d); setCtrl(cL, cfg.L); setCtrl(cH, cfg.H); setCtrl(cHk, cfg.Hkv);
+      setCtrl(cDh, cfg.dh); setCtrl(cDf, cfg.dff); setCtrl(cV, cfg.V);
+      untied = cfg.untied;
+      ctrls.forEach(c => c.input.dispatchEvent(new Event("input")));  // refresh labels
+      draw();
+    }
+
+    ctrls.forEach(c => c.onInput(draw));
+    document.getElementById("pc-qwen").addEventListener("click", () =>
+      apply({ d: 4096, L: 36, H: 32, Hkv: 8, dh: 128, dff: 12288, V: 151936, untied: true }));
+    document.getElementById("pc-llama").addEventListener("click", () =>
+      apply({ d: 8192, L: 80, H: 64, Hkv: 8, dh: 128, dff: 28672, V: 128256, untied: true }));
+    document.getElementById("pc-tie").addEventListener("click", () => { untied = !untied; draw(); });
+
+    draw();
+  })();
+
+  /* ---- QUIZ ---- */
+  renderQuiz("quiz36", [
+    {
+      q: "Total parameters of Qwen3-8B, from the config:",
+      num: 8190735360, tol: 0, unit: "params",
+      why: "$622{,}329{,}856\\times2 + 36\\times192{,}946{,}432 + 4{,}096 = 8{,}190{,}735{,}360$ — exact, matching the card's '8.2B.'"
+    },
+    {
+      q: "Non-embedding parameters (the 36 blocks):",
+      num: 6946071552, tol: 0, unit: "params",
+      why: "$192{,}946{,}432 \\times 36 = 6{,}946{,}071{,}552 = 6.95\\text{B}$, matching the card exactly."
+    },
+    {
+      q: "The checkpoint's <code>total_size</code> is 16,381,470,720 bytes, all bf16 (2 B each). How many parameters is that?",
+      num: 8190735360, tol: 0, unit: "params",
+      why: "$16{,}381{,}470{,}720 / 2 = 8{,}190{,}735{,}360$ — the independent route: the same integer, straight from the checkpoint."
+    },
+    {
+      q: "GQA saving per attention block vs multi-head attention (params):",
+      num: 25165824, tol: 0, unit: "params",
+      why: "MHA subtotal $67{,}108{,}864$ minus GQA subtotal $41{,}943{,}040 = 25{,}165{,}824$ — 37.5% of the MHA attention block, from $H_{kv}=8$ not 32."
+    },
+    {
+      q: "bf16 weights of Qwen3-8B in memory:",
+      num: 16.38, tol: 0.05, unit: "GB",
+      why: "$8{,}190{,}735{,}360 \\times 2\\text{ B} = 16.38\\text{ GB}$."
+    },
+    {
+      q: "Full fine-tune <em>state</em> (16 B/param, AdamW mixed) in GB — state only, activations separate:",
+      num: 131.05, tol: 0.2, unit: "GB",
+      why: "$8{,}190{,}735{,}360 \\times 16\\text{ B} = 131.05\\text{ GB} = 122.05\\text{ GiB}$. Activations are a separate 2–6 GB [EST] line."
+    },
+    {
+      q: "Does a full fine-tune of Qwen3-8B fit on the DGX Spark?",
+      opts: [
+        "Yes — it's a 128 GB box, plenty of room",
+        "No — 122.05 GiB state vs 121.6875 GiB usable; it misses by ~0.36 GiB, and you confirm by measuring mem_get_info()",
+        "No — it misses by about 3 GB",
+        "It depends on the batch size alone"
+      ],
+      a: 1,
+      why: "Measured: usable is 121.6875 GiB, not 128 (4.9% firmware carveout). 122.05 − 121.6875 = −0.36 GiB — does not fit, before activations. '128 GB' and 'misses by 3 GB' are the retired numbers."
+    },
+    {
+      q: "Why do model cards report 'non-embedding parameters' as a separate line?",
+      opts: [
+        "Embeddings are trained differently from the rest",
+        "Compute (and $C \\approx 6ND$) tracks non-embedding params; embeddings are an $O(1)$ lookup, not a per-token matmul",
+        "Embeddings don't count as real parameters",
+        "It makes the model look smaller"
+      ],
+      a: 1,
+      why: "The embedding table costs memory but ~zero compute per token (a gather, not a matmul over the sequence), so compute-scaling laws use non-embedding $N$."
+    }
+  ], "Parameter counting — self-check");
+
+});
+</script>
+</body>
+</html>

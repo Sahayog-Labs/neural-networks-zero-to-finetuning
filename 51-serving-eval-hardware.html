@@ -1,0 +1,558 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>51. Serving, Eval &amp; Hardware Reality — Neural Networks</title>
+<link rel="stylesheet" href="assets/course.css">
+<style>
+  /* Page-scoped additions: the merge/serve pipeline chips, the eval staircase,
+     the hardware-verdict table's ✅/❌ coloring, and the judge-bias sandbox's
+     two candidate cards. Everything reads off the shared CSS custom
+     properties, so it stays theme-aware without a single hard-coded color. */
+  table.verdict td.v-great { color: var(--accent2); font-weight: 700; }
+  table.verdict td.v-ok    { color: var(--good); font-weight: 700; }
+  table.verdict td.v-bad   { color: var(--bad); font-weight: 700; }
+  ol.staircase { counter-reset: step; list-style: none; padding-left: 0; margin: 1em 0; }
+  ol.staircase li {
+    counter-increment: step; position: relative; padding: 8px 0 8px 40px; margin-bottom: 2px;
+    border-bottom: 1px solid var(--border);
+  }
+  ol.staircase li::before {
+    content: counter(step); position: absolute; left: 0; top: 8px; width: 26px; height: 26px;
+    border-radius: 50%; background: var(--bg-panel2); color: var(--accent);
+    display: flex; align-items: center; justify-content: center; font-size: .78rem; font-weight: 700;
+    border: 1px solid var(--border);
+  }
+  ol.staircase li b { color: var(--text); }
+  ol.staircase li .cost { color: var(--text-dim); font-size: .82rem; }
+  .bias-table td:first-child { font-weight: 700; color: var(--track-llm); white-space: nowrap; }
+
+  .judge-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .judge-grid { grid-template-columns: 1fr; } }
+  .cand-card {
+    border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px;
+    background: var(--bg-code); position: relative; transition: border-color .15s ease;
+  }
+  .cand-card.winner { border-color: var(--good); box-shadow: 0 0 0 1px var(--good) inset; }
+  .cand-card .cand-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px; }
+  .cand-card .cand-name { font-weight: 700; font-size: .85rem; }
+  .cand-card .cand-badge {
+    font-size: .68rem; letter-spacing: .5px; text-transform: uppercase; padding: 2px 7px;
+    border-radius: 999px; background: var(--bg-panel2); color: var(--text-dim); border: 1px solid var(--border);
+  }
+  .cand-card .cand-text { font-size: .87rem; color: var(--text-dim); max-height: 220px; overflow-y: auto; }
+  .cand-card .cand-text p { margin: .5em 0; }
+  .cand-card .cand-text h5 { margin: .6em 0 .2em; color: var(--text); font-size: .88rem; }
+  .cand-card .cand-score { margin-top: 8px; font-family: var(--mono); font-size: .85rem; }
+  .cand-card .cand-score b { color: var(--accent2); font-size: 1.05rem; }
+  .cand-card .win-tag { color: var(--good); font-weight: 700; }
+  .jd-eq { font-family: var(--mono); font-size: .8rem; color: var(--text-dim); margin-top: 4px; }
+  .jd-note { font-size: .84rem; color: var(--text-dim); margin-top: 10px; }
+  .toggle-row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+</style>
+</head>
+<body data-page="51-serving-eval-hardware.html" class="track-llm">
+<div id="layout">
+  <main id="content"><div class="inner">
+
+    <span class="kicker">Part V — LLM Fine-Tuning · Track ◆</span>
+    <h1>Serving It, Judging It, and What the Spark Can't Do</h1>
+    <p class="subtitle">Your fine-tune from p.50 trained in eleven minutes. Getting it in front of a user, and
+      knowing whether it's actually <em>better</em>, are two separate problems — and the Spark answers the two
+      halves of this track very differently than it answered fine-tuning.</p>
+
+    <div class="track-banner track-llm"><span class="track-label">LLM Fine-Tuning Track</span></div>
+
+    <div class="box predict"><span class="box-title">🔮 Predict first</span>
+      Your fine-tune's held-out loss dropped beautifully. Is the model better? And which is the Spark good at —
+      <strong>fine-tuning your 8B, or serving it to users at chat speed?</strong>
+    </div>
+
+    <h2>Serving: merge → convert → serve</h2>
+    <p>The adapter from p.50 is 87.3 MB of $\Delta W$ sitting beside a frozen 16.38 GB base. To ship it you fold
+      the two together with <code>merge_and_unload()</code> — and there is exactly one way to get this wrong that
+      silently degrades every output.</p>
+
+    <div class="box warn"><span class="box-title">⚠️ Merge into the bf16 base — never the NF4 QLoRA base</span>
+      If you trained with QLoRA, the base you loaded during training was already lossy 4-bit NF4. Calling
+      <code>merge_and_unload()</code> folds a full-precision adapter update into that already-quantized
+      representation, compounding the loss a second time [constants §9.7]. The fix is to reload the
+      <strong>original bf16 checkpoint</strong>, attach the trained adapter to <em>that</em>, and merge there.
+      <code>code/14_merge_and_serve.py</code> ships an <code>assert</code> on the base dtype so this can't happen
+      by accident.
+    </div>
+
+    <div class="codeblock" data-lang="bash">
+      <div class="codeblock-head"><span class="lang-tag">merge → convert → serve</span><button class="copy-btn" type="button">Copy</button></div>
+      <pre><code><span class="line"># 1. merge — into the ORIGINAL bf16 base, asserted, not the NF4 one</span>
+<span class="line">python merge_and_unload.py --adapter out/qwen3-8b-lora --base Qwen/Qwen3-8B --dtype bf16</span>
+<span class="line"></span>
+<span class="line"># 2. convert to GGUF, quantize for llama.cpp/Ollama (the default local path)</span>
+<span class="line">python convert-hf-to-gguf.py merged/ --outtype f16</span>
+<span class="line">./llama-quantize merged.gguf merged-Q4_K_M.gguf Q4_K_M</span>
+<span class="line">ollama create qwen3-8b-mine -f Modelfile &amp;&amp; ollama run qwen3-8b-mine</span>
+<span class="line"></span>
+<span class="line"># 3. measure — check the served tok/s against p.46's roofline, not a guess</span>
+<span class="line">python 02_kv_cache_and_roofline.py --model qwen3-8b-mine --measure-decode</span></code></pre>
+    </div>
+
+    <div class="box rule"><span class="box-title">📐 The serving recommendation (D-10)</span>
+      <strong>llama.cpp/Ollama is the default local path</strong> — it works today, it's the GGUF endpoint of the
+      pipeline above, and it's the officially-documented Arm DGX Spark learning path. <strong>vLLM is the
+      throughput option</strong>, via the <code>vllm/vllm-openai:cu130-nightly</code> container pinned by digest —
+      the PyPI aarch64 wheel is built against CUDA 12 and fails to import on the Spark's CUDA-13-only stack
+      (constants §6.9). Train in NF4/bf16; serve in GGUF/AWQ/NVFP4 — different numeric formats for different jobs,
+      and neither one is "the" quantized format.
+    </div>
+
+    <h2>Evaluation: loss ≠ quality</h2>
+    <div class="box key"><span class="box-title">🔑 The whole section, in one line</span>
+      Loss going down means the model is getting better at predicting <em>your dataset</em>.
+      Your dataset is not your goal.
+    </div>
+    <p>A held-out loss curve that falls beautifully tells you the model isn't memorizing garbage. It tells you
+      <em>nothing</em> about whether the outputs are actually useful. Climb this ladder, cheapest rung first, and
+      stop as soon as a rung actually answers your question:</p>
+    <ol class="staircase">
+      <li><b>Held-out loss.</b> <span class="cost">free — answers only "am I overfitting?"</span></li>
+      <li><b><code>mean_token_accuracy</code>.</b> <span class="cost">free — marginally more legible than raw nats</span></li>
+      <li><b>A programmatic task metric</b> — a real checker: does the SQL run, does the JSON validate, does the unit test pass.
+        <span class="cost">if your task has one, <em>everything below this line is optional.</em> Push hard for one.</span></li>
+      <li><b>50 eyeballed examples.</b> <span class="cost">~15 minutes — catches the regressions a metric misses</span></li>
+      <li><b>LLM-as-judge.</b> <span class="cost">cheap at scale, biased — see below</span></li>
+      <li><b>Public benchmarks.</b> <span class="cost">contaminated by training-set overlap; weak signal for a private fine-tune</span></li>
+      <li><b>Human preference.</b> <span class="cost">expensive, the actual ground truth when you can afford it</span></li>
+    </ol>
+    <p><strong>The catastrophic-forgetting probe</strong> runs in parallel with every rung above and costs almost
+      nothing: keep 10–20 <em>general</em> prompts unrelated to your fine-tuning task, run them before and after
+      training, and diff the answers by eye. Fifteen minutes catches the single most common way a fine-tune
+      quietly destroys value while the loss curve looks perfect — the model gets great at your task and
+      noticeably worse at everything else.</p>
+
+    <h2>LLM-as-judge: the biases, honestly</h2>
+    <p>Once a task metric doesn't exist, an LLM judge is the next cheapest signal — and it comes with five
+      well-documented failure modes. Two are cheap to fix; the rest you manage, not eliminate.</p>
+    <table class="verdict bias-table">
+      <thead><tr><th>Bias</th><th>What happens</th><th>Fix</th></tr></thead>
+      <tbody>
+        <tr><td>Position</td><td>the answer shown <em>first</em> wins more often, independent of quality</td>
+          <td class="v-ok">fixed — average both orderings. Cheap. Do it always.</td></tr>
+        <tr><td>Verbosity</td><td>a longer answer scores higher with no new content</td>
+          <td class="v-bad">only partially fixable — report answer lengths alongside every score</td></tr>
+        <tr><td>Self-preference</td><td>a judge favors text that sounds like its own model family</td>
+          <td class="v-ok">use a judge from a <em>different</em> model family than the one you're evaluating</td></tr>
+        <tr><td>Format</td><td>markdown/bullets read as "more complete" regardless of substance</td>
+          <td class="v-bad">name it; strip formatting before judging if you can</td></tr>
+        <tr><td>Calibration drift</td><td>absolute scores drift across prompts and sessions</td>
+          <td class="v-ok">anchor to a small human-labelled golden set</td></tr>
+      </tbody>
+    </table>
+
+    <div class="box warn"><span class="box-title">⚠️ The closed-loop trap</span>
+      If you generated your synthetic training data with model X and then judge your fine-tune with model X, you
+      are not measuring quality — you are measuring <strong>how much your model's outputs sound like X's</strong>.
+      The score will show improvement. It will mean nothing. <code>code/12_evaluate.py</code> warns explicitly
+      when the judge family matches the data-generator family.
+    </div>
+
+    <h2>Demo — the judge-bias sandbox, live</h2>
+    <div class="box try"><span class="box-title">Try it</span>
+      Two candidates answer the exact same question with the exact same substantive content — one concise, one
+      padded. Swap which is read first. Drag the padding up. Toggle averaging. Watch which bias survives and
+      which one dies.
+    </div>
+    <div class="box warn"><span class="box-title">⚠️ Disclosed spec deviation — no measured judge data exists to ship</span>
+      spec-part5.md's build instruction for this demo calls for <strong>pre-recorded real judge verdicts for the
+      full order×length×format grid, measured offline, not simulated.</strong> No such data exists to ship:
+      constants.md carries zero LLM-judge bias magnitudes for this course — there is nothing frozen to play back.
+      Inventing numbers and labelling them "measured" would be worse than the alternative below: a small,
+      fully-disclosed formula that computes <em>live</em>, honestly marked illustrative rather than measured. This
+      is a deliberate, flagged deviation from the letter of the spec — not an oversight — left for the lead to
+      resolve (commission a real offline judge run to freeze, or ratify the live-formula fallback).
+    </div>
+    <div class="demo track-llm">
+      <div class="demo-head">Position vs. verbosity bias <span class="demo-tag">Live</span></div>
+      <div class="demo-body">
+        <p style="margin:0 0 10px;font-size:.9rem;color:var(--text-dim)">Prompt: <em>"Why can't fine-tuning fix a model that doesn't know a fact?"</em> — both cards below make the identical claim; only length and formatting change.</p>
+        <div class="controls">
+          <div class="ctrl">
+            <label>padding: <span class="val" id="jd-verb-val">1× (identical)</span></label>
+            <input type="range" id="jd-verb" min="0" max="2" step="1" value="0">
+          </div>
+        </div>
+        <div class="toggle-row">
+          <button class="btn secondary" id="jd-swap" type="button">⇄ Swap positions</button>
+          <button class="btn secondary" id="jd-md" type="button">Markdown formatting: off</button>
+          <button class="btn secondary" id="jd-avg" type="button">Average both orderings: off</button>
+        </div>
+        <div class="judge-grid" id="jd-cards" style="margin-top:14px"></div>
+        <div class="readout" id="jd-out"></div>
+      </div>
+    </div>
+    <p style="color:var(--text-dim);font-size:.85rem">The judge here is a small, fully transparent scoring model —
+      <code>score = quality + position_bonus·first + verbosity_bonus·log₂(words / words_concise) + markdown_bonus·hasMD</code>
+      — computed live from the actual word count of whatever text is on screen. The bonus <em>weights</em>
+      (0.9 / 1.1 / 0.5) are illustrative, chosen only to reproduce the <em>direction and survival pattern</em> the
+      literature reports, not a measured number — constants.md ships no LLM-judge bias magnitudes for this course,
+      because there aren't any to freeze. Measuring your own judge's real biases is exactly what
+      <code>code/12_evaluate.py</code>'s averaged-ordering run is for.
+    </p>
+
+    <h2>The Spark hardware verdict</h2>
+    <p>Every number below was measured or derived earlier in this track — this table is where they get read off
+      together, [VP]/[DER] as marked, constants §6.7:</p>
+    <table class="verdict">
+      <thead><tr><th>Workload</th><th>Verdict</th><th>Numbers</th></tr></thead>
+      <tbody>
+        <tr><td>Full fine-tune, ≤3B params</td><td class="v-ok">✅ fits comfortably</td><td>well under the measured 121.6875 GiB</td></tr>
+        <tr><td>Full fine-tune, 8B, plain AdamW</td><td class="v-bad">❌ does not fit</td><td>122.05 GiB needed vs 121.6875 GiB measured — misses by 0.36 GiB, before activations (p.49)</td></tr>
+        <tr><td>LoRA, 8B</td><td class="v-great">✅✅ the sweet spot</td><td>~17 GB state · 6,969.59 tok/s measured 8B-LoRA throughput</td></tr>
+        <tr><td>QLoRA, 70B</td><td class="v-great">✅✅ the headline</td><td>~40 GB total · 759.79 tok/s</td></tr>
+        <tr><td>Inference, quantized ≤14B</td><td class="v-ok">✅</td><td>20.5–38.65 tok/s measured (FP8/NVFP4, 8B) · ~43 tok/s predicted (Qwen3-8B NVFP4)</td></tr>
+        <tr><td>Serving to users, bf16</td><td class="v-bad">❌</td><td>~10.8 tok/s expected decode, batch 1 — see the note below</td></tr>
+        <tr><td>Pretrain anything from scratch</td><td class="v-bad">❌</td><td>"at least four centuries — and that assumes theoretical peak, which it will not hit. Realistically, closer to two millennia." [DER, constants §5]</td></tr>
+      </tbody>
+    </table>
+    <p><strong>The best single measured beat in this whole ledger:</strong> Llama-3.1-8B decode goes
+      <strong>20.5 → 368 tok/s (18×)</strong> as batch goes 1→32, while prefill stays essentially flat at
+      <strong>7,991 → 7,949 tok/s</strong> [VP, constants §6.5/§6.7]. Bandwidth-bound decode amortizes its weight
+      reads across the batch and gains almost linearly; compute-bound prefill was already saturated and gains
+      nothing. That is p.46's roofline, measured, on hardware like his own.</p>
+
+    <p style="color:var(--text-dim);font-size:.87rem">A note on the "serving to users" row: constants §6.7 gives an
+      RTX 5090 at 8,519 tok/s prefill / <strong>205</strong> tok/s decode-batch-1 and an RTX Pro 6000 Blackwell at
+      10,108 / 215 [VP] for this model class, against the Spark's measured <strong>20.5</strong> tok/s decode-batch-1
+      (FP8). $205 / 20.5 = \mathbf{10.0\times}$ — the Spark is roughly <strong>10×</strong> slower at
+      single-stream chat serving, computed directly from those two [VP] figures. <strong>⚠️ FROZEN-NUMBER
+      DISCREPANCY:</strong> constants.md §6.7 itself appends the annotation "~4× faster decode" to that same pair
+      of numbers; the arithmetic doesn't reconcile (205/20.5 = 10.0, not ~4), and no alternative reading of the
+      table produces 4× either. Per §6b policy, this page ships the value recomputed directly from the cited [VP]
+      throughput figures (~10×) rather than the unreconciled "~4×" annotation. The qualitative verdict — the Spark
+      is a poor single-stream chat server relative to a discrete GPU — holds either way; only the multiplier
+      changes.</p>
+
+    <h2>The opposite-verdicts hand-off</h2>
+    <p>Reopen the trunk's roofline (p.43) and its LLM instantiation (p.46) rather than re-deriving them: one
+      formula, arithmetic intensity equals tokens processed per forward pass at bf16,</p>
+    <p>$$I = \frac{\text{FLOPs}}{\text{bytes}} = S_{\text{fwd}}\ \text{FLOP/byte}$$</p>
+    <p>against a ridge $I^\star$ that is <strong>227 FLOP/byte</strong> (working value, [INF]) or <strong>458</strong>
+      if the true dense-BF16 ceiling turns out to be nearer 125 TF than 62 TF — genuinely unresolved, constants
+      §6.4, and the course prints both rather than picking one.</p>
+    <table>
+      <thead><tr><th>Workload</th><th>$S_{\text{fwd}}$</th><th>$I$</th><th>vs ridge (227 / 458)</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr><td>LLM decode, batch 1</td><td>1</td><td>1</td><td>227× / 458× below</td><td class="v-bad">bandwidth-bound — the Spark is weak (p.46)</td></tr>
+        <tr><td>LLM prefill, S=2048</td><td>2048</td><td>2048</td><td>9× / 4.5× above</td><td class="v-ok">compute-bound</td></tr>
+        <tr><td>Diffusion, 4096 latent tokens</td><td>4096</td><td>4096</td><td>18× / 9× above</td><td class="v-great">compute-bound — the Spark is strong</td></tr>
+      </tbody>
+    </table>
+    <div class="box key"><span class="box-title">🔑 Same machine, same ridge, opposite verdicts</span>
+      LLM decode at $S_{\text{fwd}}=1$ sits hundreds-fold below the ridge; diffusion sampling at $S_{\text{fwd}}=4096$
+      sits comfortably above it on either candidate ridge. It isn't that the Spark is "weak" or "strong" in the
+      abstract — it's a bandwidth-limited machine, and the two tracks sit on opposite sides of the exact same
+      $I^\star$. The diffusion track picks this thread up on its own hardware page and lands the other half of
+      the contrast; you already have the formula and both data points.
+    </div>
+
+    <p>Fine-tuning and serving, then, are not the same verdict wearing two names. LoRA/QLoRA training is a single
+      forward-and-backward pass per token over your whole batch — arithmetic-intensity-rich, and the Spark eats it
+      (6,969.59 tok/s, 11.5 minutes for a real project). Chat serving is one token at a time, arithmetic-intensity
+      $I=1$, and the Spark starves. <code>[THREAD:memory ledger beat: served footprint]</code> — the ledger that
+      started at 16 B/param on p.18 and hit a wall at 122.05 GiB on p.49 ends here at a merged bf16 checkpoint
+      that is bandwidth-, not memory-, constrained at serve time. <code>[THREAD:Qwen3-8B beat: merge target]</code>
+      — the anchor's last appearance in this track, as the model you actually ship.</p>
+
+    <div class="box try"><span class="box-title">Try it</span> → <code>code/14_merge_and_serve.py</code>
+      Merge into the bf16 base (assert, not the NF4 one) → GGUF → <code>Q4_K_M</code> → <code>ollama create</code>
+      → serve → measure your own decode tok/s against p.46's roofline. Then <code>code/12_evaluate.py</code>:
+      held-out loss + your task metric + the before/after forgetting probe + an LLM-as-judge run with both
+      orderings averaged, lengths reported, and a warning if your judge family matches your data-generator family.
+      (~15 min combined.) Also attached to this page: <code>code/09_spark_capability_probe.py</code> — the script
+      that finally settles the 62-vs-125 TF question (constants §6.3, §10 exercise #2) by running a real BF16 GEMM
+      in both accumulate modes and reporting which ceiling, and therefore which ridge, your own Spark lands at.
+    </div>
+
+    <h2>Check your understanding</h2>
+    <div id="quiz-serving"></div>
+
+  </div></main>
+</div>
+
+<script src="assets/course.js"></script>
+<script src="assets/course-map.js"></script>
+<script src="assets/nn.js"></script>
+<script src="assets/viz.js"></script>
+<script>
+document.addEventListener("DOMContentLoaded", () => {
+
+  /* ==========================================================================
+     DEMO — judge-bias sandbox.
+     Two candidates make the IDENTICAL substantive claim: "Concise" (fixed) and
+     "Padded" (same content, real text swapped in at 1x/2x/4x length, with an
+     optional real markdown transform). The judge score is computed LIVE from
+     the actual word count of whatever text is currently on screen — nothing
+     here is a lookup table of canned verdicts. The bias weights are labelled
+     illustrative (see the prose above); the ARITHMETIC (word counts, log2
+     ratios, averaging-cancels-position-bias) is real and reactive to every
+     control.
+     ========================================================================== */
+  (function () {
+    const CONCISE =
+      "Fine-tuning updates the general patterns already inside the weights — it does not build a retrievable " +
+      "index of specific facts. If a fact isn't sitting in the prompt at inference time, the model has no way " +
+      "to look it up. That's what RAG is for.";
+
+    const PADDED_2X_PLAIN =
+      "Fine-tuning updates the general patterns already inside the weights — it does not build a retrievable " +
+      "index of specific facts. To put it another way, the fine-tuning process nudges millions of parameters a " +
+      "small amount in the direction that lowers the loss on your examples, and that process is fundamentally " +
+      "about style and behavior, not about filing away individual facts the way a database would. If a fact " +
+      "isn't sitting in the prompt at inference time, the model has no reliable way to look it up — it can only " +
+      "produce something that sounds plausible, which is not the same as being correct. That's precisely what " +
+      "retrieval-augmented generation, or RAG, exists to solve.";
+
+    const PADDED_2X_MD =
+      "Fine-tuning updates the general patterns already inside the weights — it does not build a retrievable " +
+      "index of specific facts. **To put it another way:** the fine-tuning process nudges millions of parameters " +
+      "a small amount in the direction that lowers the loss on your examples, and that process is fundamentally " +
+      "about **style and behavior**, not about filing away individual facts the way a database would. If a fact " +
+      "isn't sitting in the prompt at inference time, the model has no reliable way to look it up — it can only " +
+      "produce something that sounds plausible, which is not the same as being correct. **That's precisely what " +
+      "retrieval-augmented generation (RAG) exists to solve.**";
+
+    const PADDED_4X_PLAIN =
+      "Let's break this down carefully, because it's one of the most commonly misunderstood parts of the whole " +
+      "fine-tuning workflow. The core mechanism: fine-tuning updates the general patterns already inside the " +
+      "weights. It does not build a retrievable index of specific facts, the way a database or a search engine " +
+      "would. What actually happens during training: the fine-tuning process nudges millions of parameters a " +
+      "small amount in a direction that lowers the loss on your examples. That process is fundamentally about " +
+      "style and behavior — tone, format, the shape of a good answer — not about filing away individual facts " +
+      "for later lookup. The consequence at inference time: if a fact isn't sitting in the prompt when the model " +
+      "generates its answer, the model has no reliable mechanism to look it up. It can only produce something " +
+      "that sounds plausible, which is not the same thing as being correct — and a fluent, confident-sounding " +
+      "wrong answer is often worse than an honest 'I don't know.' The fix: this is precisely the gap that " +
+      "retrieval-augmented generation, or RAG, exists to close — put the fact in the context window, every time, " +
+      "at inference time.";
+
+    const PADDED_4X_MD =
+      "### Why fine-tuning can't fix missing facts\n\n" +
+      "Let's break this down carefully, because it's one of the most commonly misunderstood parts of the whole " +
+      "fine-tuning workflow.\n\n" +
+      "**The core mechanism.** Fine-tuning updates the general patterns already inside the weights. It does not " +
+      "build a retrievable index of specific facts, the way a database or a search engine would.\n\n" +
+      "**What actually happens during training.** The fine-tuning process nudges millions of parameters a small " +
+      "amount in a direction that lowers the loss on your examples. That process is fundamentally about *style " +
+      "and behavior* — tone, format, the shape of a good answer — not about filing away individual facts for " +
+      "later lookup.\n\n" +
+      "**The consequence at inference time.** If a fact isn't sitting in the prompt when the model generates its " +
+      "answer, the model has no reliable mechanism to look it up. It can only produce something that sounds " +
+      "plausible, which is not the same thing as being correct.\n\n" +
+      "**The fix.** This is precisely the gap that retrieval-augmented generation (RAG) exists to close — put " +
+      "the fact in the context window, every time, at inference time.";
+
+    const VARIANTS = {
+      1: { plain: CONCISE, md: CONCISE },
+      2: { plain: PADDED_2X_PLAIN, md: PADDED_2X_MD },
+      4: { plain: PADDED_4X_PLAIN, md: PADDED_4X_MD },
+    };
+
+    // Real word count on the raw source, markdown syntax stripped so structural
+    // characters (#, *) never inflate the count.
+    function wordsOf(raw) {
+      return raw.replace(/[#*_]/g, "").replace(/\n+/g, " ").trim().split(/\s+/).filter(Boolean).length;
+    }
+    const CONCISE_WORDS = wordsOf(CONCISE);
+
+    // Minimal, real markdown → HTML transform (###, **bold**, *italic*, blank-line paragraphs).
+    function mdToHtml(src) {
+      const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      return src.split(/\n\n+/).map(block => {
+        block = esc(block);
+        if (/^###\s+/.test(block)) return "<h5>" + block.replace(/^###\s+/, "") + "</h5>";
+        block = block.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/\*(.+?)\*/g, "<i>$1</i>");
+        return "<p>" + block + "</p>";
+      }).join("");
+    }
+
+    const POS_BIAS = 0.9, VERB_BIAS = 1.1, MD_BIAS = 0.5, Q0 = 5.0;
+
+    function scoreOf(words, isFirst, hasMD) {
+      const verbTerm = VERB_BIAS * Math.log2(words / CONCISE_WORDS);
+      const total = Q0 + (isFirst ? POS_BIAS : 0) + verbTerm + (hasMD ? MD_BIAS : 0);
+      return { total, verbTerm, isFirst, hasMD, words };
+    }
+
+    const state = { verbosity: 1, markdown: false, avg: false, order: "concise-first" };
+
+    function paddedRaw() {
+      const v = VARIANTS[state.verbosity];
+      return state.markdown ? v.md : v.plain;
+    }
+    function paddedHasMD() { return state.markdown && state.verbosity > 1; }
+
+    function runOrder(conciseFirst) {
+      const pWords = wordsOf(paddedRaw());
+      const c = scoreOf(CONCISE_WORDS, conciseFirst, false);
+      const p = scoreOf(pWords, !conciseFirst, paddedHasMD());
+      return { c, p };
+    }
+
+    const el = id => document.getElementById(id);
+    const cardsEl = el("jd-cards"), outEl = el("jd-out");
+
+    function cardHTML(name, badge, raw, isHtml, score, isWinner) {
+      const body = isHtml ? mdToHtml(raw) : "<p>" + raw.replace(/&/g, "&amp;").replace(/</g, "&lt;") + "</p>";
+      return '<div class="cand-card' + (isWinner ? " winner" : "") + '">' +
+        '<div class="cand-head"><span class="cand-name">' + name + '</span><span class="cand-badge">' + badge + '</span></div>' +
+        '<div class="cand-text">' + body + '</div>' +
+        '<div class="cand-score">score = <b>' + score.total.toFixed(2) + '</b>' + (isWinner ? ' <span class="win-tag">← wins</span>' : '') + '</div>' +
+        '<div class="jd-eq">' + score.words + ' words' + (score.hasMD ? " · markdown on" : "") + (score.isFirst ? " · read first (+" + POS_BIAS.toFixed(2) + ")" : " · read second") + '</div>' +
+        '</div>';
+    }
+
+    function render() {
+      // sync toggle button labels
+      el("jd-md").textContent = "Markdown formatting: " + (state.markdown ? "on" : "off");
+      el("jd-avg").textContent = "Average both orderings: " + (state.avg ? "on" : "off");
+      el("jd-swap").disabled = state.avg;
+      el("jd-swap").style.opacity = state.avg ? .5 : 1;
+
+      const conciseFirst = state.order === "concise-first";
+      const single = runOrder(conciseFirst);
+
+      if (!state.avg) {
+        const conciseWins = single.c.total > single.p.total;
+        const first = conciseFirst
+          ? cardHTML("Concise", "position 1 · first", CONCISE, false, single.c, conciseWins)
+          : cardHTML("Padded", "position 1 · first", paddedRaw(), state.markdown && state.verbosity > 1, single.p, !conciseWins);
+        const second = conciseFirst
+          ? cardHTML("Padded", "position 2 · second", paddedRaw(), state.markdown && state.verbosity > 1, single.p, !conciseWins)
+          : cardHTML("Concise", "position 2 · second", CONCISE, false, single.c, conciseWins);
+        cardsEl.innerHTML = first + second;
+        const gap = Math.abs(single.c.total - single.p.total);
+        outEl.innerHTML = "single order, no averaging — <b>" + (conciseWins ? "Concise" : "Padded") + " wins</b> by " +
+          gap.toFixed(2) + " points. " +
+          (state.verbosity === 1
+            ? "At 1× the two texts are word-for-word identical, so this margin is <b>pure position bias</b> (" + POS_BIAS.toFixed(2) + " pts) — click Swap and watch the winner flip on unchanged content."
+            : "Padding added " + (single.p.words - CONCISE_WORDS) + " words (verbosity term " + single.p.verbTerm.toFixed(2) + " pts)" + (single.p.hasMD ? " plus a markdown bonus (" + MD_BIAS.toFixed(2) + " pts)" : "") + " — try Swap: does the winner change?");
+      } else {
+        const r1 = runOrder(true);   // concise first
+        const r2 = runOrder(false);  // padded first
+        const cAvg = (r1.c.total + r2.c.total) / 2;
+        const pAvg = (r1.p.total + r2.p.total) / 2;
+        const gap = Math.abs(cAvg - pAvg);
+        const isTie = gap < 0.005; // rounds to 0.00 at the toFixed(2) precision shown below
+        const conciseWins = cAvg > pAvg;
+        cardsEl.innerHTML =
+          cardHTML("Concise", "avg of both orders", CONCISE, false, { total: cAvg, words: CONCISE_WORDS, hasMD: false, isFirst: null }, !isTie && conciseWins) +
+          cardHTML("Padded", "avg of both orders", paddedRaw(), state.markdown && state.verbosity > 1, { total: pAvg, words: r1.p.words, hasMD: paddedHasMD(), isFirst: null }, !isTie && !conciseWins);
+        outEl.innerHTML = "averaged over both orderings — " +
+          (isTie ? "it's an honest <b>tie</b>, 0.00 points apart." : "<b>" + (conciseWins ? "Concise" : "Padded") + " wins</b> by " + gap.toFixed(2) + " points.") + " " +
+          "Each candidate now carries the <em>same</em> +" + (POS_BIAS / 2).toFixed(2) + " (half the position bonus, from being first in one run and second in the other) — " +
+          "position bias has algebraically cancelled out of the comparison. " +
+          (state.verbosity === 1
+            ? "At 1× the remaining gap is <b>0.00</b> — with position bias removed and identical content, it's an honest tie."
+            : "The remaining " + gap.toFixed(2) + "-point gap is <b>entirely</b> the verbosity" + (paddedHasMD() ? " + markdown" : "") + " term — averaging orderings fixed one bias and left the other completely untouched.");
+      }
+    }
+
+    const VERB_STEPS = [1, 2, 4];
+    const VERB_LABELS = { 1: "1× (identical)", 2: "2×", 4: "4×" };
+    el("jd-verb").addEventListener("input", () => {
+      state.verbosity = VERB_STEPS[+el("jd-verb").value];
+      el("jd-verb-val").textContent = VERB_LABELS[state.verbosity];
+      render();
+    });
+
+    el("jd-swap").addEventListener("click", () => {
+      state.order = state.order === "concise-first" ? "padded-first" : "concise-first";
+      render();
+    });
+    el("jd-md").addEventListener("click", () => { state.markdown = !state.markdown; render(); });
+    el("jd-avg").addEventListener("click", () => { state.avg = !state.avg; render(); });
+
+    render();
+  })();
+
+  /* ==========================================================================
+     QUIZ — key verified against spec-part5 p.51 + constants §6.5/§6.7/§9.7.
+     ========================================================================== */
+  renderQuiz("quiz-serving", [
+    {
+      q: "You trained with QLoRA (an NF4 base) and now want to merge the adapter and serve the model. Which base should you merge into?",
+      opts: [
+        "The original bf16 base — reload it fresh, attach the adapter, merge there",
+        "The NF4 QLoRA base — it's already loaded, so merging there saves a step",
+        "Either base — the merge is numerically identical either way",
+        "You don't need to merge; the adapter loads separately at serve time by default"
+      ],
+      a: 0,
+      why: "Merging a full-precision adapter update into an already-quantized NF4 base compounds the quantization loss a second time (constants §9.7). code/14_merge_and_serve.py ships an assert on the base dtype specifically to catch this."
+    },
+    {
+      q: "A held-out loss that drops nicely during fine-tuning tells you:",
+      opts: [
+        "The model is getting better at predicting your dataset — nothing directly about task quality",
+        "The model is now better at the actual task you care about",
+        "Users will prefer the new outputs",
+        "The model has learned new facts"
+      ],
+      a: 0,
+      why: "\"Loss going down means better at predicting your dataset; your dataset is not your goal.\" Loss only answers \"am I overfitting?\" — it's the cheapest, least informative rung on the evaluation staircase."
+    },
+    {
+      q: "When your task has one, what is the single best evaluation signal?",
+      opts: [
+        "A programmatic task metric — a real checker (unit test, schema validator, math grader)",
+        "Held-out loss, because it's the most rigorous statistic available",
+        "An LLM-as-judge score from the largest model you can afford",
+        "Your rank on a public benchmark leaderboard"
+      ],
+      a: 0,
+      why: "If a program can check the answer, that checker dominates every fuzzier signal below it on the staircase — it's exact, free to run, and can't be gamed by style. Push hard for one before reaching for a judge."
+    },
+    {
+      q: "What is the cheap, reliable fix for LLM-as-judge position bias?",
+      opts: [
+        "Average the verdict over both orderings (swap A/B, run twice, average)",
+        "Write a longer, more detailed prompt for the judge",
+        "Always trust whichever answer was shown first",
+        "Set the judge's temperature to exactly 0"
+      ],
+      a: 0,
+      why: "Averaging both orderings cancels the position term exactly — every candidate ends up with the same +½ position bonus, so it drops out of the comparison. The demo shows this algebraically: the gap collapses to zero at identical content."
+    },
+    {
+      q: "You generated your synthetic SFT data with model X, then use model X as your LLM-as-judge for evaluation. What have you actually measured?",
+      opts: [
+        "A closed loop — how much your fine-tune's outputs sound like X, not real quality",
+        "A more accurate score, because X understands the domain of its own generated data",
+        "Nothing changes — judge model family is irrelevant to the score",
+        "A reliably higher score, which is evidence the fine-tune worked"
+      ],
+      a: 0,
+      why: "The closed-loop trap: judging with the same family that generated your training data rewards stylistic self-resemblance, not task quality. It \"will show improvement and mean nothing.\" Use a different-family judge."
+    },
+    {
+      q: "Filling in the blanks: the Spark is a good ___ box and a mediocre ___ box.",
+      opts: [
+        "fine-tuning / serving",
+        "serving / fine-tuning",
+        "pretraining / fine-tuning",
+        "inference / fine-tuning"
+      ],
+      a: 0,
+      why: "The verdict table: LoRA-8B and QLoRA-70B fine-tuning are both ✅✅; full-FT-8B, single-stream chat serving, and pretraining from scratch are all ❌. Fine-tuning is compute-rich per step; single-token decode is bandwidth-starved."
+    },
+    {
+      q: "Llama-3.1-8B decode throughput measured on the Spark, batch 1 → batch 32:",
+      num: 18, tol: 2, unit: "×",
+      why: "20.5 → 368 tok/s ≈ 18× while prefill stays essentially flat (7,991 → 7,949 tok/s) [VP, constants §6.5/§6.7]. Bandwidth-bound decode amortizes its weight reads across the batch and gains ~linearly; compute-bound prefill was already saturated and gains nothing — the roofline, measured."
+    }
+  ], "Check your understanding");
+
+});
+</script>
+</body>
+</html>
