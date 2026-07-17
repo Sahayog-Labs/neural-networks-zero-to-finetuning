@@ -454,6 +454,18 @@ details.deepdive > div { padding: 0 20px 14px; }
   --border: #3a352e; --link: #e08a63; --btn-text: #161514;
   --deep: #c98cb1; --try: #d1954f; --predict: #8ba7c9;
   --radius: 0; --font: Georgia, "Times New Roman", serif;
+  /* ---- canvas & track harmonization (post-ratification touch-up): the pass
+     above never reached the plot plumbing or track rails, which kept the old
+     violet-era cool hues. Canvases stay dark in BOTH themes (ratified rule)
+     but become warm slate — a blackboard inset on the drafting desk — and the
+     grid/tick/label chrome joins the graphite family. LLM rail: dusty steel
+     (muted vs the old sky so it sits on warm graphite); diffusion rail: deep
+     rust, pushed darker/redder so it stops colliding with the terracotta
+     accent. ---- */
+  --bg-canvas: #12100e;
+  --plot-grid: #322d26; --plot-tick: #8d8274;
+  --plot-border: #4a4238; --plot-label: #b7ac9e;
+  --track-llm: #5f96c2; --track-diffusion: #c96e50;
 }
 :root[data-theme="light"] {
   --bg: #f6f0e3; --bg-panel: #fffdf7; --bg-panel2: #efe6d0; --bg-code: #f1e8d4;
@@ -462,7 +474,15 @@ details.deepdive > div { padding: 0 20px 14px; }
   --good: #3e6b57; --bad: #c04a3a; --warn: #8a6a1f;
   --border: #dccfae; --link: #3a5a8a; --btn-text: #fffdf7;
   --deep: #96355f; --try: #a3651c; --predict: #3a5a8a;
+  /* canvases keep the same warm slate in light mode (must out-specific the
+     original light block's #0a0810 above); plot chrome inherits the dark-tuned
+     values since the canvas itself stays dark. Light track rails keep their
+     original ink-blue / burnt-orange — already native to the paper palette. */
+  --bg-canvas: #12100e;
 }
+/* square the canvases themselves — the pass squared .demo but the inner
+   canvas kept its 6px rounding from the base sheet */
+.demo canvas { border-radius: 0; }
 body {
   background-image:
     linear-gradient(rgba(243,239,232,.05) 1px, transparent 1px),
