@@ -435,3 +435,68 @@ details.deepdive > div { padding: 0 20px 14px; }
 }
 .milestone-flag::before { content: "🚩"; }
 .milestone-pct { font-family: var(--mono); color: var(--accent2); font-weight: 700; }
+
+
+/* ==========================================================================
+   FINAL DESIGN PASS — "Engineer's Page" (ratified from design exploration)
+   Dark (default): Charcoal Grid v2 — warm graphite + faint grid, parchment
+   prose, terracotta/moss accents. Light: Paper Grid — cream + grid, pencil-
+   ink blue / red-pen accents. Shared bones both modes: Georgia serif
+   headings, ruled-TOP note cards, square corners, dashed hairlines.
+   Merge note: appended after the original sheet so the whole pass is one
+   clearly-diffable block; no classes renamed, no variables renamed.
+   ========================================================================== */
+:root {
+  --bg: #161514; --bg-panel: #1e1c1a; --bg-panel2: #262320; --bg-code: #100f0e;
+  --text: #f3efe8; --text-dim: #b7ac9e;
+  --accent: #e08a63; --accent2: #97ba8c;
+  --good: #97ba8c; --bad: #e08a63; --warn: #dcbb60;
+  --border: #3a352e; --link: #e08a63; --btn-text: #161514;
+  --deep: #c98cb1; --try: #d1954f; --predict: #8ba7c9;
+  --radius: 0; --font: Georgia, "Times New Roman", serif;
+}
+:root[data-theme="light"] {
+  --bg: #f6f0e3; --bg-panel: #fffdf7; --bg-panel2: #efe6d0; --bg-code: #f1e8d4;
+  --text: #2b2620; --text-dim: #6f6552;
+  --accent: #3a5a8a; --accent2: #c04a3a;
+  --good: #3e6b57; --bad: #c04a3a; --warn: #8a6a1f;
+  --border: #dccfae; --link: #3a5a8a; --btn-text: #fffdf7;
+  --deep: #96355f; --try: #a3651c; --predict: #3a5a8a;
+}
+body {
+  background-image:
+    linear-gradient(rgba(243,239,232,.05) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(243,239,232,.05) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+:root[data-theme="light"] body {
+  background-image:
+    linear-gradient(rgba(58,90,138,.09) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(58,90,138,.09) 1px, transparent 1px);
+}
+h1, h2, h3, h4 { font-family: Georgia, "Times New Roman", serif; }
+h1 { color: #fbf8f2; border-bottom: 3px double var(--border); padding-bottom: 8px; }
+h3 { color: #fbf8f2; }
+:root[data-theme="light"] h1, :root[data-theme="light"] h3 { color: #241f19; }
+h2 { border-bottom: 1px dashed var(--border); }
+.kicker { font-family: var(--mono); letter-spacing: 2.5px; }
+code, pre, .kicker, .tensor-shape, table.ledger td:first-child { font-family: var(--mono); }
+.box { border: 1px dashed var(--border); border-left: none; border-top: 3px solid var(--accent); border-radius: 0; background: var(--bg-panel); }
+.box.rule { border-top-color: var(--accent2); }
+.box.warn { border-top-color: var(--bad); }
+.box.deep { border-top-color: var(--deep); }
+.box.worked { border-top-color: var(--good); }
+.box.try { border-top-color: var(--try); border: 1px dashed var(--try); border-top: 3px solid var(--try); }
+.box.predict { border-top-color: var(--predict); }
+.box.track-llm { border-top-color: var(--track-llm); border-left: none; }
+.box.track-diffusion { border-top-color: var(--track-diffusion); border-left: none; }
+.demo, .card, .codeblock, .quiz, details.deepdive, .milestone, .pager a { border-radius: 0; }
+details.deepdive { border-left: none; border-top: 3px solid var(--deep); }
+.card { border-left: none; border-top: 3px solid var(--border); }
+.card.track-llm { border-top-color: var(--track-llm); border-left: none; }
+.card.track-diffusion { border-top-color: var(--track-diffusion); border-left: none; }
+table.ledger td:first-child { font-style: italic; color: var(--accent2); }
+:root[data-theme="light"] table.ledger td:first-child { font-style: italic; color: var(--accent2); }
+button.btn, .demo button, .quiz button { border-radius: 0; }
+.milestone-flag { border-radius: 0; }
+.track-banner .track-label { border-radius: 0; }
